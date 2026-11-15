@@ -1,0 +1,27 @@
+name: KyokouAuth
+main: moe.ryuu.kyokouauth.bukkit.KyokouAuthPlugin
+version: '${version}'
+description: Microsoft-account login for offline-mode servers. Premium players keep their real UUID; everyone else proves a Microsoft account.
+authors: [Ryuu]
+website: https://github.com/ryuu/kyokouauth
+
+# Floodgate must load first: its presence decides whether Bedrock players are admitted without a
+# second sign-in, and that check runs in the very first login event.
+softdepend: [floodgate, PlaceholderAPI, SkinsRestorer]
+
+# api-version is deliberately absent: the legal range is 1.13-26.3, and writing any value makes
+# 1.8-1.12 refuse to load the plugin.
+
+commands:
+  kyokouauth:
+    description: KyokouAuth administration
+    usage: /kyokouauth <whois|unbind|rename|untrust|status|reload>
+    aliases: [ka, auth]
+    # No `permission:` here on purpose. Bukkit evaluates it before the executor runs, so any value
+    # would refuse the command for every non-admin - and `/kyokouauth link` is a player action, not
+    # an administrative one. The executor performs the check itself for every other subcommand.
+
+permissions:
+  kyokouauth.admin:
+    description: Full access to KyokouAuth administration
+    default: op

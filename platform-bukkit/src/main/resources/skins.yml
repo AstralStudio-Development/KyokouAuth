@@ -1,0 +1,11 @@
+# Optional: a texture URL for players who have no skin from anywhere else.
+#
+# A player who owns Java Edition gets their Mojang skin automatically.
+# A player who has played Bedrock gets their Bedrock skin automatically.
+# A player with neither has no skin, and falls back to what is listed here.
+#
+# Keys are Minecraft names (case-insensitive), values are direct PNG URLs.
+# Ignored entirely when SkinsRestorer is installed, since it manages skins itself.
+#
+# example:
+#   Steve: https://example.com/skins/steve.png

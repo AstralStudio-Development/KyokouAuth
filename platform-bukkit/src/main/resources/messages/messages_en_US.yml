@@ -1,0 +1,73 @@
+login:
+  invalid-name: "<red>That is not a valid Minecraft username."
+  name-taken: "<red>That name does not belong to your Microsoft account.</red><newline><gray>Ask an administrator if you think this is a mistake."
+  premium-name: "<red>That name belongs to a premium account.</red><newline><gray>A premium name has exactly one door: the official launcher's sign-in. There is no other way in.<newline><gray>Sign in with the official launcher and try again."
+  premium-name-claimed: "<red>That name used to be yours, but a premium account has registered it since.</red><newline><newline><gray>Your data is not lost - it belongs to your Microsoft account, not to the name.<newline><gray>Ask an administrator to rename you, and you can join normally."
+  identity-renamed: "<red>Your account has been renamed.</red><newline><gray>Reconnect and try again."
+  directory-unavailable: "<red>Mojang's verification service cannot be reached right now.</red><newline><gray>Try again in a moment."
+  proxy: "<red>This server is misconfigured and cannot authenticate you.</red><newline><gray>Ask an administrator."
+  internal-error: "<red>Something went wrong during login.</red><newline><gray>Ask an administrator."
+  concurrent: "<red>This account is already logging in on another connection.</red><newline><gray>Wait a few seconds and try again."
+  refused-by-plugin: "<red>Another plugin refused your login.</red><newline><gray>Ask an administrator."
+
+limbo:
+  title: "<aqua>Complete your Microsoft sign-in"
+  subtitle: "<gray>Click the link in chat"
+  command-blocked: "<red>You cannot use commands until you have verified."
+
+handshake:
+  not-authenticated: "<red>That name belongs to a premium account.</red><newline><gray>Your client did not complete the Mojang authentication.<newline><gray>Sign in with the official launcher and try again."
+  session-unavailable: "<red>Mojang's session service cannot be reached right now.</red><newline><gray>Try again in a moment."
+  failed: "<red>The login handshake failed.</red><newline><gray>Reconnect and try again."
+
+verification:
+  prompt: "<aqua><bold>Sign in with Microsoft</bold></aqua><newline><newline><gray>Click here to open the Microsoft sign-in page:<newline><click:open_url:'<url>'><u><white><url></white></u></click><newline><newline><gray>If the link does not open, visit <white>microsoft.com/link</white> and enter <yellow><code></yellow><newline><newline><gray>You have <white><minutes></white> minutes."
+  start-failed: "<red>Could not start the Microsoft sign-in.</red><newline><gray>Reconnect and try again."
+  expired: "<red>The sign-in timed out.</red><newline><gray>Reconnect and try again."
+  declined: "<red>You declined the Microsoft sign-in.</red><newline><gray>Reconnect and try again."
+  retry: "<red>Something went wrong during verification.</red><newline><gray>Reconnect and try again."
+  xbox-failed: "<red>This Microsoft account cannot be used.<newline><gray><reason>"
+  name-mismatch: "<red>You connected as <white><claimed></white>,<newline><gray>but your Microsoft account owns <white><proven></white>.<newline><newline><gray>Connect using your own name."
+  refused: "<red>This account cannot claim this name.<newline><gray><reason>"
+  success: "<green>Verified. Welcome back, <white><name></white>."
+  reconnect: "<green>Verified!</green><newline><gray>Reconnect to enter the server."
+
+command:
+  no-permission: "<red>You do not have permission to run this command."
+  usage: "<yellow>/kyokouauth <whois|unbind|rename|untrust|status|reload>"
+  reloaded: "<green>Configuration and messages reloaded."
+  status: "<gray>Storage: <white><dialect></white>  Session: <white><session></white>h  Locale: <white><locale></white>"
+  unknown-name: "<red>No record for <white><name></white>."
+  whois: "<gray>Name: <white><name></white>  UUID: <white><uuid></white><newline><gray>Kind: <white><kind></white>  Subject: <white><subject></white>  Gamertag: <white><gamertag></white>"
+  unbound: "<green>Unbound <white><name></white>. That player must verify again next login."
+  untrusted: "<green>Cleared the trusted session for <white><name></white>."
+  renamed: "<green>Renamed <white><from></white> to <white><to></white>."
+  rename-taken: "<red><white><name></white> is already held by <white><owner></white>."
+  internal-error: "<red>The operation failed. Check the console."
+
+# Console output. It is read by the server owner, so it goes through the same locale files.
+console:
+  enabled: "<green>KyokouAuth enabled</green><gray> (storage: <white><storage></white>)"
+  backend: "<gray>Message backend: <white><backend></white>"
+  pipeline-ok: "<green>Message rendering self-check passed</green><gray> (locale: <white><locale></white>)"
+  storage-migrated: "<gray>Schema migrated to <white>v<version></white>"
+  handshake-installed: "<green>Premium handshake installed on the login pipeline."
+  handshake-unavailable: "<red>Warning: this server exposes no channel hook, so the handshake cannot be installed.</red><newline><gray>A premium name has exactly one door - the handshake - so premium players will not be able to join.<newline><gray>Use a supported Paper version."
+  floodgate-detected: "<green>Floodgate <version> detected: Bedrock players are admitted without a second sign-in, and the premium handshake is installed alongside it."
+  floodgate-broken: "<yellow>Floodgate is installed but its API is unavailable (<error>). Bedrock players will verify like everyone else."
+  link-extension-installed: "<green>Wrote the linking extension into Floodgate's folder.</green><gray>It takes effect after one restart; until then Bedrock players keep their own UUID."
+  link-extension-failed: "<red>Could not write the Floodgate linking extension: <error>"
+  link-extension-config: "<yellow>The linking extension is in place but Floodgate's config blocks it: <problem></yellow><gray><newline>Edit the player-link section of plugins/floodgate/config.yml and restart."
+  placeholderapi-ok: "<green>PlaceholderAPI expansion registered."
+  placeholderapi-failed: "<yellow>PlaceholderAPI is installed but the expansion failed to register: <error>"
+  restriction-skipped: "<gray>This server has no <name> event; that restriction is skipped."
+  restriction-failed: "<yellow>Could not register the <name> listener: <error>"
+  skins-restorer: "<gray>SkinsRestorer detected: leaving skin management to it."
+  database-failed: "<red>Could not open the database: <error>"
+
+  name-claimed: "<yellow>Name conflict: <white><name></white> was bound to a Microsoft player (<detail>), but a Mojang account has since registered that name.<newline><gray>That player cannot fix this themselves - they have no Java Edition to handshake with. Run <white>/kyokouauth rename <name> <new name></white> to rename them.<newline><gray>Their data is unaffected: it belongs to the Microsoft account, not to the name."
+
+  refuse-proxy: "<red>Refusing to start: this server receives forwarded connections.</red><newline><gray>The proxy performs the login handshake, so this server never sees it and every player would be treated as unverified - authentication would fail silently.<newline><gray>Run KyokouAuth on a standalone server, or set safety.require-direct-connections: false."
+  refuse-version: "<red>Refusing to start: this server is older than Minecraft 1.12.</red><newline><gray>Choosing a player's UUID requires AsyncPlayerPreLoginEvent#setPlayerProfile, which first appeared in Paper 1.12.<newline><gray>This server: <server><newline><gray>The only alternative on older versions is Bukkit's name-derived UUID, which breaks two things this plugin exists for: a rename would split the player's data, and the same Microsoft account would be a different player when it joined through Geyser.<newline><gray>Minimum supported version: 1.12."
+  refuse-pipeline: "<red>Refusing to start: this server cannot render messages.</red><newline><gray>Cause: <error><newline><gray>Running anyway would kick every player with an unreadable reason."
+

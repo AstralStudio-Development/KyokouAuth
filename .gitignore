@@ -1,0 +1,18 @@
+# Local test environment. World, logs, plugin jars and the Geyser download are all disposable -
+# nothing under these directories is needed to build or understand the project.
+run-live/
+run-geyser/
+
+build/
+.gradle/
+.kotlin/
+*.iml
+.idea/
+
+# Compiled probe classes. The .java sources are kept; the .class files are build output.
+tools/*.class
+
+# JVM crash dumps and replay logs, if a run dies badly.
+hs_err_pid*.log
+replay_pid*.log
+*.log

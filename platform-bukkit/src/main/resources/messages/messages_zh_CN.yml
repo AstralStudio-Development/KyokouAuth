@@ -1,0 +1,73 @@
+login:
+  invalid-name: "<red>这是一个非法的 Minecraft 用户名。"
+  name-taken: "<red>这个名字不属于你的微软账户。</red><newline><gray>如果你认为这是错误，请联系管理员。"
+  premium-name: "<red>这个名字属于一个正版账号。</red><newline><gray>正版名字只能通过正版启动器登录，没有其他方式。<newline><gray>请用官方启动器登录后重试。"
+  premium-name-claimed: "<red>这个名字原本属于你，但已经被一个正版账号注册了。</red><newline><newline><gray>你的存档、背包和权限都没有丢——它们绑定在你的微软账户上，不绑定名字。<newline><gray>请联系管理员，用改名指令给你换一个名字后即可正常进服。"
+  identity-renamed: "<red>你的账户已经被改名。</red><newline><gray>请重新连接后再试一次。"
+  directory-unavailable: "<red>暂时无法连接到 Mojang 验证服务。</red><newline><gray>请稍后重试。"
+  proxy: "<red>服务器配置有误，无法完成认证。</red><newline><gray>请联系管理员。"
+  internal-error: "<red>登录时发生内部错误。</red><newline><gray>请联系管理员。"
+  concurrent: "<red>这个账号正在另一个连接上登录。</red><newline><gray>请等待几秒钟后重试。"
+  refused-by-plugin: "<red>另一个插件拒绝了你的登录。</red><newline><gray>请联系管理员。"
+
+limbo:
+  title: "<aqua>请完成微软验证"
+  subtitle: "<gray>点击聊天栏中的链接"
+  command-blocked: "<red>完成验证前不能使用命令。"
+
+handshake:
+  not-authenticated: "<red>这个名字属于一个正版账号。</red><newline><gray>你的客户端没有完成正版验证。<newline><gray>请使用正版启动器登录后重试。"
+  session-unavailable: "<red>暂时无法连接 Mojang 验证服务。</red><newline><gray>请稍后重试。"
+  failed: "<red>登录握手失败。</red><newline><gray>请重新连接后重试。"
+
+verification:
+  prompt: "<aqua><bold>请完成微软账户验证</bold></aqua><newline><newline><gray>点击这里打开微软登录页：<newline><click:open_url:'<url>'><u><white><url></white></u></click><newline><newline><gray>如果链接打不开，请访问 <white>microsoft.com/link</white> 并输入代码 <yellow><code></yellow><newline><newline><gray>你有 <white><minutes></white> 分钟完成验证。"
+  start-failed: "<red>无法启动微软登录流程。</red><newline><gray>请重新连接后重试。"
+  expired: "<red>验证超时。</red><newline><gray>请重新连接后重试。"
+  declined: "<red>你取消了微软登录。</red><newline><gray>请重新连接后重试。"
+  retry: "<red>验证过程中出现错误。</red><newline><gray>请重新连接后重试。"
+  xbox-failed: "<red>无法使用该微软账户。<newline><gray><reason>"
+  name-mismatch: "<red>你登录时使用的名字是 <white><claimed></white>，<newline><gray>但你的微软账户拥有的是 <white><proven></white>。<newline><newline><gray>请用你自己的名字连接。"
+  refused: "<red>这个账户无法绑定这个名字。<newline><gray><reason>"
+  success: "<green>验证成功，欢迎回来，<white><name></white>。"
+  reconnect: "<green>验证成功！</green><newline><gray>请重新连接以进入服务器。"
+
+command:
+  no-permission: "<red>你没有权限执行这个命令。"
+  usage: "<yellow>/kyokouauth <whois|unbind|rename|untrust|status|reload>"
+  reloaded: "<green>配置与语言文件已重新加载。"
+  status: "<gray>存储：<white><dialect></white>　会话：<white><session></white> 小时　语言：<white><locale></white>"
+  unknown-name: "<red>没有找到名为 <white><name></white> 的记录。"
+  whois: "<gray>名字：<white><name></white>　UUID：<white><uuid></white><newline><gray>类型：<white><kind></white>　标识：<white><subject></white>　玩家代号：<white><gamertag></white>"
+  unbound: "<green>已解除 <white><name></white> 的绑定，该玩家下次进服需要重新验证。"
+  untrusted: "<green>已清除 <white><name></white> 的可信会话，下次进服需要重新验证。"
+  renamed: "<green>已把 <white><from></white> 改名为 <white><to></white>。"
+  rename-taken: "<red>名字 <white><name></white> 已经被 <white><owner></white> 占用。"
+  internal-error: "<red>操作失败，请查看控制台。"
+
+# 控制台提示。这些是给服务器主人看的，所以同样走语言文件。
+console:
+  enabled: "<green>KyokouAuth 已启用</green><gray>（存储：<white><storage></white>）"
+  backend: "<gray>消息后端：<white><backend></white>"
+  pipeline-ok: "<green>消息渲染自检通过</green><gray>（语言：<white><locale></white>）"
+  storage-migrated: "<gray>数据库结构已升级到 <white>v<version></white>"
+  handshake-installed: "<green>正版握手已装载到登录管线。"
+  handshake-unavailable: "<red>警告：本服务端没有提供通道钩子，正版握手装不上。</red><newline><gray>正版名字只能通过握手进入，因此正版玩家将无法进服。<newline><gray>请换用受支持的 Paper 版本。"
+  floodgate-detected: "<green>检测到 Floodgate <version>：基岩版玩家免于二次验证，正版握手照常装载，两者互不干扰。"
+  floodgate-broken: "<yellow>检测到 Floodgate，但其 API 不可用（<error>）。基岩版玩家将和其他人一样验证。"
+  link-extension-installed: "<green>已把关联扩展写入 Floodgate 目录。</green><gray>重启一次服务器后生效，之后基岩版玩家才会使用其关联的 Java 身份。"
+  link-extension-failed: "<red>无法写入 Floodgate 关联扩展：<error>"
+  link-extension-config: "<yellow>关联扩展已就位，但 Floodgate 配置挡住它：<problem></yellow><gray><newline>请在 plugins/floodgate/config.yml 的 player-link 段修改后重启。"
+  placeholderapi-ok: "<green>PlaceholderAPI 变量已注册。"
+  placeholderapi-failed: "<yellow>PlaceholderAPI 已安装，但变量注册失败：<error>"
+  restriction-skipped: "<gray>本服务端没有 <name> 事件，该项限制将被跳过。"
+  restriction-failed: "<yellow>无法注册 <name> 监听器：<error>"
+  skins-restorer: "<gray>检测到 SkinsRestorer：皮肤交给它管理。"
+  database-failed: "<red>无法打开数据库：<error>"
+
+  name-claimed: "<yellow>名字冲突：<white><name></white> 原本绑定给一位微软玩家（<detail>），但该名字现在已被 Mojang 的正版账号注册。<newline><gray>这位玩家自己无法解决——他没有 Java 版可用来握手。请执行 <white>/kyokouauth rename <name> <新名字></white> 为他改名。<newline><gray>他的存档不受影响：数据绑定在微软账户上，不在名字上。"
+
+  refuse-proxy: "<red>服务器处于代理后端，拒绝启动。</red><newline><gray>代理会接管登录握手，本服看不到它，因此所有玩家都会被当成未验证——认证会静默失效。<newline><gray>请把 KyokouAuth 装在独立服务器上，或设置 safety.require-direct-connections: false。"
+  refuse-version: "<red>本服务端低于 Minecraft 1.12，拒绝启动。</red><newline><gray>指定玩家 UUID 需要 AsyncPlayerPreLoginEvent#setPlayerProfile，它从 Paper 1.12 开始提供。<newline><gray>当前服务端：<server><newline><gray>在更老的版本上唯一的替代是 Bukkit 的名字派生 UUID，而它会破坏两件本插件赖以存在的事：改名会导致玩家数据分裂，且同一个微软账户从 Geyser 进来会变成另一个玩家。<newline><gray>最低支持版本：1.12。"
+  refuse-pipeline: "<red>本服务端无法渲染消息，拒绝启动。</red><newline><gray>原因：<error><newline><gray>继续运行的话，每个玩家都会被踢出且看不到原因。"
+

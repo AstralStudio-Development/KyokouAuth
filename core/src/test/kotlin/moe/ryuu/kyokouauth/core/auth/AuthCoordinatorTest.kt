@@ -1,0 +1,288 @@
+package moe.ryuu.kyokouauth.core.auth
+
+import moe.ryuu.kyokouauth.core.identity.GameName
+import moe.ryuu.kyokouauth.core.identity.Identity
+import moe.ryuu.kyokouauth.core.identity.Xuid
+import moe.ryuu.kyokouauth.core.storage.Database
+import moe.ryuu.kyokouauth.core.storage.DatabaseDescriptor
+import moe.ryuu.kyokouauth.core.storage.Dialect
+import moe.ryuu.kyokouauth.core.storage.IdentityRepository
+import moe.ryuu.kyokouauth.core.storage.SessionRepository
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import java.io.File
+import java.nio.file.Files
+import java.util.UUID
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
+
+/**
+ * The login rules, exercised without a server and without a network.
+ *
+ * Every test here names a way a player could get in without proving who they say they are. A change
+ * that makes one of them pass for the wrong reason is a security regression, not a style issue.
+ */
+class AuthCoordinatorTest {
+
+    private lateinit var directory: File
+    private lateinit var database: Database
+    private lateinit var identities: IdentityRepository
+    private lateinit var sessions: SessionRepository
+    private lateinit var coordinator: AuthCoordinator
+
+    private var now = 1_000_000L
+
+    /** What Mojang will claim this test. Flipped per test rather than mocked per call. */
+    private var premiumNames: MutableSet<String> = mutableSetOf()
+
+    /** When true, the directory reports an outage instead of an answer. */
+    private var directoryDown = false
+
+    @BeforeEach
+    fun setUp() {
+        directory = Files.createTempDirectory("kyokouauth-auth").toFile()
+        database = Database(
+            DatabaseDescriptor(dialect = Dialect.SQLITE, database = File(directory, "test.db").absolutePath),
+        )
+        identities = IdentityRepository(database)
+        sessions = SessionRepository(database)
+        coordinator = AuthCoordinator(
+            identities = identities,
+            sessions = sessions,
+            clock = { now },
+            sessionMillis = 60_000L,
+            directory = { key ->
+                if (directoryDown) {
+                    MojangDirectory.Lookup.Failed("simulated outage")
+                } else if (key in premiumNames) {
+                    MojangDirectory.Lookup.Premium(
+                        UUID.nameUUIDFromBytes(("premium:" + key).toByteArray(Charsets.UTF_8)),
+                        key,
+                    )
+                } else {
+                    MojangDirectory.Lookup.Free
+                }
+            },
+        )
+    }
+
+    @AfterEach
+    fun tearDown() {
+        database.close()
+        directory.deleteRecursively()
+    }
+
+    private fun name(raw: String) = GameName.parseOrThrow(raw)
+
+    @Test
+    fun `an unknown free name enters verification as a first bind`() {
+        val decision = coordinator.decide(name("Steve"), "10.0.0.1")
+
+        val verify = assertIs<AuthCoordinator.Decision.Verify>(decision)
+        assertEquals(AuthCoordinator.Reason.FIRST_BIND, verify.reason)
+        assertEquals(true, verify.provisional)
+        assertEquals(AuthCoordinator.provisionalUuid(name("Steve")), verify.uuid)
+    }
+
+    @Test
+    fun `a premium name is refused outright, never offered a second path`() {
+        premiumNames += "notch"
+
+        val decision = coordinator.decide(name("Notch"), "10.0.0.1")
+
+        // The Mojang handshake is the only door for a premium name. Reaching `decide` at all means
+        // that handshake did not happen for this connection, so there is nothing left to try -
+        // falling through to a device code would let an offline client sit under someone else's name.
+        val reject = assertIs<AuthCoordinator.Decision.Reject>(decision)
+        assertEquals(AuthCoordinator.RejectReason.PREMIUM_NAME, reject.reason)
+    }
+
+    @Test
+    fun `a bound name that becomes premium is refused before the session is even consulted`() {
+        coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        coordinator.grantSession(Identity.ofXuid(Xuid(1001L)), "10.0.0.1")
+
+        // Someone buys the game and takes this name.
+        premiumNames += "steve"
+
+        val reject = assertIs<AuthCoordinator.Decision.Reject>(coordinator.decide(name("Steve"), "10.0.0.1"))
+        assertEquals(AuthCoordinator.RejectReason.PREMIUM_NAME_CLAIMED, reject.reason)
+    }
+
+    @Test
+    fun `a directory outage refuses the login instead of assuming the name is free`() {
+        directoryDown = true
+
+        val decision = coordinator.decide(name("Steve"), "10.0.0.1")
+
+        val reject = assertIs<AuthCoordinator.Decision.Reject>(decision)
+        assertEquals(AuthCoordinator.RejectReason.DIRECTORY_UNAVAILABLE, reject.reason)
+    }
+
+    @Test
+    fun `a bound player with a live session from the same address is admitted`() {
+        assertIs<AuthCoordinator.ClaimOutcome.Bound>(
+            coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT"),
+        )
+
+        val decision = coordinator.decide(name("Steve"), "10.0.0.1")
+        assertIs<AuthCoordinator.Decision.Verify>(decision)
+
+        // The bind itself does not grant trust; only a completed verification does.
+        coordinator.grantSession(Identity.ofXuid(Xuid(1001L)), "10.0.0.1")
+
+        val admitted = assertIs<AuthCoordinator.Decision.Admit>(coordinator.decide(name("Steve"), "10.0.0.1"))
+        assertEquals(Identity.ofXuid(Xuid(1001L)), admitted.identity.uuid)
+    }
+
+    @Test
+    fun `the same address after the session expires must verify again`() {
+        coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        coordinator.grantSession(Identity.ofXuid(Xuid(1001L)), "10.0.0.1")
+
+        now += 60_001L
+
+        val decision = assertIs<AuthCoordinator.Decision.Verify>(coordinator.decide(name("Steve"), "10.0.0.1"))
+        assertEquals(AuthCoordinator.Reason.SESSION_EXPIRED, decision.reason)
+        assertEquals(false, decision.provisional)
+    }
+
+    @Test
+    fun `the same player from a different address must verify again`() {
+        coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        coordinator.grantSession(Identity.ofXuid(Xuid(1001L)), "10.0.0.1")
+
+        val decision = assertIs<AuthCoordinator.Decision.Verify>(coordinator.decide(name("Steve"), "10.0.0.2"))
+        assertEquals(AuthCoordinator.Reason.SESSION_EXPIRED, decision.reason)
+    }
+
+    @Test
+    fun `a bound name that later becomes a mojang name loses its binding`() {
+        coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        coordinator.grantSession(Identity.ofXuid(Xuid(1001L)), "10.0.0.1")
+
+        // Someone buys the game and takes this name.
+        premiumNames += "steve"
+
+        val decision = coordinator.decide(name("Steve"), "10.0.0.1")
+        val reject = assertIs<AuthCoordinator.Decision.Reject>(decision)
+
+        // Deliberately a *different* reason from an unknown premium name: this one is an incident the
+        // operator has to resolve, and the rejection detail has to name the affected identity.
+        assertEquals(AuthCoordinator.RejectReason.PREMIUM_NAME_CLAIMED, reject.reason)
+        assertTrue(reject.detail.contains("xuid=1001"), "the operator needs the affected XUID: ${reject.detail}")
+    }
+
+    @Test
+    fun `an xuid cannot bind a name mojang owns`() {
+        premiumNames += "notch"
+
+        val outcome = coordinator.bindMicrosoft(name("Notch"), Xuid(1001L), "NotchGT")
+
+        val refused = assertIs<AuthCoordinator.ClaimOutcome.Refused>(outcome)
+        assertEquals(AuthCoordinator.RejectReason.NAME_TAKEN, refused.reason)
+    }
+
+    @Test
+    fun `an xuid cannot bind a name during a directory outage`() {
+        directoryDown = true
+
+        val outcome = coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+
+        val refused = assertIs<AuthCoordinator.ClaimOutcome.Refused>(outcome)
+        assertEquals(AuthCoordinator.RejectReason.DIRECTORY_UNAVAILABLE, refused.reason)
+    }
+
+    @Test
+    fun `a second xuid cannot take a bound name`() {
+        assertIs<AuthCoordinator.ClaimOutcome.Bound>(
+            coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT"),
+        )
+
+        val outcome = coordinator.bindMicrosoft(name("Steve"), Xuid(2002L), "Attacker")
+        val refused = assertIs<AuthCoordinator.ClaimOutcome.Refused>(outcome)
+        assertEquals(AuthCoordinator.RejectReason.NAME_TAKEN, refused.reason)
+    }
+
+    @Test
+    fun `one xuid cannot accumulate a second name`() {
+        assertIs<AuthCoordinator.ClaimOutcome.Bound>(
+            coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT"),
+        )
+
+        val outcome = coordinator.bindMicrosoft(name("Alex"), Xuid(1001L), "SteveGT")
+        val refused = assertIs<AuthCoordinator.ClaimOutcome.Refused>(outcome)
+        assertEquals(AuthCoordinator.RejectReason.IDENTITY_RENAMED, refused.reason)
+    }
+
+    @Test
+    fun `revoking a session forces verification again`() {
+        coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        coordinator.grantSession(Identity.ofXuid(Xuid(1001L)), "10.0.0.1")
+        coordinator.revokeSession(Identity.ofXuid(Xuid(1001L)))
+
+        val decision = assertIs<AuthCoordinator.Decision.Verify>(coordinator.decide(name("Steve"), "10.0.0.1"))
+        assertEquals(AuthCoordinator.Reason.SESSION_EXPIRED, decision.reason)
+    }
+
+    @Test
+    fun `a session is not granted when sessions are disabled`() {
+        val disabled = AuthCoordinator(
+            identities = identities,
+            sessions = sessions,
+            clock = { now },
+            sessionMillis = 0L,
+            directory = { MojangDirectory.Lookup.Free },
+        )
+        disabled.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        disabled.grantSession(Identity.ofXuid(Xuid(1001L)), "10.0.0.1")
+
+        val decision = assertIs<AuthCoordinator.Decision.Verify>(disabled.decide(name("Steve"), "10.0.0.1"))
+        assertEquals(AuthCoordinator.Reason.SESSION_EXPIRED, decision.reason)
+    }
+
+    @Test
+    fun `a premium bind keeps the mojang uuid rather than deriving one`() {
+        val mojangUuid = UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5")
+
+        val outcome = coordinator.bindPremium(mojangUuid, name("Notch"))
+
+        val bound = assertIs<AuthCoordinator.ClaimOutcome.Bound>(outcome)
+        assertEquals(mojangUuid, bound.record.uuid)
+    }
+
+    @Test
+    fun `a premium player who renames is followed, not locked out`() {
+        val mojangUuid = UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5")
+        assertIs<AuthCoordinator.ClaimOutcome.Bound>(coordinator.bindPremium(mojangUuid, name("OldName")))
+
+        // They changed their Mojang name and the handshake now reports the new one. Refusing here
+        // would lock them out of their own account and freeze the old name forever.
+        val outcome = coordinator.bindPremium(mojangUuid, name("NewName"))
+
+        val bound = assertIs<AuthCoordinator.ClaimOutcome.Bound>(outcome)
+        assertEquals(name("NewName"), bound.record.name)
+        assertEquals(mojangUuid, bound.record.uuid, "a rename must not change the UUID")
+        assertEquals(mojangUuid, coordinator.decide(name("NewName"), "10.0.0.1").let {
+            when (it) {
+                is AuthCoordinator.Decision.Verify -> it.uuid
+                is AuthCoordinator.Decision.Admit -> it.identity.uuid
+                else -> null
+            }
+        })
+    }
+
+    @Test
+    fun `the old name is released after a premium rename`() {
+        val mojangUuid = UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5")
+        coordinator.bindPremium(mojangUuid, name("OldName"))
+        coordinator.bindPremium(mojangUuid, name("NewName"))
+
+        // The name row held the primary key; if the rename did not move it, this name would be
+        // permanently unusable by anyone - including its former owner if they renamed back.
+        val freedForAnother = coordinator.bindMicrosoft(name("OldName"), Xuid(5555L), "OtherGT")
+        assertIs<AuthCoordinator.ClaimOutcome.Bound>(freedForAnother)
+    }
+}
