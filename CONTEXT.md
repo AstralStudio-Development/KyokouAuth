@@ -6,6 +6,7 @@
 
 - `core` 保留认证/身份与存储规则；`proxy-common` 共享连接级访问控制、微软验证会话、限流、配置/消息及管理命令。Velocity 与 Bungee 只适配各自事件、profile、组件和后端连接。
 - Limbo 按协议 767～777 支持 1.21～26.3 正式版；固定 MCProtocolLib 的协议实现独立重定位，普通依赖共享，文本只分三族，Netty 4.2 由平台代理提供。稀疏 Codec/ID/原厂 factory 在构建期生成；仅对 Limbo 图删除未用成员，不携带完整 SDK 或运行时下载协议库。`limbo-api` 公共模型不携带库类型；完整平台 JAR 的构建硬上限为20MiB，目标10MiB。
+- Limbo 子模块物理目录均在 `limbo/` 下：`api`、`runtime`、`text/{legacy,json,nbt}`、`protocols/{767..777}`；共享源码仍为 `engine-src`。Gradle逻辑project ID不变，生成路径取项目layout，裁剪协议取生成manifest而非目录名。
 - Velocity 身份使用 modern HMAC 转发；Bungee 使用进程内 authority 原子兑换的短时一次性票据，绑定 exact 连接、身份与目标协议。未认证连接的任何失败/fallback/切服都不能进入真实后端。
 - 验证标题仅在 challenge ready 后显示一次，结束/重启时清理；点击链接仍为完整富文本。后端实际协议兼容与尚未发布的未来版本不在自动兼容承诺内。
 

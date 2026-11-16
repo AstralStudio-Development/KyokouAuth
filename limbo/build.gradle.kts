@@ -58,7 +58,9 @@ tasks.shadowJar {
 }
 
 val slimJar = layout.buildDirectory.file("libs/${project.name}-${project.version}-${if (prototype == null) "isolated" else "prototype-isolated"}.jar")
-val generatedRules = selectedProtocols.map { rootProject.file("limbo-protocol-$it/build/generated/limbo-codec/keep-rules.pro") }
+val generatedRules = selectedProtocols.map {
+    project(":limbo-protocol-$it").layout.buildDirectory.file("generated/limbo-codec/keep-rules.pro")
+}
 val javaLauncher = javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) }
 
 // A read-only preparation command, used once when deliberately pinning/updating the build tool.
@@ -88,7 +90,7 @@ val shrinkLimbo by tasks.registering(Exec::class) {
             "--java-home", javaLauncher.get().metadata.installationPath.asFile.absolutePath,
             "--rules", rootProject.file("limbo/shrink-rules.pro").absolutePath)
         arguments.addAll(listOf("--rules", rootProject.file("tools/limbo-exporter-keep.pro").absolutePath))
-        generatedRules.forEach { arguments.addAll(listOf("--rules", it.absolutePath)) }
+        generatedRules.forEach { arguments.addAll(listOf("--rules", it.get().asFile.absolutePath)) }
         shrinkerLibraries.files.forEach { arguments.addAll(listOf("--library", it.absolutePath)) }
         val kotlinRuntime = shrinkerLibraries.files.single { it.name == "kotlin-stdlib-2.4.21.jar" }
         arguments.addAll(listOf("--bundle-library", kotlinRuntime.absolutePath))

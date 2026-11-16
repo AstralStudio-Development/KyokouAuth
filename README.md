@@ -113,7 +113,7 @@ verification:
 ./gradlew build
 ```
 
-产物分别在 `platform-velocity/build/libs/` 与 `platform-bungee/build/libs/`。每个平台包含全部11个协议；当前验收产物 Velocity **10,050,745B（9.59MiB）**、Bungee **10,062,268B（9.60MiB）**，不外置下载协议依赖，也不打包 Mojang 游戏 JAR。模块：
+产物分别在 `platform-velocity/build/libs/` 与 `platform-bungee/build/libs/`。每个平台包含全部11个协议；当前验收产物 Velocity **9,637,242B（9.19MiB）**、Bungee **9,648,765B（9.20MiB）**，不外置下载协议依赖，也不打包 Mojang 游戏 JAR。模块：
 
 | 模块 | 内容 |
 |---|---|
@@ -126,6 +126,19 @@ verification:
 | `proxy-common` | 共享认证接线、验证会话、配置/消息和管理命令业务 |
 | `platform-velocity` | Velocity 原生事件、profile、组件和命令适配 |
 | `platform-bungee` | Bungee 原生事件、profile bridge、私有入场票据与命令适配 |
+
+Limbo 的物理目录统一收拢，Gradle 逻辑 project ID 保持兼容（例如 `:limbo-protocol-767:test`），不额外创建空的聚合项目：
+
+```text
+limbo/
+  api/                    # limbo-api
+  runtime/                # limbo-runtime
+  text/{legacy,json,nbt}/  # 三文本族
+  protocols/{767..777}/    # 十一个版本实现及fixture
+  engine-src/             # 共享协议源码与测试
+  codec-generator/        # 构建期生成器
+  src/                    # 统一入口
+```
 
 ## 文档
 

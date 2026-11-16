@@ -17,6 +17,7 @@
 
 原来的手写协议实现已整体替换为 MCProtocolLib。各协议使用独立固定版本库和命名空间，避免 Gradle 冲突解析把多个版本合并为最新版；原有 26.3-4 属于 777 Engine。LimboAPI 与桌面 Narcissus 只作本地参考，不复制源码、不引入插件依赖。
 
+- Limbo 子模块集中在 `limbo/api`、`limbo/runtime`、`limbo/text/*`、`limbo/protocols/<id>`，共享源码和生成器也留在 `limbo` 内；通过settings的projectDir映射保持逻辑任务名不变，不增加空聚合项目。生成keep按manifest协议重定位，不依赖旧物理目录名。
 - 支持 767～777 共 11 个协议，即 1.21～26.3 正式版，不自动支持未来版本/快照。每个 Engine 使用对应官方注册表与来源/校验和；配置阶段协商 known packs 后仍发送完整 registry 与 tags，不跨版本复用 777 数据。
 - MCProtocolLib 提供编解码、NBT 文本与网络传输；本项目管理可信代理身份、共享生命周期和空世界。此前把11份整栈逐版本重定位导致每包123MiB，已撤销该打包决策：协议实现仍隔离，普通依赖只一份，Adventure按767～769/770～775/776～777三个文本族共享；Netty 4.2 compileOnly使用已验证平台提供的实现，Engine只拥有/关闭自己的NIO groups。公共 Interface仍只使用JDK/自有模型。
 - 构建期以固定上游源码和完整 registry 校验生成明确ID、原厂factory及keep清单；生产只用稀疏Codec，不携带完整MinecraftCodec或客户端认证监听器。不手写framing/NBT/包字段，不运行时下载协议库。

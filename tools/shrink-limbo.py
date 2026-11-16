@@ -11,6 +11,16 @@ import subprocess
 import zipfile
 
 
+# These belong solely to the removed MCPL default server listener, not our versioned snapshots.
+REMOVED_DEFAULT_RESOURCES = frozenset(("networkCodec.nbt", "networkTags.nbt"))
+
+
+def verify_resource_pruning(class_name, data):
+    for name in REMOVED_DEFAULT_RESOURCES:
+        if name.encode("ascii") in data:
+            raise RuntimeError(f"Cannot prune still-referenced default resource {name}: {class_name}")
+
+
 def sha256(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -22,10 +32,15 @@ def argument(value):
 
 def relocated_rules(path):
     content = path.read_text(encoding="utf-8")
-    module = next((part for part in path.parts if re.fullmatch(r"limbo-protocol-\d+", part)), None)
-    if module is None:
+    if path.name != "keep-rules.pro":
         return content
-    protocol = int(module.rsplit("-", 1)[1])
+    manifests = sorted((path.parent / "resources/limbo").glob("codec-*.json"))
+    if len(manifests) != 1:
+        raise ValueError(f"Generated keep rules require exactly one adjacent codec manifest: {path}")
+    metadata = json.loads(manifests[0].read_text(encoding="utf-8"))
+    protocol = metadata.get("protocol")
+    if type(protocol) is not int or protocol not in range(767, 778) or manifests[0].name != f"codec-{protocol}.json":
+        raise ValueError(f"Invalid protocol identity in generated codec manifest: {manifests[0]}")
     family = "legacy" if protocol <= 769 else "json" if protocol <= 775 else "nbt"
     base = f"moe.ryuu.kyokouauth.limbo.engine.p{protocol}"
     content = content.replace("moe.ryuu.kyokouauth.limbo.session", base + ".session")
@@ -94,12 +109,14 @@ def main():
         seen = set()
         for entry in code.infolist():
             if entry.filename.endswith(".class"):
-                output.writestr(entry.filename, code.read(entry))
+                data = code.read(entry)
+                verify_resource_pruning(entry.filename, data)
+                output.writestr(entry.filename, data)
                 seen.add(entry.filename)
                 class_count += 1
         for entry in source.infolist():
             name = entry.filename
-            if name in seen or name.endswith((".class", ".kotlin_module")) or name.endswith("/"):
+            if name in seen or name in REMOVED_DEFAULT_RESOURCES or name.endswith((".class", ".kotlin_module")) or name.endswith("/"):
                 continue
             if re.fullmatch(r"META-INF/[^/]+\.(SF|DSA|RSA)", name, re.IGNORECASE):
                 continue

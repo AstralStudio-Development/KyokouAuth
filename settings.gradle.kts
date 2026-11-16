@@ -13,6 +13,15 @@ dependencyResolutionManagement {
     }
 }
 
-include("core", "limbo-api", "limbo", "proxy-common", "platform-velocity", "platform-bungee")
-(767..777).forEach { include("limbo-protocol-$it") }
-include("limbo-runtime", "limbo-text-legacy", "limbo-text-json", "limbo-text-nbt")
+include("core", "limbo", "proxy-common", "platform-velocity", "platform-bungee")
+
+// Stable logical project IDs keep commands/dependencies compatible; all Limbo implementation
+// projects live together physically, without extra empty Gradle aggregator projects.
+fun includeLimbo(name: String, directory: String) {
+    include(name)
+    project(":$name").projectDir = file("limbo/$directory")
+}
+includeLimbo("limbo-api", "api")
+includeLimbo("limbo-runtime", "runtime")
+(767..777).forEach { includeLimbo("limbo-protocol-$it", "protocols/$it") }
+listOf("legacy", "json", "nbt").forEach { includeLimbo("limbo-text-$it", "text/$it") }

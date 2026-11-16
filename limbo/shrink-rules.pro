@@ -18,9 +18,9 @@
 -keep interface moe.ryuu.kyokouauth.limbo.engine.p*.libs.org.geysermc.mcprotocollib.network.codec.PacketCodecHelper { *; }
 -keep interface moe.ryuu.kyokouauth.limbo.text.*.net.kyori.adventure.key.Key { public static *** key(java.lang.String); }
 
-# Three small shared text runtimes keep their public/generic/sealed contracts intact.
-# This does not retain a per-protocol SDK: the eleven MCPL graphs are still member-shrunk.
--keep class moe.ryuu.kyokouauth.limbo.text.** { *; }
+# Preserve every text type and its generic/sealed hierarchy, without retaining unrelated members.
+# Actual serializer/provider entry points and reflective TypeToken contracts are pinned separately.
+-keep class moe.ryuu.kyokouauth.limbo.text.**
 -keep class moe.ryuu.kyokouauth.limbo.shared.com.google.gson.reflect.TypeToken { *; }
 -keep class * extends moe.ryuu.kyokouauth.limbo.shared.com.google.gson.reflect.TypeToken { *; }
 

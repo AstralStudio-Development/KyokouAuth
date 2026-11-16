@@ -134,7 +134,7 @@ def extract(protocol):
                 elif pid == cids.get('ClientboundKeepAlivePacket'):
                     packet(sock,sids['ServerboundKeepAlivePacket'],body.read())
         fixture = b''.join(frames)
-        dest = ROOT/f'limbo-protocol-{protocol}/src/main/resources/limbo'
+        dest = ROOT/'limbo'/'protocols'/str(protocol)/'src/main/resources/limbo'
         dest.mkdir(parents=True,exist_ok=True)
         (dest/f'configuration-{protocol}.bin').write_bytes(fixture)
         metadata = {

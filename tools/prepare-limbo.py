@@ -68,7 +68,7 @@ def mcpl(protocol):
         'dependency-overrides':({'adventure-text-serializer-gson':'4.25.0','adventure-text-serializer-json-legacy-impl':'4.25.0'} if protocol in (770,771,772) else {})}
     content = json.dumps(record,indent=2)+'\n'
     (dest/'provenance.json').write_text(content,encoding='utf-8')
-    delivery = ROOT/f'limbo-protocol-{protocol}/src/main/resources/limbo'
+    delivery = ROOT/'limbo'/'protocols'/str(protocol)/'src/main/resources/limbo'
     delivery.mkdir(parents=True,exist_ok=True)
     (delivery/f'mcpl-{protocol}.json').write_text(content,encoding='utf-8')
     print(f'PINNED protocol={protocol} version={fixed} license=MIT codec-verified=true',flush=True)
