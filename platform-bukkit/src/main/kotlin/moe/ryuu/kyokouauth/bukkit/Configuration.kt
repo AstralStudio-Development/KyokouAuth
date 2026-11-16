@@ -56,8 +56,17 @@ class Configuration(
      */
     val librariesFolder: File = File(serverRoot.absoluteFile, "libraries").normalize()
 
-    /** How long a verified login stays trusted on the same address. `0` disables session reuse. */
+    /** How long a verified login stays trusted. `0` disables session reuse. */
     val sessionHours: Long = root.getLong("session.hours", 12L)
+
+    /**
+     * Whether a session only counts from the address that earned it.
+     *
+     * On by default: a session that follows the player to a new address is one an attacker can
+     * inherit. Turn it off when every player shares one address behind NAT or a tunnel, where the
+     * check stops distinguishing anyone and only forces repeated verification.
+     */
+    val sessionBindsAddress: Boolean = root.getBoolean("session.bind-address", true)
 
     /** How long the player has to finish the Microsoft sign-in before the code expires. */
     val verificationTimeoutSeconds: Int = root.getInt("verification.timeout-seconds", 300)
@@ -70,10 +79,20 @@ class Configuration(
         titleEnabled = root.getBoolean("limbo.show-title", true),
         bossBarEnabled = root.getBoolean("limbo.show-bossbar", true),
         blindfold = root.getBoolean("limbo.blind", false),
+        hidePlayers = root.getBoolean("limbo.hide-players", true),
+        spawn = root.getConfigurationSection("limbo.spawn")?.let { section ->
+            section.getString("world")?.takeIf { it.isNotBlank() }?.let { world ->
+                SpawnPoint(
+                    world = world,
+                    x = section.getDouble("x", 0.5),
+                    y = section.getDouble("y", 64.0),
+                    z = section.getDouble("z", 0.5),
+                    yaw = section.getDouble("yaw", 0.0).toFloat(),
+                    pitch = section.getDouble("pitch", 0.0).toFloat(),
+                )
+            }
+        },
     )
-
-    /** A player who is already bound may not be renamed by the client. Re-grant the right name. */
-    val enforceBoundName: Boolean = root.getBoolean("enforce-bound-name", true)
 
     /**
      * Where the handshake asks Mojang to confirm a session.
@@ -99,7 +118,25 @@ class Configuration(
     /** Refuse to start when the server is behind a proxy, because the handshake cannot work there. */
     val requireDirectConnections: Boolean = root.getBoolean("safety.require-direct-connections", true)
 
+    /**
+     * How many login attempts one address may make per minute.
+     *
+     * Guards the Mojang lookup budget rather than the account: a client that reconnects in a loop
+     * can spend the whole 600-per-ten-minutes allowance, and the budget fails closed, which locks
+     * every other player out for the rest of the window. `0` disables the cap.
+     */
+    val connectionsPerMinute: Int = root.getInt("safety.connections-per-minute", 10)
+
     val locale: String = root.getString("messages.locale", "zh_CN") ?: "zh_CN"
+
+    /**
+     * Where a player is sent once they may play, or empty to leave them on this server.
+     *
+     * This is a proxy action: the plugin message it sends is read by BungeeCord or Velocity, and on
+     * a standalone server nothing receives it. It therefore only does anything when the server is a
+     * proxy backend, which is also the case where `safety.require-direct-connections` has to be off.
+     */
+    val postLoginServer: String = root.getString("post-login.server", "")?.trim() ?: ""
 
     private fun resolvePath(dialect: Dialect, raw: String): String {
         if (dialect != Dialect.SQLITE) return raw
@@ -119,5 +156,26 @@ class Configuration(
         val titleEnabled: Boolean,
         val bossBarEnabled: Boolean,
         val blindfold: Boolean,
+        val hidePlayers: Boolean,
+        val spawn: SpawnPoint?,
     )
+
+    /**
+     * A fixed place a held player is put, written by `/kyokouauth setspawn`.
+     *
+     * The world is stored by name rather than as a reference: `config.yml` outlives any particular
+     * `World` object, and a world may not be loaded yet when this is parsed. Resolution therefore
+     * happens at use time, and a missing world falls back to the server's own spawn.
+     */
+    data class SpawnPoint(
+        val world: String,
+        val x: Double,
+        val y: Double,
+        val z: Double,
+        val yaw: Float,
+        val pitch: Float,
+    ) {
+        fun toLocation(): org.bukkit.Location? =
+            org.bukkit.Bukkit.getWorld(world)?.let { org.bukkit.Location(it, x, y, z, yaw, pitch) }
+    }
 }

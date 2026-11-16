@@ -30,9 +30,15 @@ class SkinService(
     private val logger: (String) -> Unit,
 ) {
 
-    /** True when SkinsRestorer owns skins here, in which case this class does nothing at all. */
-    val skinsRestorerPresent: Boolean =
-        plugin.server.pluginManager.getPlugin("SkinsRestorer")?.isEnabled == true
+    /**
+     * True when SkinsRestorer owns skins here, in which case this class does nothing at all.
+     *
+     * Evaluated per call rather than once at construction: a plugin manager reload can disable
+     * SkinsRestorer after this service was built, and a cached `true` would then keep this class
+     * silent while nothing was managing skins at all. The lookup is a map access, not a scan.
+     */
+    val skinsRestorerPresent: Boolean
+        get() = plugin.server.pluginManager.getPlugin("SkinsRestorer")?.isEnabled == true
 
     /**
      * Applies the best available skin to [profile].
@@ -42,9 +48,24 @@ class SkinService(
      *
      * @param uuid the identity UUID, used to look up a premium skin.
      * @param xuid the Xbox id, used to look up a Bedrock skin. Null for premium players.
+     * @param knownTextures a texture the caller already holds. The Mojang handshake returns this
+     *   player's `textures` property from the very endpoint [MojangSkinSource] would ask again, so
+     *   passing it here removes one request per premium join - and that endpoint is the one that
+     *   answers 429.
      */
-    fun apply(profile: PlayerProfile, uuid: UUID, nameKey: String, xuid: Long?) {
+    fun apply(
+        profile: PlayerProfile,
+        uuid: UUID,
+        nameKey: String,
+        xuid: Long?,
+        knownTextures: Pair<String, String>? = null,
+    ) {
         if (skinsRestorerPresent) return
+
+        if (knownTextures != null) {
+            profile.setProperty(ProfileProperty("textures", knownTextures.first, knownTextures.second))
+            return
+        }
 
         if (xuid == null) {
             MojangSkinSource.lookup(uuid)?.let { skin ->

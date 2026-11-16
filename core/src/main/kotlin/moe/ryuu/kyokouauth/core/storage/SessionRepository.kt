@@ -15,8 +15,13 @@ data class PlaySession(
     val issuedAt: Long,
     val expiresAt: Long,
 ) {
-    fun isValidFor(address: String, now: Long): Boolean =
-        this.address == address && now < expiresAt
+    /**
+     * @param bindAddress when false the session is accepted from any address. Only meaningful on a
+     *   server where everyone shares one address, since otherwise the check is what stops a session
+     *   from being inherited by whoever takes over the player's address.
+     */
+    fun isValidFor(address: String, now: Long, bindAddress: Boolean = true): Boolean =
+        (!bindAddress || this.address == address) && now < expiresAt
 }
 
 class SessionRepository(private val database: Database) {

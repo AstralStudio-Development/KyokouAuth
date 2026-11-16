@@ -6,6 +6,11 @@ plugins {
 dependencies {
     implementation(project(":core"))
 
+    // Declared here as well as in `core` because `core` depends on it with `implementation`, which
+    // keeps it off this module's compile classpath. The identity cache in this module needs the type
+    // at compile time; the jar itself is still packed once by the shadow plugin.
+    implementation(libs.caffeine)
+
     compileOnly("io.papermc.paper:paper-api:26.3.build.252-stable")
 
     // Provided by the server at runtime; the login injection needs the pipeline types at compile time.
@@ -23,23 +28,29 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.launcher)
+
+    // Tests exercise config and message parsing, both of which go through Bukkit's YamlConfiguration.
+    // The server itself is never started: these are plain objects loaded from strings and resources.
+    testImplementation("io.papermc.paper:paper-api:26.3.build.252-stable")
 }
 
 // The Paper API and its Adventure dependencies are compiled for Java 25, while this module's own
-// output must stay at Java 8 bytecode. Those two facts are only compatible if the *resolution*
-// attribute is Java 25 while the *compiler* target stays 1.8 - hence the override here rather than
+// output must stay at Java 17 bytecode. Those two facts are only compatible if the *resolution*
+// attribute is Java 25 while the *compiler* target stays 17 - hence the override here rather than
 // on the dependency itself, which does not propagate to its transitive graph.
 java {
     sourceCompatibility = JavaVersion.VERSION_25
     targetCompatibility = JavaVersion.VERSION_25
 }
 
-configurations.named("compileClasspath") {
-    attributes {
-        attribute(
-            org.gradle.api.attributes.java.TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE,
-            25,
-        )
+listOf("compileClasspath", "testCompileClasspath", "testRuntimeClasspath").forEach { name ->
+    configurations.named(name) {
+        attributes {
+            attribute(
+                org.gradle.api.attributes.java.TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE,
+                25,
+            )
+        }
     }
 }
 

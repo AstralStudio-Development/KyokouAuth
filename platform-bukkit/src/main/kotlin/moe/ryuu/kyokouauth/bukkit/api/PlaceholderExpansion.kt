@@ -37,20 +37,28 @@ internal class KyokouPlaceholderExpansion(
     override fun onRequest(player: OfflinePlayer?, params: String): String {
         if (player == null) return ""
 
-        return when (params.lowercase()) {
-            "verified" -> if (plugin.limbo.isHeld(player.uniqueId)) "false" else "true"
-            "pending" -> if (plugin.limbo.isHeld(player.uniqueId)) "true" else "false"
+        val key = params.lowercase()
 
-            "bound" -> if (plugin.core.identities.cached(player.uniqueId) != null) "true" else "false"
+        // Limbo state is an in-memory map, so these two never reach the identity cache at all.
+        when (key) {
+            "verified" -> return if (plugin.limbo.isHeld(player.uniqueId)) "false" else "true"
+            "pending" -> return if (plugin.limbo.isHeld(player.uniqueId)) "true" else "false"
+        }
 
-            "kind" -> when (plugin.core.identities.cached(player.uniqueId)?.kind) {
+        // One lookup for everything else. The cache answers from memory after the first call, but a
+        // scoreboard asks for several of these per second and each call is a map hop worth skipping.
+        val record = plugin.core.identities.cached(player.uniqueId) ?: return ""
+
+        return when (key) {
+            "bound" -> "true"
+
+            "kind" -> when (record.kind) {
                 moe.ryuu.kyokouauth.core.storage.BoundIdentity.Kind.MOJANG -> "premium"
                 moe.ryuu.kyokouauth.core.storage.BoundIdentity.Kind.XUID -> "microsoft"
-                null -> ""
             }
 
-            "gamertag" -> plugin.core.identities.cached(player.uniqueId)?.gamertag ?: ""
-            "subject" -> plugin.core.identities.cached(player.uniqueId)?.subject ?: ""
+            "gamertag" -> record.gamertag ?: ""
+            "subject" -> record.subject
             else -> ""
         }
     }

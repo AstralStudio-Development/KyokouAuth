@@ -5,8 +5,8 @@
 离线模式服务端的微软账户认证
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Minecraft](https://img.shields.io/badge/Minecraft-1.12%20–%2026.3-3C8527.svg)](#兼容性)
-[![Java](https://img.shields.io/badge/Java-8%2B-ED8B00.svg)](#兼容性)
+[![Minecraft](https://img.shields.io/badge/Minecraft-1.16%20–%2026.3-3C8527.svg)](#兼容性)
+[![Java](https://img.shields.io/badge/Java-17%2B-ED8B00.svg)](#兼容性)
 
 </div>
 
@@ -48,12 +48,12 @@ plugins/KyokouAuth.jar
 
 | 项目 | 范围 |
 |---|---|
-| Minecraft | 1.12 – 26.3 |
-| 服务端 | Paper、Spigot |
-| Java | 8+ |
+| Minecraft | 1.16 – 26.3 |
+| 服务端 | Paper |
+| Java | 17+ |
 | 可选集成 | Floodgate、Geyser、PlaceholderAPI、SkinsRestorer |
 
-低于 1.12 拒绝启动。检测到代理转发时拒绝启动。
+低于 1.16 拒绝加载。检测到代理转发时拒绝启动。
 
 ## 构建
 
@@ -67,7 +67,6 @@ plugins/KyokouAuth.jar
 
 ## 文档
 
-- [插件文档](docs-site/) —— 安装、配置、命令、API
 - [架构决策记录](docs/adr/) —— 每个非显然选择的论证
 
 ## 许可证

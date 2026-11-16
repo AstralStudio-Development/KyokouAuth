@@ -1,12 +1,15 @@
 package moe.ryuu.kyokouauth.bukkit
 
+import com.github.benmanes.caffeine.cache.Cache
+import com.github.benmanes.caffeine.cache.Caffeine
 import moe.ryuu.kyokouauth.core.identity.GameName
 import moe.ryuu.kyokouauth.core.identity.Identity
 import moe.ryuu.kyokouauth.core.storage.BoundIdentity
 import moe.ryuu.kyokouauth.core.storage.ClaimResult
 import moe.ryuu.kyokouauth.core.storage.IdentityStore
+import java.time.Duration
+import java.util.Optional
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * A read-through cache in front of [IdentityStore] for the one caller that cannot afford a query.
@@ -23,15 +26,34 @@ import java.util.concurrent.ConcurrentHashMap
  * The cache exists because PlaceholderAPI expansions are invoked from the main thread by scoreboard
  * and tab plugins, often several times per second, and a bound identity never changes during a
  * session.
+ *
+ * ## Why it is bounded
+ *
+ * A plain map here would keep one entry per UUID the server has ever seen, for the lifetime of the
+ * process. The bound is not about memory pressure on a large server - it is about a server that
+ * runs for months, where the map is the only structure in the plugin that never releases anything.
+ * Ten minutes is long enough to cover a session and short enough that a revoked binding stops being
+ * served from memory shortly after `unbind`.
+ *
+ * ## Why "no row" is cached too
+ *
+ * Most players on a server with both Java and Bedrock players have no row under the UUID they are
+ * querying - a Bedrock player's `UUID(0, xuid)` is never in the table. Caching only the hits meant
+ * every scoreboard refresh for such a player ran a query, from the main thread, several times a
+ * second. The miss is cached as [Optional.empty] with the same lifetime, and `claim` invalidates it
+ * the moment a row is created.
  */
 class CachedIdentityRepository(private val delegate: IdentityStore) : IdentityStore by delegate {
 
-    private val cache = ConcurrentHashMap<UUID, BoundIdentity>()
+    private val cache: Cache<UUID, Optional<BoundIdentity>> = Caffeine.newBuilder()
+        .expireAfterWrite(Duration.ofMinutes(10))
+        .maximumSize(10_000)
+        .build()
 
     override fun cached(uuid: UUID): BoundIdentity? {
-        cache[uuid]?.let { return it }
-        val loaded = delegate.byUuid(uuid) ?: return null
-        cache[uuid] = loaded
+        cache.getIfPresent(uuid)?.let { return it.orElse(null) }
+        val loaded = delegate.byUuid(uuid)
+        cache.put(uuid, Optional.ofNullable(loaded))
         return loaded
     }
 
@@ -53,6 +75,9 @@ class CachedIdentityRepository(private val delegate: IdentityStore) : IdentitySt
     override fun touch(uuid: UUID, now: Long) = delegate.touch(uuid, now)
 
     fun invalidate(uuid: UUID) {
-        cache.remove(uuid)
+        cache.invalidate(uuid)
     }
+
+    /** Live entry count, for the operator's status line. */
+    fun size(): Long = cache.estimatedSize()
 }

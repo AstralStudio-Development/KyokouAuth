@@ -1,13 +1,9 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
     kotlin("jvm") version "2.4.21" apply false
     id("com.gradleup.shadow") version "9.6.1" apply false
 }
-
-val java8Target = JavaVersion.VERSION_1_8
-val java8Bytecode = "1.8"
 
 subprojects {
     apply(plugin = "org.jetbrains.kotlin.jvm")
@@ -28,17 +24,16 @@ subprojects {
     extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension>("kotlin") {
         jvmToolchain(25)
         compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_1_8)
+            jvmTarget.set(JvmTarget.JVM_17)
             freeCompilerArgs.addAll(
-                "-Xjdk-release=1.8",
-                "-Xjvm-default=all",
+                "-Xjdk-release=17",
                 "-opt-in=kotlin.RequiresOptIn",
             )
         }
     }
 
     tasks.withType<JavaCompile>().configureEach {
-        options.release.set(8)
+        options.release.set(17)
         options.encoding = "UTF-8"
     }
 

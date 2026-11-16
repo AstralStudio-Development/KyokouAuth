@@ -10,9 +10,9 @@ import moe.ryuu.kyokouauth.core.auth.XboxLive
 import moe.ryuu.kyokouauth.core.identity.GameName
 import moe.ryuu.kyokouauth.core.identity.Xuid
 import org.bukkit.entity.Player
-import org.bukkit.plugin.java.JavaPlugin
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Runs one device-code verification at a time per connection.
@@ -42,11 +42,42 @@ class VerificationService(
     ) {
         @Volatile
         var finished = false
+
         @Volatile
-        var task: org.bukkit.scheduler.BukkitTask? = null
+        internal var task: org.bukkit.scheduler.BukkitTask? = null
+
+        @Volatile
+        internal var intervalTicks: Long = 0L
+
+        /**
+         * Held for the duration of one poll.
+         *
+         * The scheduler runs this on a pool, so two ticks can overlap when a request is slow. Without
+         * this guard both would reach [complete] and bind the same account twice.
+         */
+        internal val polling = AtomicBoolean(false)
     }
 
     fun pendingFor(uuid: UUID): Pending? = pending[uuid]
+
+    /** How many sign-ins are in flight, for the operator's status line. */
+    fun pendingCount(): Int = pending.size
+
+    /**
+     * Issues a fresh code for a player who is already waiting in Limbo.
+     *
+     * The remedy for a code that never worked - a closed browser tab, a mistyped link, a phone that
+     * never loaded the page - would otherwise be to disconnect and reconnect, which costs the player
+     * their provisional data and their place in the queue. [start] already replaces the old attempt,
+     * so this only has to find the connection and hand it over.
+     *
+     * Blocking: it asks Microsoft for a code. Call it from an IO thread.
+     */
+    fun restart(uuid: UUID) {
+        val state = pending[uuid] ?: return
+        val player = plugin.server.getPlayer(uuid) ?: return
+        start(player, state.name, state.address, state.provisional)
+    }
 
     /**
      * Starts verification for a player who is already in the world and in Limbo.
@@ -63,11 +94,13 @@ class VerificationService(
             return
         }
 
-        val state = Pending(player.uniqueId, name, address, provisional, challenge)
-        pending[player.uniqueId] = state
+        // A previous attempt for this UUID is replaced, so its timer has to stop first or it keeps
+        // polling a code nobody will ever type.
+        pending.put(player.uniqueId, Pending(player.uniqueId, name, address, provisional, challenge))
+            ?.let { stale -> stale.finished = true; stale.task?.cancel() }
 
-        // The link is the whole point of Limbo: chat is the only surface in Minecraft that can carry
-        // a clickable URL, and the disconnected screen cannot.
+        val state = pending[player.uniqueId]!!
+
         plugin.tell(
             player,
             "verification.prompt",
@@ -76,15 +109,12 @@ class VerificationService(
             "minutes" to (timeoutSeconds / 60).toString(),
         )
 
-        state.task = plugin.server.scheduler.runTaskTimerAsynchronously(
-            plugin,
-            Runnable { poll(state) },
-            pollIntervalSeconds * 20L,
-            pollIntervalSeconds * 20L,
-        )
+        state.intervalTicks = (pollIntervalSeconds * 20L).coerceAtLeast(20L)
+        schedule(state)
 
         plugin.server.scheduler.runTaskLater(plugin, Runnable {
             if (pending.remove(player.uniqueId, state)) {
+                state.finished = true
                 state.task?.cancel()
                 plugin.server.getPlayer(player.uniqueId)?.let { stale ->
                     plugin.kick(stale, "verification.expired")
@@ -93,45 +123,75 @@ class VerificationService(
         }, timeoutSeconds * 20L)
     }
 
+    /**
+     * (Re)schedules the polling task at the state's current interval.
+     *
+     * Separate from [start] because Microsoft can ask for a slower cadence mid-flow, and a fixed
+     * period cannot honour that.
+     */
+    private fun schedule(state: Pending) {
+        state.task?.cancel()
+        state.task = plugin.server.scheduler.runTaskTimerAsynchronously(
+            plugin,
+            Runnable { poll(state) },
+            state.intervalTicks,
+            state.intervalTicks,
+        )
+    }
+
     private fun poll(state: Pending) {
         if (state.finished) return
 
-        val player = plugin.server.getPlayer(state.playerUuid)
-        if (player == null) {
-            cancel(state)
-            return
-        }
-
-        val result = try {
-            DeviceCodeFlow.poll(state.challenge)
-        } catch (failure: Exception) {
-            plugin.logger.warning("Microsoft sign-in poll failed for ${state.name}: ${failure.message}")
-            return
-        }
-
-        when (result) {
-            is DeviceCodeFlow.PollResult.Pending -> Unit
-
-            is DeviceCodeFlow.PollResult.SlowDown -> Unit
-
-            is DeviceCodeFlow.PollResult.Expired -> {
+        // One poll at a time. A slow request must not let the next tick start a second one.
+        if (!state.polling.compareAndSet(false, true)) return
+        try {
+            val player = plugin.server.getPlayer(state.playerUuid)
+            if (player == null) {
                 cancel(state)
-                plugin.server.scheduler.runTask(plugin, Runnable {
-                    plugin.kick(player, "verification.expired")
-                })
+                return
             }
 
-            is DeviceCodeFlow.PollResult.Declined -> {
-                cancel(state)
-                plugin.server.scheduler.runTask(plugin, Runnable {
-                    plugin.kick(player, "verification.declined")
-                })
+            val result = try {
+                DeviceCodeFlow.poll(state.challenge)
+            } catch (failure: Exception) {
+                plugin.logger.warning("Microsoft sign-in poll failed for ${state.name}: ${failure.message}")
+                return
             }
 
-            is DeviceCodeFlow.PollResult.Authorized -> {
-                state.finished = true
-                complete(state, result.accessToken)
+            when (result) {
+                is DeviceCodeFlow.PollResult.Pending -> Unit
+
+                is DeviceCodeFlow.PollResult.SlowDown -> {
+                    // Microsoft asked for a slower cadence. Ignoring it escalates the throttle and can
+                    // end with the client id blocked, which would break sign-in for every server using
+                    // this plugin. Back off, capped so the code still expires on time.
+                    if (!state.finished) {
+                        state.intervalTicks = backoffTicks(state.intervalTicks)
+                        plugin.server.scheduler.runTask(plugin, Runnable { schedule(state) })
+                    }
+                }
+
+                is DeviceCodeFlow.PollResult.Expired -> {
+                    cancel(state)
+                    plugin.server.scheduler.runTask(plugin, Runnable {
+                        plugin.kick(player, "verification.expired")
+                    })
+                }
+
+                is DeviceCodeFlow.PollResult.Declined -> {
+                    cancel(state)
+                    plugin.server.scheduler.runTask(plugin, Runnable {
+                        plugin.kick(player, "verification.declined")
+                    })
+                }
+
+                is DeviceCodeFlow.PollResult.Authorized -> {
+                    state.finished = true
+                    complete(state, result.accessToken)
+                }
             }
+        } finally {
+            state.polling.set(false)
         }
     }
 
@@ -175,15 +235,6 @@ class VerificationService(
         }
     }
 
-    /**
-     * Tries to turn the signed-in Microsoft account into its Mojang profile.
-     *
-     * A null result is not an error - the account may simply not own Java Edition - but it is also
-     * what an XSTS failure or a 403 from the Minecraft API looks like, and those two are very
-     * different for the operator. Every step therefore logs its own outcome instead of collapsing
-     * into one silent null.
-     */
-
     private fun admit(state: Pending, record: moe.ryuu.kyokouauth.core.storage.BoundIdentity) {
         val player = plugin.server.getPlayer(state.playerUuid) ?: return
         cancel(state)
@@ -197,6 +248,7 @@ class VerificationService(
 
         limbo.release(player)
         plugin.tell(player, "verification.success", "name" to record.name.value)
+        plugin.postLoginConnect(player)
     }
 
     private fun fail(state: Pending, key: String, vararg placeholders: Pair<String, String>) {
@@ -208,12 +260,30 @@ class VerificationService(
     }
 
     private fun cancel(state: Pending) {
+        state.finished = true
         pending.remove(state.playerUuid, state)
         state.task?.cancel()
     }
 
     /** Drops any verification attached to this connection. Called when the player leaves. */
     fun forget(uuid: UUID) {
-        pending.remove(uuid)?.task?.cancel()
+        pending.remove(uuid)?.let { state ->
+            state.finished = true
+            state.task?.cancel()
+        }
+    }
+
+    companion object {
+        /**
+         * One minute in ticks: the slowest Microsoft's back-off may push the poll interval to.
+         *
+         * A ceiling is needed because a sign-in that keeps being told to slow down must still
+         * finish, and the code expires on a timer that does not move. A minute between polls against
+         * a five-minute code leaves room for five attempts.
+         */
+        internal const val MAX_INTERVAL_TICKS = 60_000L / 50
+
+        /** The interval to use after Microsoft answered `SlowDown` once. */
+        internal fun backoffTicks(current: Long): Long = (current * 2).coerceAtMost(MAX_INTERVAL_TICKS)
     }
 }

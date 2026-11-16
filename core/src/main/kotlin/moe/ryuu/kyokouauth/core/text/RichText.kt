@@ -17,7 +17,8 @@ package moe.ryuu.kyokouauth.core.text
  *
  * | Syntax | Meaning |
  * |---|---|
- * | `<red>` … `</red>` | colour |
+ * | `<red>` … `</red>` | named colour |
+ * | `<#RRGGBB>` … `</#RRGGBB>` | hex colour, 1.16 and later |
  * | `<bold>` `<italic>` `<underline>` `</…>` | decoration |
  * | `<newline>` | line break |
  * | `<click:open_url:URL>…</click>` | clickable span |
@@ -27,9 +28,17 @@ package moe.ryuu.kyokouauth.core.text
  */
 object RichText {
 
-    enum class Colour {
-        BLACK, DARK_BLUE, DARK_GREEN, DARK_AQUA, DARK_RED, DARK_PURPLE, GOLD, GRAY,
-        DARK_GRAY, BLUE, GREEN, AQUA, RED, LIGHT_PURPLE, YELLOW, WHITE,
+    /** A colour the message markup can name. */
+    sealed interface Colour {
+
+        /** The sixteen names every client has understood since before 1.8. */
+        enum class Named : Colour {
+            BLACK, DARK_BLUE, DARK_GREEN, DARK_AQUA, DARK_RED, DARK_PURPLE, GOLD, GRAY,
+            DARK_GRAY, BLUE, GREEN, AQUA, RED, LIGHT_PURPLE, YELLOW, WHITE,
+        }
+
+        /** `<#RRGGBB>`: the reason the plugin's floor is 1.16 and not lower. */
+        data class Hex(val rgb: Int) : Colour
     }
 
     data class Style(
@@ -53,25 +62,27 @@ object RichText {
     }
 
     private val COLOURS: Map<String, Colour> = mapOf(
-        "black" to Colour.BLACK,
-        "dark_blue" to Colour.DARK_BLUE,
-        "dark_green" to Colour.DARK_GREEN,
-        "dark_aqua" to Colour.DARK_AQUA,
-        "dark_red" to Colour.DARK_RED,
-        "dark_purple" to Colour.DARK_PURPLE,
-        "gold" to Colour.GOLD,
-        "gray" to Colour.GRAY,
-        "grey" to Colour.GRAY,
-        "dark_gray" to Colour.DARK_GRAY,
-        "dark_grey" to Colour.DARK_GRAY,
-        "blue" to Colour.BLUE,
-        "green" to Colour.GREEN,
-        "aqua" to Colour.AQUA,
-        "red" to Colour.RED,
-        "light_purple" to Colour.LIGHT_PURPLE,
-        "yellow" to Colour.YELLOW,
-        "white" to Colour.WHITE,
+        "black" to Colour.Named.BLACK,
+        "dark_blue" to Colour.Named.DARK_BLUE,
+        "dark_green" to Colour.Named.DARK_GREEN,
+        "dark_aqua" to Colour.Named.DARK_AQUA,
+        "dark_red" to Colour.Named.DARK_RED,
+        "dark_purple" to Colour.Named.DARK_PURPLE,
+        "gold" to Colour.Named.GOLD,
+        "gray" to Colour.Named.GRAY,
+        "grey" to Colour.Named.GRAY,
+        "dark_gray" to Colour.Named.DARK_GRAY,
+        "dark_grey" to Colour.Named.DARK_GRAY,
+        "blue" to Colour.Named.BLUE,
+        "green" to Colour.Named.GREEN,
+        "aqua" to Colour.Named.AQUA,
+        "red" to Colour.Named.RED,
+        "light_purple" to Colour.Named.LIGHT_PURPLE,
+        "yellow" to Colour.Named.YELLOW,
+        "white" to Colour.Named.WHITE,
     )
+
+    private val HEX = Regex("^#[0-9a-fA-F]{6}$")
 
     /**
      * Replaces `<name>` with [value].
@@ -194,6 +205,7 @@ object RichText {
             val name = lower.substring(1)
             return when {
                 name in COLOURS || name == "colour" || name == "color" -> Tag.Pop
+                HEX.matches(name) -> Tag.Pop
                 name == "bold" || name == "italic" || name == "em" ||
                     name == "u" || name == "underlined" -> Tag.Pop
                 name == "click" -> Tag.CloseClick
@@ -202,6 +214,10 @@ object RichText {
         }
 
         COLOURS[lower]?.let { return Tag.Colour(it) }
+
+        if (HEX.matches(lower)) {
+            return Tag.Colour(Colour.Hex(lower.substring(1).toInt(16)))
+        }
 
         when (lower) {
             "bold" -> return Tag.Decoration(Tag.Decoration.Kind.BOLD_ON)

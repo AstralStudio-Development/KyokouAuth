@@ -2,21 +2,25 @@ package moe.ryuu.kyokouauth.core.http
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
-import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.io.InputStream
-import java.net.HttpURLConnection
-import java.net.URL
+import java.net.URI
 import java.net.URLEncoder
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
+import java.time.Duration
 
 /**
  * A deliberately small HTTP client.
  *
- * Java 8 is the bytecode floor, so `java.net.http.HttpClient` (11+) is unavailable and adding an
- * HTTP library would add another artifact whose Java baseline has to be verified. `HttpURLConnection`
- * is in every JVM this plugin will ever run on and is entirely adequate for the handful of
- * request/response exchanges the Microsoft flow needs.
+ * `java.net.http.HttpClient` is the JDK's own client and the reason this class is not built on
+ * `HttpURLConnection`: the older API closes its socket on every `disconnect()`, so each login paid a
+ * fresh TCP and TLS handshake against Mojang. With a client that keeps connections alive, the second
+ * and every later request on the same host reuse the established one.
+ *
+ * One instance lives for the whole process because the pool lives inside it - a client per request
+ * would restore exactly the behaviour this replaced.
  */
 object Http {
 
@@ -48,16 +52,26 @@ object Http {
         body: String,
         contentType: String,
         headers: Map<String, String> = emptyMap(),
-        connectTimeoutMs: Int = 10_000,
         readTimeoutMs: Int = 20_000,
-    ): Response = request("POST", url, body, contentType, headers, connectTimeoutMs, readTimeoutMs)
+    ): Response = request("POST", url, body, contentType, headers, readTimeoutMs)
 
     fun get(
         url: String,
         headers: Map<String, String> = emptyMap(),
-        connectTimeoutMs: Int = 10_000,
         readTimeoutMs: Int = 20_000,
-    ): Response = request("GET", url, null, null, headers, connectTimeoutMs, readTimeoutMs)
+    ): Response = request("GET", url, null, null, headers, readTimeoutMs)
+
+    /**
+     * Shared client: connection pool, TLS session cache and HTTP/2 negotiation all live here.
+     *
+     * The connect timeout is client-wide rather than per request because that is the only place this
+     * API exposes it, and every host this plugin talks to is a public API where ten seconds is
+     * already generous.
+     */
+    private val client: HttpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(10))
+        .followRedirects(HttpClient.Redirect.NEVER)
+        .build()
 
     private fun request(
         method: String,
@@ -65,45 +79,39 @@ object Http {
         body: String?,
         contentType: String?,
         headers: Map<String, String>,
-        connectTimeoutMs: Int,
         readTimeoutMs: Int,
     ): Response {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        try {
-            connection.requestMethod = method
-            connection.connectTimeout = connectTimeoutMs
-            connection.readTimeout = readTimeoutMs
-            connection.instanceFollowRedirects = false
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("User-Agent", USER_AGENT)
-            headers.forEach { (k, v) -> connection.setRequestProperty(k, v) }
+        val builder = HttpRequest.newBuilder(URI.create(url))
+            .timeout(Duration.ofMillis(readTimeoutMs.toLong()))
+            .header("Accept", "application/json")
+            .header("User-Agent", USER_AGENT)
 
-            if (body != null) {
-                contentType?.let { connection.setRequestProperty("Content-Type", it) }
-                connection.doOutput = true
-                connection.setFixedLengthStreamingMode(body.toByteArray(StandardCharsets.UTF_8).size)
-                connection.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
-            }
+        headers.forEach { (name, value) -> builder.header(name, value) }
 
-            val status = connection.responseCode
-            val stream: InputStream? = if (status >= 400) connection.errorStream else connection.inputStream
-            return Response(status, stream?.readText() ?: "", connection.headerFields.orEmpty())
-        } finally {
-            connection.disconnect()
+        val publisher = if (body != null) {
+            contentType?.let { builder.header("Content-Type", it) }
+            HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)
+        } else {
+            HttpRequest.BodyPublishers.noBody()
         }
-    }
+        builder.method(method, publisher)
 
-    private fun InputStream.readText(): String {
-        val out = ByteArrayOutputStream()
-        use { input ->
-            val buffer = ByteArray(8192)
-            while (true) {
-                val read = input.read(buffer)
-                if (read < 0) break
-                out.write(buffer, 0, read)
-            }
+        val response = try {
+            client.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray())
+        } catch (interrupted: InterruptedException) {
+            // Restoring the flag is not optional: the caller's thread pool reuses this thread, and a
+            // swallowed interrupt leaves the next task unable to be cancelled.
+            Thread.currentThread().interrupt()
+            throw IOException("HTTP request to $url was interrupted", interrupted)
         }
-        return String(out.toByteArray(), StandardCharsets.UTF_8)
+
+        // `HttpHeaders#map()` keys are lower-cased by the client. Nothing in this plugin reads them,
+        // and the alternative - the raw field map - carries null keys for HTTP/2 pseudo-headers.
+        return Response(
+            status = response.statusCode(),
+            body = String(response.body(), StandardCharsets.UTF_8),
+            headers = response.headers().map(),
+        )
     }
 
     private const val USER_AGENT = "KyokouAuth (Minecraft server login plugin)"

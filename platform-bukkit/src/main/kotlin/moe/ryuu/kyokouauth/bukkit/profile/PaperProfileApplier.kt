@@ -19,13 +19,14 @@ internal class PaperProfileApplier(private val plugin: KyokouAuthPlugin) : Profi
         uuid: UUID,
         name: GameName,
         record: BoundIdentity?,
+        textures: Pair<String, String>?,
     ) {
         val profile = plugin.server.createProfile(uuid, name.value)
 
         // A bound record carries the XUID even for a player who has not verified *this* connection;
         // the name is already reserved to them, so their own skin is the right one either way.
         val xuid = record?.takeIf { it.kind == BoundIdentity.Kind.XUID }?.subject?.toLongOrNull()
-        plugin.skins.apply(profile, uuid, name.key, xuid)
+        plugin.skins.apply(profile, uuid, name.key, xuid, textures)
 
         event.playerProfile = profile
     }

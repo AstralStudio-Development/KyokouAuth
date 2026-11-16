@@ -1,5 +1,7 @@
 # 消息投递与服务器能力的解耦
 
+> **部分内容已被 [ADR-0017](0017-minimum-version-1-16.md) 取代。** 1.16 基线之后 BungeeChat 与 Plain 两套后端连同 `LegacyRenderer` 一并删除，`Messenger` 只剩 Adventure 一条路径；下文关于「三套后端」与「监听器按能力拆分」的论述是当时的状态。
+
 消息层拆成两半：**解析**在 `core`（`RichText` + `LegacyRenderer`，零依赖、可单测），**投递**在平台层（`Messenger`，三套实现按类路径探测选择）。
 
 ## 为什么必须拆

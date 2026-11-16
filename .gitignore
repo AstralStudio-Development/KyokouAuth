@@ -2,6 +2,8 @@
 # nothing under these directories is needed to build or understand the project.
 run-live/
 run-geyser/
+run-lobby/
+run-proxy/
 
 build/
 .gradle/
@@ -16,3 +18,6 @@ tools/*.class
 hs_err_pid*.log
 replay_pid*.log
 *.log
+
+# Session attachments and generated plans. Not part of the project.
+.narrafork/

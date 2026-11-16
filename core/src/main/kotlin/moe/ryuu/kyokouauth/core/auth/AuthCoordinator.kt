@@ -24,6 +24,7 @@ class AuthCoordinator(
     private val sessions: SessionRepository,
     private val clock: () -> Long = System::currentTimeMillis,
     private val sessionMillis: Long = 0L,
+    private val sessionBindsAddress: Boolean = true,
     private val directory: (String) -> MojangDirectory.Lookup = MojangDirectory::lookup,
 ) {
 
@@ -140,7 +141,7 @@ class AuthCoordinator(
         // Mojang account, which also covers the case of a name that became premium *after* it was
         // bound - that binding simply never reaches this function again.
         val session = sessions.find(bound.uuid)
-        if (session != null && session.isValidFor(address, now) && sessionMillis > 0) {
+        if (session != null && session.isValidFor(address, now, sessionBindsAddress) && sessionMillis > 0) {
             return Decision.Admit(bound.toIdentity(), bound)
         }
         return Decision.Verify(bound.uuid, Reason.SESSION_EXPIRED, provisional = false, existing = bound)

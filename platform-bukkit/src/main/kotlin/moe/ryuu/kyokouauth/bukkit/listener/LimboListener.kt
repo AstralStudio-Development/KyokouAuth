@@ -141,6 +141,15 @@ class LimboListener(private val plugin: KyokouAuthPlugin) : Listener {
     @EventHandler(priority = EventPriority.LOWEST)
     fun onBed(event: PlayerBedEnterEvent) = held(event.player, event)
 
+    @EventHandler(priority = EventPriority.LOWEST)
+    fun onSwapHands(event: PlayerSwapHandItemsEvent) = held(event.player, event)
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    fun onPickup(event: EntityPickupItemEvent) {
+        val player = event.entity as? Player ?: return
+        held(player, event)
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST)
     fun onCommand(event: PlayerCommandPreprocessEvent) {
         val player = event.player
@@ -162,47 +171,16 @@ class LimboListener(private val plugin: KyokouAuthPlugin) : Listener {
 }
 
 /**
- * Chat is handled separately because the event class differs by server.
+ * Chat is handled separately because it is the one event Paper replaced.
  *
- * Modern Paper fires [io.papermc.paper.event.player.AsyncChatEvent]; everything older fires
- * [org.bukkit.event.player.AsyncPlayerChatEvent]. Both live in their own class so that a server
- * missing one of them can still register the other - a single class referencing both could not be
- * loaded on either.
+ * A frozen player must not be able to say anything, and [io.papermc.paper.event.player.AsyncChatEvent]
+ * is the event a 1.16 server fires. The Bukkit predecessor is not registered: on a Paper server it
+ * never fires, and registering both would only add a listener that does nothing.
  */
 class LimboChatListener(private val plugin: KyokouAuthPlugin) : Listener {
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
     fun onChat(event: io.papermc.paper.event.player.AsyncChatEvent) {
         if (plugin.limbo.isHeld(event.player.uniqueId)) event.isCancelled = true
-    }
-}
-
-/** The chat listener for server versions that predate Paper's chat event. */
-class LimboLegacyChatListener(private val plugin: KyokouAuthPlugin) : Listener {
-
-    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
-    fun onChat(event: org.bukkit.event.player.AsyncPlayerChatEvent) {
-        if (plugin.limbo.isHeld(event.player.uniqueId)) event.isCancelled = true
-    }
-}
-
-/**
- * The restrictions that only exist on 1.9 and later.
- *
- * `PlayerSwapHandItemsEvent` and item pickup events arrived with the off-hand slot; referencing them
- * from the main listener would make that whole class unloadable on 1.8, taking every other
- * restriction with it.
- */
-class LimboModernListener(private val plugin: KyokouAuthPlugin) : Listener {
-
-    @EventHandler(priority = EventPriority.LOWEST)
-    fun onSwapHands(event: PlayerSwapHandItemsEvent) {
-        if (plugin.limbo.isHeld(event.player.uniqueId)) event.isCancelled = true
-    }
-
-    @EventHandler(priority = EventPriority.LOWEST)
-    fun onPickup(event: EntityPickupItemEvent) {
-        val player = event.entity as? Player ?: return
-        if (plugin.limbo.isHeld(player.uniqueId)) event.isCancelled = true
     }
 }

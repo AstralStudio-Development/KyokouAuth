@@ -41,8 +41,8 @@ class LoginInjector(private val plugin: KyokouAuthPlugin) {
      * by one byte, so this has to be exact - hence a real version parse rather than a guess.
      *
      * Read from `Bukkit.getBukkitVersion()` rather than `Server#getMinecraftVersion`: the latter is
-     * a Paper addition and throws `NoSuchMethodError` on 1.8, which is precisely the version this
-     * class has to survive. The Bukkit version string is `<mc>-R0.1-SNAPSHOT` on every generation.
+     * a Paper addition whose availability moves with the API line, while the Bukkit version string
+     * is `<mc>-R0.1-SNAPSHOT` on every generation this plugin loads on.
      */
     private val supportsShouldAuthenticate: Boolean = run {
         val minecraft = plugin.server.bukkitVersion.substringBefore('-')
@@ -76,7 +76,7 @@ class LoginInjector(private val plugin: KyokouAuthPlugin) {
     }
 
     private fun attach(channel: Channel) {
-        // `splitter` is the frame decoder's pipeline name, stable from the earliest supported version.
+        // `splitter` is the frame decoder's pipeline name, stable across every supported version.
         if (channel.pipeline().get(NAME) != null) return
         if (channel.pipeline().get("splitter") == null) return
 
@@ -85,7 +85,7 @@ class LoginInjector(private val plugin: KyokouAuthPlugin) {
             NAME,
             PremiumHandshakeHandler(
                 keys = keys,
-                isPremiumName = ::isPremiumName,
+                lookupName = ::lookupName,
                 onVerified = { name, profile, address ->
                     verified[keyOf(name, address)] = StashedProfile(profile, System.currentTimeMillis())
                 },
@@ -96,27 +96,33 @@ class LoginInjector(private val plugin: KyokouAuthPlugin) {
                         PremiumHandshakeHandler.KickReason.NOT_AUTHENTICATED -> "handshake.not-authenticated"
                         PremiumHandshakeHandler.KickReason.SESSION_SERVER_UNAVAILABLE -> "handshake.session-unavailable"
                         PremiumHandshakeHandler.KickReason.HANDSHAKE_FAILED -> "handshake.failed"
+                        PremiumHandshakeHandler.KickReason.DIRECTORY_UNAVAILABLE -> "handshake.directory-unavailable"
                     }
                     plugin.messenger.legacy(plugin.messages.parsed(key))
                 },
                 logger = plugin.logger::info,
+                ioExecutor = plugin.io,
             ),
         )
     }
 
 
     /**
-     * Whether Mojang owns this name, so a handshake is owed.
+     * The directory's answer for this name, in all three states.
      *
      * A Floodgate name is answered without asking Mojang. Those names carry Floodgate's prefix
      * (`.` by default), which no Mojang account can hold, so the directory can only ever say "no" -
      * but it would say it after an HTTP round trip, once per Bedrock join, against a rate limiter
      * that premium joins need. Short-circuiting keeps that budget for the logins that can spend it.
+     *
+     * The result is passed through rather than reduced to a boolean: `Failed` means the question was
+     * never answered, and treating it as "not premium" skipped the handshake for real premium
+     * players.
      */
-    private fun isPremiumName(name: String): Boolean {
+    private fun lookupName(name: String): MojangDirectory.Lookup {
         val prefix = plugin.floodgate?.floodgateNamePrefix
-        if (!prefix.isNullOrEmpty() && name.startsWith(prefix)) return false
-        return MojangDirectory.lookup(name) is MojangDirectory.Lookup.Premium
+        if (!prefix.isNullOrEmpty() && name.startsWith(prefix)) return MojangDirectory.Lookup.Free
+        return MojangDirectory.lookup(name)
     }
 
     /**

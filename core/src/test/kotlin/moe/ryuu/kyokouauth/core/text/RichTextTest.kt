@@ -29,9 +29,9 @@ class RichTextTest {
 
         assertEquals(2, parsed.spans.size)
         assertEquals("a", parsed.spans[0].text)
-        assertEquals(RichText.Colour.RED, parsed.spans[0].style.colour)
+        assertEquals(RichText.Colour.Named.RED, parsed.spans[0].style.colour)
         assertEquals("b", parsed.spans[1].text)
-        assertEquals(RichText.Colour.BLUE, parsed.spans[1].style.colour)
+        assertEquals(RichText.Colour.Named.BLUE, parsed.spans[1].style.colour)
     }
 
     @Test
@@ -42,7 +42,7 @@ class RichTextTest {
         assertTrue(parsed.spans[0].style.bold)
         assertEquals("y", parsed.spans[1].text)
         assertEquals(false, parsed.spans[1].style.bold)
-        assertEquals(RichText.Colour.RED, parsed.spans[1].style.colour)
+        assertEquals(RichText.Colour.Named.RED, parsed.spans[1].style.colour)
     }
 
     @Test
@@ -116,10 +116,25 @@ class RichTextTest {
 
         assertEquals("c", parsed.spans.first { it.text == "c" }.let { it.text })
         assertEquals(
-            RichText.Colour.RED,
+            RichText.Colour.Named.RED,
             parsed.spans.first { it.text == "c" }.style.colour,
             "text after </white> must return to the enclosing red",
         )
+    }
+
+    @Test
+    fun `a hex colour parses and closes like a named one`() {
+        val parsed = parse("<#12AbEf>a</#12AbEf>b")
+
+        assertEquals(RichText.Colour.Hex(0x12ABEF), parsed.spans[0].style.colour)
+        assertNull(parsed.spans[1].style.colour, "text after the closing tag must return to no colour")
+    }
+
+    @Test
+    fun `a malformed hex tag stays literal text`() {
+        val parsed = parse("<#12345>x")
+
+        assertEquals("<#12345>x", parsed.plainText)
     }
 
     @Test

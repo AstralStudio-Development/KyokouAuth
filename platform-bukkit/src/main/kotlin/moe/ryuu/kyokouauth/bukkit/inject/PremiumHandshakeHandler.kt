@@ -4,6 +4,7 @@ import io.netty.buffer.ByteBuf
 import io.netty.channel.ChannelDuplexHandler
 import io.netty.channel.ChannelHandlerContext
 import io.netty.channel.ChannelPromise
+import moe.ryuu.kyokouauth.core.auth.MojangDirectory
 import moe.ryuu.kyokouauth.core.auth.MojangSession
 import java.net.InetSocketAddress
 import java.util.concurrent.CompletableFuture
@@ -15,8 +16,7 @@ import java.util.concurrent.CompletableFuture
  *
  * An offline-mode server never asks a client to prove anything, so a premium player arrives as an
  * offline UUID and an unverified claim. Doing the handshake ourselves is the only way to turn that
- * claim into a fact without a proxy - and it is the same work that lets 1.8-1.12 assign a UUID at
- * all, since `AsyncPlayerPreLoginEvent#setPlayerProfile` does not exist there (ADR-0004, ADR-0009).
+ * claim into a fact without a proxy (ADR-0004, ADR-0009).
  *
  * ## Where it sits
  *
@@ -32,7 +32,15 @@ import java.util.concurrent.CompletableFuture
  */
 class PremiumHandshakeHandler(
     private val keys: HandshakeKeys,
-    private val isPremiumName: (String) -> Boolean,
+    /**
+     * The directory's answer for a name, in all three states.
+     *
+     * Deliberately not a `Boolean`: collapsing `Failed` into `false` meant "not premium", so a
+     * lookup that timed out silently skipped the handshake. The login gate then asked the directory
+     * again, got `Premium` on the retry, and told a genuine premium player to use the official
+     * launcher - which they already were. A `Failed` must stop the connection with its own reason.
+     */
+    private val lookupName: (String) -> MojangDirectory.Lookup,
     private val onVerified: (name: String, profile: MojangSession.Profile, address: String) -> Unit,
     private val supportsShouldAuthenticate: Boolean,
     /** Where the session confirmation is asked. Defaults to Mojang; a mirror or a test stub may differ. */
@@ -46,6 +54,15 @@ class PremiumHandshakeHandler(
      */
     private val renderKick: (reason: KickReason) -> String,
     private val logger: (String) -> Unit,
+    /**
+     * Where blocking work runs.
+     *
+     * Both lookups here are HTTP calls. The no-argument `supplyAsync` would put them on
+     * `ForkJoinPool.commonPool`, which has one thread per core minus one and is shared with the rest
+     * of the JVM - a handful of simultaneous logins would starve it. This plugin already owns an IO
+     * pool; the work belongs there.
+     */
+    private val ioExecutor: java.util.concurrent.Executor,
 ) : ChannelDuplexHandler() {
 
     /** Why a handshake was refused. Separated from the log text so both can be specific. */
@@ -58,6 +75,14 @@ class PremiumHandshakeHandler(
 
         /** The client answered the challenge incorrectly. */
         HANDSHAKE_FAILED,
+
+        /**
+         * The name directory could not be consulted, so it is unknown whether a handshake was owed.
+         *
+         * Distinct from [SESSION_SERVER_UNAVAILABLE] because the player has proven nothing yet and
+         * the remedy is a retry, not a different launcher.
+         */
+        DIRECTORY_UNAVAILABLE,
     }
 
     private enum class State { AWAITING_LOGIN_START, AWAITING_ENCRYPTION_RESPONSE, PASS_THROUGH }
@@ -130,16 +155,43 @@ class PremiumHandshakeHandler(
         packet.release()
 
         java.util.concurrent.CompletableFuture
-            .supplyAsync { runCatching { isPremiumName(name) }.getOrDefault(false) }
-            .whenComplete { premium, _ ->
+            .supplyAsync(
+                {
+                    runCatching { lookupName(name) }.getOrElse {
+                        MojangDirectory.Lookup.Failed(it.message ?: it.javaClass.simpleName)
+                    }
+                },
+                ioExecutor,
+            )
+            .whenComplete { lookup, failure ->
                 ctx.channel().eventLoop().execute {
                     ctx.channel().config().isAutoRead = true
-                    if (premium) {
-                        beginHandshake(ctx, name, held)
-                    } else {
-                        // Not a Mojang name: vanilla carries on and the login gate takes over.
-                        state = State.PASS_THROUGH
-                        ctx.fireChannelRead(held)
+
+                    // A thrown lookup and a null answer are both "the question was not answered".
+                    val answer = when {
+                        failure != null ->
+                            MojangDirectory.Lookup.Failed(failure.message ?: failure.javaClass.simpleName)
+
+                        lookup == null -> MojangDirectory.Lookup.Failed("no answer")
+                        else -> lookup
+                    }
+
+                    when (verdictFor(answer)) {
+                        NameVerdict.HANDSHAKE -> beginHandshake(ctx, name, held)
+
+                        NameVerdict.PASS_THROUGH -> {
+                            // Not a Mojang name: vanilla carries on and the login gate takes over.
+                            state = State.PASS_THROUGH
+                            ctx.fireChannelRead(held)
+                        }
+
+                        NameVerdict.REFUSE -> {
+                            // Unknown, not "no". Guessing here is what produced the false
+                            // "this name belongs to a premium account" on a premium player.
+                            held.release()
+                            val reason = (answer as? MojangDirectory.Lookup.Failed)?.reason ?: "unknown"
+                            kick(ctx, KickReason.DIRECTORY_UNAVAILABLE, "directory unavailable: $reason")
+                        }
                     }
                 }
             }
@@ -189,7 +241,7 @@ class PremiumHandshakeHandler(
 
             // The session server is a blocking HTTP call. It must not run on the event loop, so the
             // connection is resumed from a worker once Mojang answers.
-            CompletableFuture.supplyAsync { MojangSession.hasJoined(name, hash, sessionServerUrl) }
+            CompletableFuture.supplyAsync({ MojangSession.hasJoined(name, hash, sessionServerUrl) }, ioExecutor)
                 .whenComplete { profile, failure ->
                     ctx.channel().eventLoop().execute { finish(ctx, name, profile, failure) }
                 }
@@ -391,4 +443,30 @@ class PremiumHandshakeHandler(
             super.write(ctx, msg, promise)
         }
     }
+}
+
+/** What the pipeline does with the directory's answer. */
+internal enum class NameVerdict {
+    /** A Mojang account owns this name: run the handshake. */
+    HANDSHAKE,
+
+    /** Nobody owns it: let vanilla carry on and let the login gate decide. */
+    PASS_THROUGH,
+
+    /** The directory did not answer, so neither of the above can be chosen. */
+    REFUSE,
+}
+
+/**
+ * Maps the three-state lookup onto a decision.
+ *
+ * The whole point of this function is the third case. When the lookup was a `Boolean`, `Failed`
+ * became `false` - "not premium" - the handshake was skipped, and the login gate's second lookup
+ * answered `Premium` on the retry. A premium player using the official launcher was then told to
+ * use the official launcher.
+ */
+internal fun verdictFor(lookup: MojangDirectory.Lookup): NameVerdict = when (lookup) {
+    is MojangDirectory.Lookup.Premium -> NameVerdict.HANDSHAKE
+    is MojangDirectory.Lookup.Free -> NameVerdict.PASS_THROUGH
+    is MojangDirectory.Lookup.Failed -> NameVerdict.REFUSE
 }

@@ -32,7 +32,6 @@ object MojangDirectory {
         class Failed(val reason: String) : Lookup()
     }
 
-    /** Positive answers are stable; a name does not stop being premium. */
     /**
      * Guard against spending more than Mojang allows.
      *
@@ -60,8 +59,14 @@ object MojangDirectory {
 
     fun budgetUsage(): Int = budget.used()
 
+    /**
+     * Positive answers, kept for the life of the process.
+     *
+     * A name does not stop being premium. The six-hour expiry this used to carry only produced a
+     * repeat lookup per player per session - which is exactly the traffic that earns a 429 from an
+     * endpoint that allows roughly 600 requests per ten minutes per address.
+     */
     private val premiumCache = Caffeine.newBuilder()
-        .expireAfterWrite(6, TimeUnit.HOURS)
         .maximumSize(20_000)
         .build<String, UUID>()
 
@@ -71,9 +76,23 @@ object MojangDirectory {
         .maximumSize(20_000)
         .build<String, Boolean>()
 
+    /**
+     * Until when this source stops asking.
+     *
+     * A 429 is not an answer, and retrying during one extends it. Without this the next join - and
+     * every join after it - asked again, so a short limit became a long one.
+     */
+    @Volatile
+    private var blockedUntil: Long = 0L
+
     fun lookup(nameKey: String): Lookup {
         premiumCache.getIfPresent(nameKey)?.let { return Lookup.Premium(it, nameKey) }
         if (freeCache.getIfPresent(nameKey) != null) return Lookup.Free
+
+        val now = System.currentTimeMillis()
+        if (now < blockedUntil) {
+            return Lookup.Failed("Mojang 限流中，${(blockedUntil - now) / 1000 + 1} 秒后重试")
+        }
 
         // Only real requests are counted, which is exactly what Mojang counts. A cached answer costs
         // nothing on either side.
@@ -106,8 +125,14 @@ object MojangDirectory {
                 Lookup.Free
             }
 
-            // 429 is a rate limit, not an answer. Retrying immediately would deepen the limit and
-            // answering "free" would open an impersonation window, so neither: report a failure.
+            // 429 is a rate limit, not an answer. Retrying immediately deepens the limit and
+            // answering "free" would open an impersonation window, so neither: stay quiet for a
+            // minute and report it.
+            429 -> {
+                blockedUntil = now + 60_000L
+                Lookup.Failed("Mojang 返回 429，60 秒内不再查询")
+            }
+
             else -> Lookup.Failed("Mojang API answered HTTP ${response.status}.")
         }
     }

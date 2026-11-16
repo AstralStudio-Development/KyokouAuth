@@ -12,9 +12,9 @@ import java.util.concurrent.ConcurrentHashMap
  * native binaries for every platform - which would be most of the plugin's download for a database
  * the server may never use. They live outside the jar instead.
  *
- * Every pinned version is the last one that still runs on **Java 8**, because the plugin's bytecode
- * floor is Java 8 (see ADR-0001) and a server on 1.12 is very likely on a Java 8 runtime. That is why
- * H2 is 1.4.200 rather than 2.x: 2.x requires Java 11.
+ * Every pinned version is one this project's test matrix has actually run against. They are not
+ * the newest releases on purpose: a driver is the one dependency whose behaviour cannot be faked,
+ * so bumping one means re-running the embedded dialect suite and a real server for each backend.
  */
 object DriverCatalog {
 

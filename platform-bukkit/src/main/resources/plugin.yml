@@ -9,13 +9,15 @@ website: https://github.com/ryuu/kyokouauth
 # second sign-in, and that check runs in the very first login event.
 softdepend: [floodgate, PlaceholderAPI, SkinsRestorer]
 
-# api-version is deliberately absent: the legal range is 1.13-26.3, and writing any value makes
-# 1.8-1.12 refuse to load the plugin.
+# api-version marks the floor the plugin is written against. 1.16 is the first version with hex
+# colours, and it is also the first one whose Adventure ships the serialisers the message layer
+# needs, so nothing older is supported on purpose.
+api-version: '1.16'
 
 commands:
   kyokouauth:
     description: KyokouAuth administration
-    usage: /kyokouauth <whois|unbind|rename|untrust|status|reload>
+    usage: /kyokouauth <whois|session|unbind|rename|untrust|verify|status|reload>
     aliases: [ka, auth]
     # No `permission:` here on purpose. Bukkit evaluates it before the executor runs, so any value
     # would refuse the command for every non-admin - and `/kyokouauth link` is a player action, not

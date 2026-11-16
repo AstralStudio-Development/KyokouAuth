@@ -16,9 +16,9 @@ dependencies {
 }
 
 java {
-    // The host plugin targets Java 8 bytecode; matching it keeps this loadable everywhere it is.
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+    // Matches the host plugin's bytecode floor so the extension loads wherever it does.
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 tasks.jar {

@@ -50,6 +50,7 @@ class KyokouAuthCore(
                 identities = identities,
                 sessions = sessions,
                 sessionMillis = configuration.sessionHours * 60L * 60L * 1000L,
+                sessionBindsAddress = configuration.sessionBindsAddress,
             )
             return KyokouAuthCore(database, identities, sessions, auth)
         }

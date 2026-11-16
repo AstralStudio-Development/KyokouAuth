@@ -5,19 +5,31 @@ import moe.ryuu.kyokouauth.bukkit.floodgate.FloodgateBridge
 import moe.ryuu.kyokouauth.bukkit.floodgate.LinkExtension
 import moe.ryuu.kyokouauth.bukkit.listener.LoginListener
 import moe.ryuu.kyokouauth.bukkit.listener.LimboChatListener
-import moe.ryuu.kyokouauth.bukkit.listener.LimboLegacyChatListener
 import moe.ryuu.kyokouauth.bukkit.listener.LimboListener
-import moe.ryuu.kyokouauth.bukkit.listener.LimboModernListener
 import moe.ryuu.kyokouauth.bukkit.limbo.LimboManager
 import moe.ryuu.kyokouauth.bukkit.verification.VerificationService
 import org.bukkit.plugin.java.JavaPlugin
 import java.io.File
+import java.io.InputStreamReader
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.ExecutorService
 
 class KyokouAuthPlugin : JavaPlugin() {
 
-    /** Must match `config-version` in the bundled config.yml. */
-    private val CONFIG_VERSION = 3
+    /**
+     * The schema version this build expects, read from the bundled `config.yml`.
+     *
+     * A constant here would be a second copy of the same number with nothing to keep the two in
+     * step - and a stale one is silent: the operator's old file simply never gets migrated, so new
+     * options exist in code and not on disk.
+     */
+    private val CONFIG_VERSION: Int by lazy {
+        javaClass.classLoader.getResourceAsStream("config.yml")?.use { stream ->
+            org.bukkit.configuration.file.YamlConfiguration
+                .loadConfiguration(InputStreamReader(stream, StandardCharsets.UTF_8))
+                .getInt("config-version", 0)
+        } ?: 0
+    }
 
     lateinit var configuration: Configuration
         private set
@@ -34,23 +46,34 @@ class KyokouAuthPlugin : JavaPlugin() {
      * The old file is kept as `config.old.yml` rather than merged: a half-merged config is worse
      * than a clearly-backed-up one, and there are few enough settings to re-apply by hand.
      */
+    /**
+     * Brings an outdated `config.yml` up to the current schema without losing the operator's work.
+     *
+     * The template is the base and the operator's values are written into it, so comments stay and
+     * a removed option disappears. No `.old` file is produced: nothing is discarded that the merge
+     * did not already carry, and a second copy of a config is one more thing to clean up later.
+     */
     private fun migrateConfigIfOutdated() {
         val file = File(dataFolder, "config.yml")
         if (!file.isFile) return
 
         val existing = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(file)
         val version = existing.getInt("config-version", 0)
-        val expected = CONFIG_VERSION
-        if (version >= expected) return
+        if (version >= CONFIG_VERSION) return
 
-        val backup = File(dataFolder, "config.old.yml")
-        runCatching {
-            if (backup.isFile) backup.delete()
-            file.copyTo(backup, overwrite = true)
-            file.delete()
-        }.onFailure {
-            logger.warning("Could not back up the outdated config.yml (${it.message}); keeping it as-is.")
-        }
+        val template = javaClass.classLoader.getResourceAsStream("config.yml")?.use {
+            String(it.readBytes(), StandardCharsets.UTF_8)
+        } ?: return
+
+        val merged = ConfigMerger.merge(template, existing)
+
+        runCatching { file.writeText(merged, StandardCharsets.UTF_8) }
+            .onSuccess {
+                logger.info("config.yml updated from v$version to v$CONFIG_VERSION; values kept, comments refreshed")
+            }
+            .onFailure {
+                logger.warning("Could not rewrite config.yml (${it.message}); the file is unchanged")
+            }
     }
 
 
@@ -66,10 +89,36 @@ class KyokouAuthPlugin : JavaPlugin() {
     lateinit var skins: moe.ryuu.kyokouauth.bukkit.skin.SkinService
         private set
 
-    lateinit var injector: moe.ryuu.kyokouauth.bukkit.inject.LoginInjector
+    /**
+     * The login-phase handshake, or null when a proxy owns the login.
+     *
+     * Null on a proxy backend rather than installed-and-idle: the handler answers a premium name by
+     * sending an Encryption Request, and a proxy that sees one concludes the backend is in
+     * online-mode and drops the connection with `Backend server is online-mode!`. The proxy has
+     * already done whatever authentication is going to happen; this side must not start a second
+     * one on the same connection.
+     */
+    var injector: moe.ryuu.kyokouauth.bukkit.inject.LoginInjector? = null
         private set
 
     lateinit var io: ExecutorService
+        private set
+
+    /**
+     * Whether this server sits behind a proxy.
+     *
+     * Read once at startup: a proxy does not appear at runtime, and the answer is needed from a
+     * thread that must not touch the filesystem.
+     */
+    private var behindProxy = false
+
+    /**
+     * Caps login attempts per address.
+     *
+     * Rebuilt on reload because the allowance is a configuration value; the counters it held are
+     * dropped with it, which is the right direction for a limiter whose window is a minute.
+     */
+    lateinit var connectionLimiter: moe.ryuu.kyokouauth.core.auth.ConnectionLimiter
         private set
 
     /** Non-null only when Floodgate is installed and reachable. */
@@ -94,32 +143,31 @@ class KyokouAuthPlugin : JavaPlugin() {
     }
 
     /** Sends a catalogue message to a command sender. */
+    /**
+     * Sends a catalogue message, in the recipient's own client language when a file exists for it.
+     *
+     * One method rather than a `CommandSender` overload plus a `Player` overload. Kotlin resolves
+     * overloads by *static* type, and every command handler holds a `CommandSender` - so the player
+     * overload was never selected and every command answered in the server's language regardless of
+     * what the client had set. The locale is read here, where the runtime type is available.
+     */
     fun tell(sender: org.bukkit.command.CommandSender, key: String, vararg placeholders: Pair<String, String>) {
-        messenger.send(sender, messages.parsed(key, *placeholders))
-    }
-
-    /** Sends a catalogue message to a player. */
-    fun tell(player: org.bukkit.entity.Player, key: String, vararg placeholders: Pair<String, String>) {
-        messenger.send(player, messages.parsed(key, *placeholders))
+        val locale = (sender as? org.bukkit.entity.Player)?.locale()?.toString()
+        messenger.send(sender, messages.parsed(key, locale, *placeholders))
     }
 
     /**
-     * A catalogue message as the `§`-coded String a kick takes.
+     * A catalogue message as the `§`-coded String the login phase takes.
      *
-     * `AsyncPlayerPreLoginEvent#disallow` accepts a String on every supported version; its Component
-     * overload is Paper-only, which is why kicks never go through the messenger.
+     * `AsyncPlayerPreLoginEvent#disallow` and the Disconnect packet both take a plain String, and
+     * the injected handshake handler sits on the Netty pipeline where a Component has no meaning.
      */
     fun kickText(key: String, vararg placeholders: Pair<String, String>): String =
         messenger.legacy(messages.parsed(key, *placeholders))
 
-    /**
-     * Disconnects a player with a catalogue message.
-     *
-     * `kickPlayer(String)` rather than `kick(Component)`: the Component overload does not exist on
-     * 1.8, and the String form parses §-codes on every version.
-     */
+    /** Disconnects a player with a catalogue message, in their own client language when available. */
     fun kick(player: org.bukkit.entity.Player, key: String, vararg placeholders: Pair<String, String>) {
-        player.kickPlayer(kickText(key, *placeholders))
+        player.kick(messenger.component(messages.parsed(key, player.locale().toString(), *placeholders)))
     }
 
     /**
@@ -138,6 +186,76 @@ class KyokouAuthPlugin : JavaPlugin() {
         reloadConfig()
         configuration = Configuration(config, dataFolder, server.worldContainer)
         messages.load()
+        connectionLimiter = moe.ryuu.kyokouauth.core.auth.ConnectionLimiter(configuration.connectionsPerMinute)
+    }
+
+    /**
+     * Sends a player to another server once they are allowed to play.
+     *
+     * A proxy action, and a no-op when no target is configured. Failure is logged rather than
+     * thrown: the player is already admitted and standing on this server, so a missing proxy
+     * connection costs them a manual switch, not their session.
+     */
+    fun postLoginConnect(player: org.bukkit.entity.Player) {
+        val target = configuration.postLoginServer
+        if (target.isEmpty()) return
+
+        try {
+            val payload = java.io.ByteArrayOutputStream()
+            java.io.DataOutputStream(payload).use {
+                it.writeUTF("Connect")
+                it.writeUTF(target)
+            }
+            player.sendPluginMessage(this, "BungeeCord", payload.toByteArray())
+        } catch (failure: Throwable) {
+            logger.warning("Could not send ${player.name} to '$target': ${failure.message}")
+        }
+    }
+
+    /**
+     * Asks the proxy to disconnect a player.
+     *
+     * The only lever a backend has over a connection it does not own. `/server` and the `Connect`
+     * plugin message - the two ways a player can leave this server without permission - are both
+     * answered by the proxy and never reach Bukkit, so neither can be cancelled here. What does
+     * happen here is the departure itself: this server sees the player quit, and the proxy can
+     * still be told to drop the whole connection before the new server is usable.
+     *
+     * The result is "you cannot go", not "the command did nothing". Refusing the command outright
+     * requires the proxy to be the one saying no.
+     */
+    fun kickFromProxy(name: String, reason: String) {
+        if (!behindProxy) return
+
+        try {
+            val payload = java.io.ByteArrayOutputStream()
+            java.io.DataOutputStream(payload).use {
+                it.writeUTF("KickPlayer")
+                it.writeUTF(name)
+                it.writeUTF(reason)
+            }
+            server.sendPluginMessage(this, "BungeeCord", payload.toByteArray())
+        } catch (failure: Throwable) {
+            logger.warning("Could not ask the proxy to disconnect $name: ${failure.message}")
+        }
+    }
+
+    /**
+     * Writes a fixed Limbo position and reloads.
+     *
+     * Stored in `config.yml` rather than a side file so that copying a server's plugin folder carries
+     * the spawn with it, and so that the operator sees it next to the switch that enables it.
+     */
+    fun setLimboSpawn(location: org.bukkit.Location) {
+        val world = location.world ?: return
+        config.set("limbo.spawn.world", world.name)
+        config.set("limbo.spawn.x", location.x)
+        config.set("limbo.spawn.y", location.y)
+        config.set("limbo.spawn.z", location.z)
+        config.set("limbo.spawn.yaw", location.yaw.toDouble())
+        config.set("limbo.spawn.pitch", location.pitch.toDouble())
+        saveConfig()
+        reloadSettings()
     }
 
     override fun onEnable() {
@@ -145,8 +263,8 @@ class KyokouAuthPlugin : JavaPlugin() {
         saveDefaultConfig()
         configuration = Configuration(config, dataFolder, server.worldContainer)
         messages = Messages(configuration.locale, dataFolder).also { it.load() }
-        messenger = moe.ryuu.kyokouauth.bukkit.message.Messenger.create()
-        console("console.backend", "backend" to messenger.backendName)
+        messenger = moe.ryuu.kyokouauth.bukkit.message.Messenger()
+        connectionLimiter = moe.ryuu.kyokouauth.core.auth.ConnectionLimiter(configuration.connectionsPerMinute)
 
         // Must be configured before the first login can touch the directory.
         moe.ryuu.kyokouauth.core.auth.MojangDirectory.configureBudget(
@@ -154,10 +272,30 @@ class KyokouAuthPlugin : JavaPlugin() {
             configuration.directoryBudgetWindowMinutes,
         )
 
-        if (configuration.requireDirectConnections && isBehindProxy()) {
+        behindProxy = isBehindProxy()
+
+        if (configuration.requireDirectConnections && behindProxy) {
             severe("console.refuse-proxy")
             server.pluginManager.disablePlugin(this)
             return
+        }
+
+        // On a proxy backend, `/server` is answered by the proxy and never reaches Bukkit. That is
+        // not a bypass in itself: a server switch is a fresh connection, so the target backend runs
+        // this same pre-login gate and an unverified player is stopped there as well. The actual
+        // hole is a backend that does not have this plugin installed, which is what this warns
+        // about - the one case nothing on this side can cover.
+        if (behindProxy) {
+            consoleWarn("console.proxy-server-bypass")
+        } else if (!configuration.requireDirectConnections) {
+            // The operator turned the guard off, so they expect a proxy. Not finding one means the
+            // detection looked in the wrong place or the proxy settings live in a file this server
+            // does not have - worth saying out loud, because the plugin will now behave as if it
+            // were a standalone server.
+            consoleWarn(
+                "console.proxy-not-detected",
+                "cwd" to runCatching { java.io.File(".").canonicalPath }.getOrDefault("?"),
+            )
         }
 
         io = moe.ryuu.kyokouauth.core.storage.Database.ioExecutor(configuration.poolSize)
@@ -186,7 +324,7 @@ class KyokouAuthPlugin : JavaPlugin() {
             this,
             moe.ryuu.kyokouauth.core.skin.OperatorSkinSource(loadOperatorSkins()),
         ) { message -> logger.fine(message) }
-        if (skins.skinsRestorerPresent) console("console.skins-restorer")
+        if (skins.skinsRestorerPresent) console("console.skins-restorer") else console("console.skins-self")
         verification = VerificationService(
             plugin = this,
             core = core,
@@ -209,16 +347,10 @@ class KyokouAuthPlugin : JavaPlugin() {
         server.pluginManager.registerEvents(LoginListener(this), this)
         server.pluginManager.registerEvents(LimboListener(this), this)
 
-        // Listeners that reference classes an older server does not have live in their own classes,
-        // so a missing one costs only that restriction instead of the entire login path.
+        // The chat event is the one class the limbo guards cannot assume is present, so it lives in
+        // its own listener: a server missing it loses that restriction and nothing else.
         registerIfAvailable("io.papermc.paper.event.player.AsyncChatEvent", "Paper chat event") {
             server.pluginManager.registerEvents(LimboChatListener(this), this)
-        }
-        registerIfAvailable("org.bukkit.event.player.AsyncPlayerChatEvent", "legacy chat event") {
-            server.pluginManager.registerEvents(LimboLegacyChatListener(this), this)
-        }
-        registerIfAvailable("org.bukkit.event.player.PlayerSwapHandItemsEvent", "off-hand event (1.9+)") {
-            server.pluginManager.registerEvents(LimboModernListener(this), this)
         }
 
         // Installed unconditionally, Floodgate or not.
@@ -236,8 +368,15 @@ class KyokouAuthPlugin : JavaPlugin() {
         // names, and a Bedrock connection never reaches us as a premium name anyway because
         // Floodgate's name prefix is rejected by `GameName`. Standing down did not avoid a conflict;
         // it removed the only door a premium name has.
-        injector = moe.ryuu.kyokouauth.bukkit.inject.LoginInjector(this)
-        injector.install()
+        //
+        // A proxy is the one case where standing down is right, and for the opposite reason: the
+        // proxy owns the login, so a second handshake on the same connection is not merely
+        // redundant - the Encryption Request it sends makes the proxy believe this backend is in
+        // online-mode and drop the connection outright.
+        if (!behindProxy) {
+            injector = moe.ryuu.kyokouauth.bukkit.inject.LoginInjector(this)
+            injector?.install()
+        }
 
         KyokouAuthCommand(this).also { command ->
             getCommand("kyokouauth")?.let {
@@ -321,7 +460,7 @@ class KyokouAuthPlugin : JavaPlugin() {
     }
 
     override fun onDisable() {
-        if (::injector.isInitialized) injector.uninstall()
+        injector?.uninstall()
         if (::limbo.isInitialized) limbo.releaseAll()
         if (::io.isInitialized) io.shutdownNow()
         if (::core.isInitialized) core.close()
@@ -337,7 +476,8 @@ class KyokouAuthPlugin : JavaPlugin() {
      * Only the *enabling* switches count. `proxies.bungee-cord.online-mode` is a separate question -
      * it describes the proxy's mode, defaults to true, and means nothing while forwarding is off.
      */
-    private fun isBehindProxy(): Boolean {        val spigot = java.io.File("spigot.yml")
+    private fun isBehindProxy(): Boolean {
+        val spigot = java.io.File("spigot.yml")
         if (spigot.isFile) {
             val yaml = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(spigot)
             if (yaml.getBoolean("settings.bungeecord", false)) return true

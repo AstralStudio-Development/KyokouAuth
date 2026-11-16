@@ -35,6 +35,17 @@ class LoginListener(private val plugin: KyokouAuthPlugin) : Listener {
     fun onPreLogin(event: AsyncPlayerPreLoginEvent) {
         val address = event.address?.hostAddress ?: "0.0.0.0"
 
+        // Before anything can spend a Mojang lookup. A client that reconnects in a loop would
+        // otherwise drain the shared directory budget, and that budget fails closed - every real
+        // player is refused for the rest of the window, without the attacker ever proving anything.
+        if (!plugin.connectionLimiter.allow(address)) {
+            event.disallow(
+                AsyncPlayerPreLoginEvent.Result.KICK_OTHER,
+                plugin.kickText("login.too-many-connections"),
+            )
+            return
+        }
+
         // Floodgate is consulted *before* the name is parsed, and that order is the whole point.
         //
         // A Bedrock name carries Floodgate's prefix (`.` by default), and `GameName.parse` rejects
@@ -70,7 +81,7 @@ class LoginListener(private val plugin: KyokouAuthPlugin) : Listener {
 
         // A completed Mojang handshake is the strongest proof available: Mojang itself confirmed that
         // this client owns the account. It short-circuits every other path.
-        val handshakeProject = plugin.injector.consume(name.value, address)
+        val handshakeProject = plugin.injector?.consume(name.value, address)
         if (handshakeProject != null) {
             admitPremium(handshakeProject, name, address, event)
             return
@@ -184,16 +195,14 @@ class LoginListener(private val plugin: KyokouAuthPlugin) : Listener {
         }
 
         // Floodgate has already set this connection's profile - that is how it arrived carrying its
-        // UUID and name - so this call only supplies what Floodgate cannot: the skin. It must never be
-        // able to fail the login, since Floodgate's profile is already usable on its own.
-    try {
-        plugin.profiles.apply(event, event.uniqueId, name, null)
-    } catch (failure: Throwable) {
-        plugin.logger.fine("kept Floodgate's profile for ${event.name}: ${failure.message}")
+        // UUID and name - so this call only supplies what Floodgate cannot: the skin. It must never
+        // be able to fail the login, since Floodgate's profile is already usable on its own.
+        try {
+            plugin.profiles.apply(event, event.uniqueId, name, null)
+        } catch (failure: Throwable) {
+            plugin.logger.fine("kept Floodgate's profile for ${event.name}: ${failure.message}")
+        }
     }
-}
-
-
 
     /**
      * Claims the single slot for this UUID, refusing a duplicate connection.
@@ -231,6 +240,10 @@ class LoginListener(private val plugin: KyokouAuthPlugin) : Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     fun onJoin(event: PlayerJoinEvent) {
         val player = event.player
+
+        // Someone who joins while others are held must not become the one player able to see them.
+        plugin.limbo.maskFromJoin(player)
+
         val entry = registry.consume(player.uniqueId)
 
         if (entry == null) {
@@ -243,7 +256,14 @@ class LoginListener(private val plugin: KyokouAuthPlugin) : Listener {
             return
         }
 
-        val verify = entry.verification ?: return
+        val verify = entry.verification
+        if (verify == null) {
+            // Already trusted, so there is nothing to hold for. The spawn still applies: an
+            // operator who set one expects every join to land on it.
+            plugin.limbo.placeAtSpawn(player)
+            plugin.postLoginConnect(player)
+            return
+        }
 
         plugin.server.scheduler.runTask(plugin, Runnable {
             plugin.limbo.hold(player)
@@ -257,11 +277,22 @@ class LoginListener(private val plugin: KyokouAuthPlugin) : Listener {
     @EventHandler
     fun onQuit(event: PlayerQuitEvent) {
         val player = event.player
+
+        // Read before release: a player who leaves Limbo without verifying is leaving for somewhere
+        // else. `/server` and the `Connect` plugin message are both answered by the proxy and never
+        // reach this server, so the command cannot be intercepted - but the departure happens here,
+        // and the proxy can still be told to drop the connection before it is used.
+        val leftUnverified = plugin.limbo.isHeld(player.uniqueId)
+
         registry.release(player.uniqueId)
 
         val pending = plugin.verification.pendingFor(player.uniqueId)
         plugin.verification.forget(player.uniqueId)
         plugin.limbo.release(player)
+
+        if (leftUnverified) {
+            plugin.kickFromProxy(player.name, plugin.messages.plain("proxy.unverified-departure"))
+        }
 
         // A player who leaves while unverified under a provisional UUID leaves nothing worth
         // keeping: that UUID is a placeholder no future connection will use again, so the data would
@@ -354,7 +385,13 @@ class LoginListener(private val plugin: KyokouAuthPlugin) : Listener {
                 }
 
                 plugin.core.auth.grantSession(profile.uuid, address)
-                plugin.profiles.apply(event, profile.uuid, profileName, outcome.record)
+
+                // The handshake already returned this player's textures. Handing them over saves a
+                // second request to the same endpoint, which is the one that answers 429.
+                val textures = profile.textures?.let { value ->
+                    profile.texturesSignature?.let { signature -> value to signature }
+                }
+                plugin.profiles.apply(event, profile.uuid, profileName, outcome.record, textures)
             }
 
             is AuthCoordinator.ClaimOutcome.Refused -> {
@@ -392,7 +429,7 @@ class LoginListener(private val plugin: KyokouAuthPlugin) : Listener {
             AuthCoordinator.RejectReason.IDENTITY_RENAMED ->
                 plugin.kickText("login.identity-renamed")
             AuthCoordinator.RejectReason.DIRECTORY_UNAVAILABLE ->
-                plugin.kickText("login.directory-unavailable")
+                plugin.kickText("login.directory-unavailable", "reason" to decision.detail)
             AuthCoordinator.RejectReason.PROXY_FORWARDING -> plugin.kickText("login.proxy")
             AuthCoordinator.RejectReason.INTERNAL_ERROR -> plugin.kickText("login.internal-error")
         }

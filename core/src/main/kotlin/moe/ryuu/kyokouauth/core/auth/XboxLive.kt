@@ -19,12 +19,8 @@ object XboxLive {
     /** Only the XBox profile is needed: we want `xid` and `gtg`, not game access. */
     const val RELYING_PARTY_PROFILE = "http://xboxlive.com"
 
-    /** Needed only for the premium-fallback path, to reach the Minecraft services API. */
-    const val RELYING_PARTY_MINECRAFT = "rp://api.minecraftservices.com/"
-
     private const val USER_AUTH_URL = "https://user.auth.xboxlive.com/user/authenticate"
     private const val XSTS_URL = "https://xsts.auth.xboxlive.com/xsts/authorize"
-    private const val XBL_TITLE_ID = "00000000402b5328"
 
     class XstsToken(
         val userHash: String,
@@ -117,9 +113,6 @@ object XboxLive {
         else -> "Xbox Live rejected this sign-in (XErr ${xerr ?: "unknown"})."
     }
 
-    /** The title id is only used to label the sign-in; the device code flow does not need Mojang approval. */
-    @Suppress("unused")
-    val titleId: String get() = XBL_TITLE_ID
 }
 
 class XboxAuthException(
