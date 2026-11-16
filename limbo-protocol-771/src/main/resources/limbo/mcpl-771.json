@@ -1,0 +1,111 @@
+{
+  "protocol": 771,
+  "fixed": "1.21.6-1",
+  "maven-directory": "1.21.6-1",
+  "pom-version": "1.21.6-1",
+  "unique-snapshot": false,
+  "licenses": [
+    "The MIT License"
+  ],
+  "dependencies": [
+    {
+      "groupId": "org.cloudburstmc",
+      "artifactId": "nbt",
+      "version": "3.0.0.Final",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.google.code.gson",
+      "artifactId": "gson",
+      "version": "2.11.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "net.raphimc",
+      "artifactId": "MinecraftAuth",
+      "version": "4.1.1",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.slf4j",
+      "artifactId": "slf4j-api",
+      "version": "2.0.9",
+      "scope": "compile"
+    },
+    {
+      "groupId": "net.kyori",
+      "artifactId": "adventure-text-serializer-gson",
+      "version": "4.17.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "net.kyori",
+      "artifactId": "adventure-text-serializer-json-legacy-impl",
+      "version": "4.17.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.cloudburstmc.math",
+      "artifactId": "api",
+      "version": "2.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.cloudburstmc.math",
+      "artifactId": "immutable",
+      "version": "2.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-object-int-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-int-object-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-int-int-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "io.netty",
+      "artifactId": "netty-all",
+      "version": "4.2.1.Final",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.checkerframework",
+      "artifactId": "checker-qual",
+      "version": "3.42.0",
+      "scope": "compile"
+    }
+  ],
+  "artifacts": [
+    {
+      "url": "https://repo.opencollab.dev/maven-releases/org/geysermc/mcprotocollib/protocol/1.21.6-1/protocol-1.21.6-1.pom",
+      "sha256": "b1d476497f607ec712e7545ecd0bce1269aa8f01253d4a14c6a848e14c5c0724",
+      "filename": "protocol-1.21.6-1.pom"
+    },
+    {
+      "url": "https://repo.opencollab.dev/maven-releases/org/geysermc/mcprotocollib/protocol/1.21.6-1/protocol-1.21.6-1.jar",
+      "sha256": "61016e449e1b0f635c306e58d6081963080b1c856fb3534c8310ffbc52af16bb",
+      "filename": "protocol-1.21.6-1.jar"
+    },
+    {
+      "url": "https://repo.opencollab.dev/maven-releases/org/geysermc/mcprotocollib/protocol/1.21.6-1/protocol-1.21.6-1-sources.jar",
+      "sha256": "09cb5d4edfd84fb9ea7d6a0e1b92a9e49c1b220c56c15618e4252575825a4eae",
+      "filename": "protocol-1.21.6-1-sources.jar"
+    }
+  ],
+  "dependency-overrides": {
+    "adventure-text-serializer-gson": "4.25.0",
+    "adventure-text-serializer-json-legacy-impl": "4.25.0"
+  }
+}

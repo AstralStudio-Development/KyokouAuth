@@ -13,32 +13,37 @@ subprojects {
 
     repositories {
         mavenCentral()
-        maven("https://repo.papermc.io/repository/maven-public/")
-        maven("https://hub.spigotmc.org/nexus/content/repositories/snapshots/")
-        // PlaceholderAPI. Compile-time only - the runtime plugin is the server owner's business.
-        // Declared here as well as in settings.gradle.kts because a project that declares its own
-        // repositories wins over the settings-level ones (Gradle's default PREFER_PROJECT mode).
-        maven("https://repo.extendedclip.com/releases/")
+        // `mavenPom()` only: PaperMC publishes with Gradle module metadata whose variants do not
+        // match what this project requests, so resolution fails even though the jar is present.
+        // Reading the POM is enough for every artifact taken from here - in practice velocity-api,
+        // which is Apache-2.0 and therefore does not constrain how this plugin is licensed.
+        maven("https://repo.papermc.io/repository/maven-public/") {
+            metadataSources {
+                mavenPom()
+            }
+        }
     }
 
     extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension>("kotlin") {
         jvmToolchain(25)
         compilerOptions {
-            jvmTarget.set(JvmTarget.JVM_17)
-            freeCompilerArgs.addAll(
-                "-Xjdk-release=17",
-                "-opt-in=kotlin.RequiresOptIn",
-            )
+            val release = if (project.name == "limbo" || project.name.startsWith("limbo-protocol-") || project.name.startsWith("limbo-text-")) 21 else 17
+            jvmTarget.set(if (release == 21) JvmTarget.JVM_21 else JvmTarget.JVM_17)
+            freeCompilerArgs.addAll("-Xjdk-release=$release", "-opt-in=kotlin.RequiresOptIn")
         }
     }
 
     tasks.withType<JavaCompile>().configureEach {
-        options.release.set(17)
+        options.release.set(if (project.name == "limbo" || project.name.startsWith("limbo-protocol-") || project.name.startsWith("limbo-text-")) 21 else 17)
         options.encoding = "UTF-8"
     }
 
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
+        // JUnit @TempDir and library temporary files stay inside the ignored workspace.
+        val testTemp = rootProject.layout.projectDirectory.dir(".narrafork/test-tmp/${project.name}").asFile
+        systemProperty("java.io.tmpdir", testTemp.absolutePath)
+        doFirst { testTemp.mkdirs() }
     }
 }
 

@@ -1,0 +1,92 @@
+# KyokouAuth on Velocity / BungeeCord
+#
+# Everything here is read once at startup. A missing key is a default, so an upgrade that adds a
+# setting never leaves the plugin refusing to start; a missing file is written out from the jar.
+#
+# Which kind of account a name belongs to is decided by asking Mojang, not by a setting: a name that
+# Mojang owns can only enter through the official launcher's handshake, and every other name has to
+# prove a Microsoft account before it is bound. There is deliberately no switch to turn that off.
+
+database:
+  # sqlite | h2 | mysql | mariadb | postgresql
+  type: "sqlite"
+  # For sqlite this is a file next to this config; every other type needs a host below.
+  database: "kyokouauth"
+  host: "127.0.0.1"
+  # 0 means "the default port of the type".
+  port: 0
+  username: ""
+  password: ""
+  pool-size: 4
+  # Where a missing JDBC driver is fetched from, and kept. Drivers are cached in
+  # `libraries/` inside this plugin's folder.
+  driver-repository: "https://repo1.maven.org/maven2"
+  auto-download-driver: true
+
+session:
+  # How long a successful verification keeps a player trusted. 0 disables session reuse entirely.
+  hours: 12
+  # Whether a session only counts from the address that earned it. Turn this off when every player
+  # shares one address behind NAT or a tunnel, where the check distinguishes nobody.
+  bind-address: true
+
+verification:
+  # Opt-in: after proving the same Microsoft XUID, atomically move its binding to the new free name.
+  # The XUID/UUID stays the same; the old name is released. Premium and occupied names are refused.
+  # A provisional connection reconnects once; it then uses the new name and the stable identity.
+  auto-rename: false
+  # How long a player has to finish the Microsoft sign-in before they are disconnected.
+  timeout-seconds: 300
+  # How often the server asks Microsoft whether the player has finished.
+  poll-interval-seconds: 5
+
+safety:
+  # How many connection attempts one address may make per minute. 0 disables the cap. Guards the
+  # Mojang lookup budget rather than the account.
+  connections-per-minute: 10
+
+premium:
+  # Local ceiling for uncached name lookups, separate from session handshakes. Upstream limits can
+  # differ by endpoint/address, so this is not a guarantee against HTTP 429. 0 disables this ceiling.
+  directory-limit: 600
+  directory-limit-window-minutes: 10
+  # Official Minecraft Services is preferred; legacy Mojang is a bounded fallback. Each real request
+  # counts against directory-limit, and each origin independently honors Retry-After.
+  # inherit = JVM HTTP proxy/default routing; direct = separate Java HTTP client with Proxy.NO_PROXY.
+  # This setting affects ONLY name lookups, not session handshakes or Microsoft sign-in.
+  directory-network: "inherit"
+  # Separate local budget for Mojang session handshakes. Matching a public UUID never skips them.
+  session-handshakes-per-minute: 60
+  # Minimum delay between session-check attempts from the same address using the same name.
+  session-retry-seconds: 5
+  # Only one handshake may be in flight for the same source/name. Incomplete attempts back off
+  # 30 -> 60 -> 120 seconds by default; rejected retries do not extend the deadline.
+  session-failure-backoff-seconds: 30
+  session-failure-max-backoff-seconds: 120
+  session-timeout-seconds: 30
+
+post-login:
+  # Where a verified player is sent. Empty means the proxy's own attempt order from velocity.toml.
+  server: ""
+
+messages:
+  # The catalogue used for players whose own language has no file in `messages/`.
+  locale: "zh_CN"
+
+limbo:
+  motd: "KyokouAuth"
+  # Where the player waits. Above the void, so nothing has to be generated underneath them.
+  spawn:
+    x: 0.5
+    y: 64.0
+    z: 0.5
+    yaw: 0.0
+    pitch: 0.0
+  view-distance: 2
+  # Resource key resolved against each protocol's own registry.
+  biome: "minecraft:plains"
+  # Older biome-id settings remain accepted, interpreted through the original 26.3 registry.
+  keep-alive-seconds: 10
+  keep-alive-timeout-seconds: 30
+  # How long a proxy connection may take to reach the play state.
+  join-timeout-seconds: 30

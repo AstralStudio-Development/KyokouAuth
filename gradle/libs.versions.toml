@@ -3,14 +3,14 @@ kotlin = "2.4.21"
 caffeine = "3.1.8"
 hikari = "5.1.0"
 gson = "2.10.1"
+snakeyaml = "2.7"
 sqlite = "3.45.3.0"
 h2 = "1.4.200"
 mysql = "8.4.0"
 mariadb = "3.3.3"
 postgresql = "42.7.4"
 junit = "5.11.4"
-netty = "4.1.115.Final"
-placeholderapi = "2.11.6"
+mcprotocollib = "26.3-4"
 
 [libraries]
 kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
@@ -18,9 +18,12 @@ caffeine = { module = "com.github.ben-manes.caffeine:caffeine", version.ref = "c
 hikaricp = { module = "com.zaxxer:HikariCP", version.ref = "hikari" }
 gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 
-# Adventure is not declared here: the paper-api dependency this module compiles against already
-# brings it, and the runtime copy is the server's own. Declaring a version would only invite a
-# mismatch with whichever line the server actually ships.
+# Message and configuration files are YAML, which is also what every operator already edits. Apache
+# 2.0, so it constrains nothing commercially.
+snakeyaml = { module = "org.yaml:snakeyaml", version.ref = "snakeyaml" }
+
+# Adventure is not declared here: velocity-api already brings it, and the runtime copy is the
+# proxy's own. Declaring a version would only invite a mismatch with whichever line the proxy ships.
 
 jdbc-sqlite = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
 jdbc-h2 = { module = "com.h2database:h2", version.ref = "h2" }
@@ -31,11 +34,5 @@ jdbc-postgresql = { module = "org.postgresql:postgresql", version.ref = "postgre
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
 junit-launcher = { module = "org.junit.platform:junit-platform-launcher" }
 
-# Netty is provided by the server at runtime; this is compile-time only. Pinned to the 4.1 line for
-# the Java 8 baseline - the handful of types the login injection touches are unchanged in 4.2.
-netty-buffer = { module = "io.netty:netty-buffer", version.ref = "netty" }
-netty-transport = { module = "io.netty:netty-transport", version.ref = "netty" }
-
-# Compile-time only: PlaceholderExpansion is an abstract class, so an expansion has to be a real
-# subclass. A reflection Proxy cannot stand in for it.
-placeholderapi = { module = "me.clip:placeholderapi", version.ref = "placeholderapi" }
+# Bundled in Limbo's isolated artifact, never on the proxy's unrelocated classpath.
+mcprotocollib = { module = "org.geysermc.mcprotocollib:protocol", version.ref = "mcprotocollib" }

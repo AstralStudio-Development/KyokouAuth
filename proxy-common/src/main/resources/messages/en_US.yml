@@ -1,0 +1,78 @@
+# KyokouAuth player messages
+#
+# Syntax: <#RRGGBB> is a hex colour, <red> and friends are named colours, <newline> is a line
+# break, <click:open_url:'URL'>…</click> is a clickable span. Placeholders are in angle brackets and
+# replaced at runtime. An unknown tag is printed literally, so a typo cannot stop a message.
+#
+# Palette
+#   #22D3EE  brand         #FFFFFF  text
+#   #D4D4D8  muted         #8B8B94  faint
+#   #4ADE80  success       #FACC15  warning      #F87171  danger
+
+login:
+  directory-throttled: "<#FACC15>Name ownership lookup is temporarily limited</#FACC15><newline><#D4D4D8><reason><newline><#8B8B94>Cached names remain usable; unknown names are not admitted unchecked"
+  directory-busy: "<#FACC15>Name lookups are temporarily busy or rate limited</#FACC15><newline><#D4D4D8>New upstream requests are paused; please wait before reconnecting"
+  busy: "<#FACC15>Login is busy</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>The Mojang lookup budget is spent; retry in a minute"
+  invalid-name: "<#F87171>That username is not valid</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>3-16 letters, digits or underscores"
+  name-taken: "<#F87171>This name does not belong to your Microsoft account"
+  premium-name: "<#F87171>This name belongs to a premium account</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>Connect with the genuine launcher and it verifies itself"
+  premium-retry: "<#FACC15>This name belongs to a premium account</#FACC15><newline><#D4D4D8>Wait before retrying the session check; offline accounts need a different name"
+  premium-in-flight: "<#FACC15>This account is already being verified from this source</#FACC15><newline><#D4D4D8>Wait for the current connection; avoid duplicate logins"
+  premium-backoff: "<#FACC15>Premium session verification is cooling down</#FACC15><newline><#D4D4D8>Wait before retrying; repeated failures increase the delay"
+  identity-already-bound: "<#FACC15>This Microsoft account is already bound to <name></#FACC15><newline><#D4D4D8>Automatic renaming is disabled; use the bound name or contact an admin"
+  name-changed: "<#FACC15>This Microsoft identity was renamed to <name></#FACC15><newline><#D4D4D8>Reconnect using that new name"
+  premium-busy: "<#FACC15>Premium session checks are temporarily busy</#FACC15><newline><#D4D4D8>Please wait instead of reconnecting repeatedly"
+  premium-name-claimed: "<#F87171>This name is registered by a premium account</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>Ask an admin to rename you"
+  identity-renamed: "<#FACC15>This account was renamed</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect"
+  directory-unavailable: "<#F87171>Mojang is unreachable</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8><reason>"
+  proxy: "<#F87171>This server cannot complete the login handshake</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>Contact an admin"
+  internal-error: "<#F87171>Login failed</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>Contact an admin; the console has the cause"
+  too-many-connections: "<#FACC15>Too many connection attempts</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Wait a minute and retry"
+
+limbo:
+  unsupported-version: "<#FACC15>This login screen supports Minecraft 1.21 through 26.3 (release protocols 767–777)."
+  title: "<#22D3EE>Complete Microsoft verification"
+  subtitle: "<#D4D4D8>Click the link in chat"
+  command-blocked: "<#FACC15>You cannot leave until verification finishes</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Click the link in chat"
+
+verification:
+  starting: "<#22D3EE>Contacting Microsoft for a sign-in code</#22D3EE><newline><#D4D4D8>Temporary network failures are retried automatically; please wait"
+  start-unavailable: "<#FACC15>Microsoft sign-in is temporarily unreachable</#FACC15><newline><#D4D4D8>Limited automatic retries were exhausted; please try later"
+  start-busy: "<#FACC15>Microsoft sign-in is rate limited</#FACC15><newline><#D4D4D8>Wait before trying again; avoid repeated reconnects"
+  prompt: "<#22D3EE>Microsoft verification<newline><click:open_url:'<url>'><#FFFFFF><u><url></u></#FFFFFF></click><newline><#D4D4D8>Or enter <#FFFFFF><code></#FFFFFF> at microsoft.com/link<newline><#8B8B94>Valid for <minutes> minutes"
+  start-failed: "<#F87171>Could not start the Microsoft sign-in</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect"
+  expired: "<#FACC15>Verification timed out</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect"
+  declined: "<#FACC15>Sign-in cancelled</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect"
+  retry: "<#F87171>Verification failed</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect"
+  xbox-failed: "<#F87171>This Microsoft account cannot be used</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8><reason>"
+  refused: "<#F87171>This name cannot be bound</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8><reason>"
+  success: "<#4ADE80>Verified</#4ADE80> <#8B8B94>»</#8B8B94> <#D4D4D8>Welcome back, <#FFFFFF><name>"
+  renamed-reconnect: "<#4ADE80>Renamed <from> to <name></#4ADE80><newline><#D4D4D8>Your identity UUID is unchanged; reconnect using the new name"
+  reconnect: "<#4ADE80>Verified</#4ADE80> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect"
+
+command:
+  no-permission: "<#F87171>No permission"
+  unknown-subcommand: "<#F87171>Unknown subcommand <#FFFFFF><name></#FFFFFF></#F87171><newline><#D4D4D8>Run /kyokouauth for the full list"
+  usage-header: "<#8B8B94>[</#8B8B94><#22D3EE>KyokouAuth</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8>commands"
+  usage-whois: "<#8B8B94>- [</#8B8B94><#22D3EE>whois</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><name> <#8B8B94>| <#D4D4D8>binding details"
+  usage-session: "<#8B8B94>- [</#8B8B94><#22D3EE>session</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><name> <#8B8B94>| <#D4D4D8>trusted session"
+  usage-verify: "<#8B8B94>- [</#8B8B94><#22D3EE>verify</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><player> <#8B8B94>| <#D4D4D8>resend the code"
+  usage-unbind: "<#8B8B94>- [</#8B8B94><#22D3EE>unbind</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><name> <#8B8B94>| <#D4D4D8>remove a binding"
+  usage-rename: "<#8B8B94>- [</#8B8B94><#22D3EE>rename</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><old> <new> <#8B8B94>| <#D4D4D8>rename"
+  usage-untrust: "<#8B8B94>- [</#8B8B94><#22D3EE>untrust</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><name> <#8B8B94>| <#D4D4D8>clear a session"
+  usage-status: "<#8B8B94>- [</#8B8B94><#22D3EE>status</#22D3EE><#8B8B94>]</#8B8B94> <#8B8B94>| <#D4D4D8>runtime state"
+  usage-reload: "<#8B8B94>- [</#8B8B94><#22D3EE>reload</#22D3EE><#8B8B94>]</#8B8B94> <#8B8B94>| <#D4D4D8>reload message files"
+  reloaded: "<#4ADE80>Message files reloaded <#8B8B94>»</#8B8B94> <#D4D4D8>database and limbo settings need a restart"
+  status: "<#8B8B94>Storage <#FFFFFF><dialect><newline><#8B8B94>Session <#FFFFFF><session><#D4D4D8> h<newline><#8B8B94>Locale <#FFFFFF><locale><newline><#8B8B94>Verifying <#FFFFFF><verifying><newline><#8B8B94>Mojang lookups <#FFFFFF><budget><newline><#8B8B94>Identity cache <#FFFFFF><cached>"
+  unknown-name: "<#F87171>No record named <#FFFFFF><name>"
+  unknown-player: "<#F87171><#FFFFFF><name></#FFFFFF> is not online"
+  whois: "<#8B8B94>Name <#FFFFFF><name><newline><#8B8B94>UUID <#FFFFFF><uuid><newline><#8B8B94>Kind <#FFFFFF><kind><newline><#8B8B94>Subject <#FFFFFF><subject><newline><#8B8B94>Gamertag <#FFFFFF><gamertag>"
+  session: "<#8B8B94>Player <#FFFFFF><name><newline><#8B8B94>From <#FFFFFF><address><newline><#8B8B94>Remaining <#FFFFFF><minutes><#D4D4D8> min"
+  session-none: "<#D4D4D8><#FFFFFF><name></#FFFFFF> has no trusted session"
+  not-verifying: "<#D4D4D8><#FFFFFF><name></#FFFFFF> is not verifying"
+  verify-resent: "<#4ADE80>Sent a new code to <#FFFFFF><name>"
+  unbound: "<#4ADE80>Removed the binding for <#FFFFFF><name>"
+  untrusted: "<#4ADE80>Cleared the session for <#FFFFFF><name>"
+  renamed: "<#4ADE80>Renamed <#FFFFFF><from></#FFFFFF> to <#FFFFFF><to>"
+  rename-taken: "<#F87171><#FFFFFF><name></#FFFFFF> is held by <#FFFFFF><owner></#FFFFFF>"
+  internal-error: "<#F87171>The operation failed; see the console"

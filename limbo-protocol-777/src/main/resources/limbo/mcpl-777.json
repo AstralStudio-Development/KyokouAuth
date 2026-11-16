@@ -1,0 +1,114 @@
+{
+  "protocol": 777,
+  "fixed": "26.3-4",
+  "maven-directory": "26.3-4",
+  "pom-version": "26.3-4",
+  "unique-snapshot": false,
+  "licenses": [
+    "The MIT License"
+  ],
+  "dependencies": [
+    {
+      "groupId": "org.jspecify",
+      "artifactId": "jspecify",
+      "version": "1.0.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.cloudburstmc",
+      "artifactId": "nbt",
+      "version": "3.1.0.Final",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.google.code.gson",
+      "artifactId": "gson",
+      "version": "2.11.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "net.raphimc",
+      "artifactId": "MinecraftAuth",
+      "version": "5.0.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.slf4j",
+      "artifactId": "slf4j-api",
+      "version": "2.0.9",
+      "scope": "compile"
+    },
+    {
+      "groupId": "net.kyori",
+      "artifactId": "adventure-text-serializer-gson",
+      "version": "5.2.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.geysermc.mcprotocollib",
+      "artifactId": "text-serializer-nbt",
+      "version": "0.2.1",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.cloudburstmc.math",
+      "artifactId": "api",
+      "version": "2.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.cloudburstmc.math",
+      "artifactId": "immutable",
+      "version": "2.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-object-int-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-int-object-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-int-int-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "io.netty",
+      "artifactId": "netty-all",
+      "version": "4.2.1.Final",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.checkerframework",
+      "artifactId": "checker-qual",
+      "version": "3.42.0",
+      "scope": "compile"
+    }
+  ],
+  "artifacts": [
+    {
+      "url": "https://repo.opencollab.dev/maven-releases/org/geysermc/mcprotocollib/protocol/26.3-4/protocol-26.3-4.pom",
+      "sha256": "1aad9292545616c60e2977ea56edcb6e11259a2e207b61d2ccc578e4da680751",
+      "filename": "protocol-26.3-4.pom"
+    },
+    {
+      "url": "https://repo.opencollab.dev/maven-releases/org/geysermc/mcprotocollib/protocol/26.3-4/protocol-26.3-4.jar",
+      "sha256": "aac3344ae89b14d1dca961ff462532c4b75a7da42a4c73c470535e7c17a97874",
+      "filename": "protocol-26.3-4.jar"
+    },
+    {
+      "url": "https://repo.opencollab.dev/maven-releases/org/geysermc/mcprotocollib/protocol/26.3-4/protocol-26.3-4-sources.jar",
+      "sha256": "789637757580c9722d09703e2f155a0dd6efceee75df1af7b339a88b44e44a26",
+      "filename": "protocol-26.3-4-sources.jar"
+    }
+  ],
+  "dependency-overrides": {}
+}

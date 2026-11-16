@@ -3,6 +3,14 @@ package moe.ryuu.kyokouauth.core.auth
 import com.google.gson.JsonObject
 import moe.ryuu.kyokouauth.core.http.Http
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.SocketTimeoutException
+import java.net.http.HttpTimeoutException
+import java.time.Duration
+import java.time.Instant
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -62,33 +70,93 @@ object DeviceCodeFlow {
         class Authorized(val accessToken: String, val refreshToken: String?, val expiresInSeconds: Int) : PollResult()
     }
 
-    class DeviceCodeException(message: String, cause: Throwable? = null) : IOException(message, cause)
+    /** Fixed, log-safe categories: never an upstream error string, body, code or token. */
+    enum class FailureCode {
+        TRANSPORT,
+        TIMEOUT,
+        INTERRUPTED,
+        RATE_LIMITED,
+        UPSTREAM_UNAVAILABLE,
+        REQUEST_REJECTED,
+        MALFORMED_RESPONSE,
+        MISSING_USER_CODE,
+        MISSING_DEVICE_CODE,
+        MISSING_ACCESS_TOKEN,
+        OAUTH_REJECTED,
+        EXPIRED,
+        DECLINED,
+    }
+
+    /** Raw causes are deliberately not retained: even parser/transport messages may contain secrets. */
+    class DeviceCodeException(val code: FailureCode, val httpStatus: Int? = null, val retryAfterMillis: Long? = null) : IOException(
+        "Microsoft device code: ${code.name}" + (httpStatus?.let { " (HTTP $it)" } ?: ""),
+    )
+
+    private const val BEGIN_MAX_ATTEMPTS = 3
+    private const val BEGIN_REQUEST_TIMEOUT_MILLIS = 10_000
+    private const val BEGIN_MAX_SLEEP_MILLIS = 5_000L
 
     /**
-     * Starts a verification. The caller shows the code to the player and then polls [poll].
+     * Starts a fresh verification on the caller's IO thread. Success performs exactly one request;
+     * transient failures allow at most three 10-second requests and five seconds of total backoff.
+     * No challenge is shared or reused between calls. Long Retry-After values fail without retrying
+     * early, so the begin operation cannot hold the caller for an unbounded server-supplied delay.
      */
-    fun begin(): Challenge {
-        val response = Http.post(
-            DEVICE_CODE_URL,
-            Http.encodeForm(
-                mapOf(
-                    "client_id" to CLIENT_ID,
-                    "scope" to SCOPE,
-                    "response_type" to "device_code",
-                ),
+    fun begin(): Challenge = begin(
+        request = { url, body, contentType, timeout ->
+            Http.post(url, body, contentType, readTimeoutMs = timeout)
+        },
+    )
+
+    internal fun begin(
+        request: (String, String, String, Int) -> Http.Response,
+        sleep: (Long) -> Unit = { TimeUnit.MILLISECONDS.sleep(it) },
+    ): Challenge {
+        val body = Http.encodeForm(
+            mapOf(
+                "client_id" to CLIENT_ID,
+                "scope" to SCOPE,
+                "response_type" to "device_code",
             ),
-            Http.FORM,
         )
+        var sleptMillis = 0L
+        for (attempt in 1..BEGIN_MAX_ATTEMPTS) {
+            val response = try {
+                requestSafely(request, DEVICE_CODE_URL, body, BEGIN_REQUEST_TIMEOUT_MILLIS)
+            } catch (failure: DeviceCodeException) {
+                if (failure.code !in setOf(FailureCode.TRANSPORT, FailureCode.TIMEOUT) ||
+                    attempt == BEGIN_MAX_ATTEMPTS
+                ) {
+                    throw failure
+                }
+                val delay = retryBackoffMillis(attempt)
+                if (delay > BEGIN_MAX_SLEEP_MILLIS - sleptMillis) throw failure
+                sleepSafely(delay, sleep)
+                sleptMillis += delay
+                continue
+            }
 
-        if (!response.isSuccess) {
-            throw DeviceCodeException("Microsoft refused to start a sign-in (HTTP ${response.status}).")
+            if (response.isSuccess) return challengeFrom(response)
+            val failure = DeviceCodeException(httpFailureCode(response.status), response.status)
+            if (!isRetryableStatus(response.status) || attempt == BEGIN_MAX_ATTEMPTS) throw failure
+            val delay = maxOf(
+                retryBackoffMillis(attempt),
+                retryAfterMillis(response) ?: if (response.status == 429) 1_000L else 0L,
+            )
+            if (delay > BEGIN_MAX_SLEEP_MILLIS - sleptMillis) throw failure
+            sleepSafely(delay, sleep)
+            sleptMillis += delay
         }
+        error("unreachable device-code attempt")
+    }
 
-        val json = response.json()
+    private fun challengeFrom(response: Http.Response): Challenge {
+        val json = response.jsonOrNull()
+            ?: throw DeviceCodeException(FailureCode.MALFORMED_RESPONSE, response.status)
         val userCode = json.stringOrNull("user_code")
-            ?: throw DeviceCodeException("Microsoft returned no user code.")
+            ?: throw DeviceCodeException(FailureCode.MISSING_USER_CODE, response.status)
         val deviceCode = json.stringOrNull("device_code")
-            ?: throw DeviceCodeException("Microsoft returned no device code.")
+            ?: throw DeviceCodeException(FailureCode.MISSING_DEVICE_CODE, response.status)
         val verificationUri = json.stringOrNull("verification_uri") ?: "http://microsoft.com/link"
 
         return Challenge(
@@ -106,8 +174,16 @@ object DeviceCodeFlow {
      * reports what Microsoft said, so a caller that is also driving a Bukkit scheduler stays in
      * control of when the next tick happens.
      */
-    fun poll(challenge: Challenge): PollResult {
-        val response = Http.post(
+    fun poll(challenge: Challenge): PollResult = poll(challenge) { url, body, contentType, timeout ->
+        Http.post(url, body, contentType, readTimeoutMs = timeout)
+    }
+
+    internal fun poll(
+        challenge: Challenge,
+        request: (String, String, String, Int) -> Http.Response,
+    ): PollResult {
+        val response = requestSafely(
+            request,
             TOKEN_URL,
             Http.encodeForm(
                 mapOf(
@@ -116,14 +192,18 @@ object DeviceCodeFlow {
                     "device_code" to challenge.deviceCode,
                 ),
             ),
-            Http.FORM,
+            20_000,
         )
 
-        val json = response.jsonOrNull() ?: throw DeviceCodeException("Malformed response from Microsoft.")
+        if (isRetryableStatus(response.status)) {
+            throw DeviceCodeException(httpFailureCode(response.status), response.status, retryAfterMillis(response))
+        }
+        val json = response.jsonOrNull()
+            ?: throw DeviceCodeException(FailureCode.MALFORMED_RESPONSE, response.status)
 
         if (response.isSuccess) {
             val token = json.stringOrNull("access_token")
-                ?: throw DeviceCodeException("Microsoft returned no access token.")
+                ?: throw DeviceCodeException(FailureCode.MISSING_ACCESS_TOKEN, response.status)
             return PollResult.Authorized(
                 accessToken = token,
                 refreshToken = json.stringOrNull("refresh_token"),
@@ -136,12 +216,7 @@ object DeviceCodeFlow {
             "slow_down" -> PollResult.SlowDown
             "expired_token", "code_expired" -> PollResult.Expired
             "authorization_declined", "access_denied" -> PollResult.Declined
-            else -> {
-                val description = json.stringOrNull("error_description") ?: ""
-                throw DeviceCodeException(
-                    "Microsoft rejected the sign-in: ${json.stringOrNull("error") ?: "unknown"} $description".trim(),
-                )
-            }
+            else -> throw DeviceCodeException(FailureCode.OAUTH_REJECTED, response.status)
         }
     }
 
@@ -160,16 +235,94 @@ object DeviceCodeFlow {
                 is PollResult.Authorized -> return result.accessToken
                 PollResult.Pending -> Unit
                 PollResult.SlowDown -> interval += 5
-                PollResult.Expired -> throw DeviceCodeException("The sign-in code expired before it was used.")
-                PollResult.Declined -> throw DeviceCodeException("The player declined the sign-in.")
+                PollResult.Expired -> throw DeviceCodeException(FailureCode.EXPIRED)
+                PollResult.Declined -> throw DeviceCodeException(FailureCode.DECLINED)
             }
         }
-        throw DeviceCodeException("The sign-in code expired before it was used.")
+        throw DeviceCodeException(FailureCode.EXPIRED)
+    }
+
+    private fun requestSafely(
+        request: (String, String, String, Int) -> Http.Response,
+        url: String,
+        body: String,
+        timeoutMillis: Int,
+    ): Http.Response {
+        ensureNotInterrupted()
+        val response = try {
+            request(url, body, Http.FORM, timeoutMillis)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw DeviceCodeException(FailureCode.INTERRUPTED)
+        } catch (failure: IOException) {
+            if (Thread.currentThread().isInterrupted || failure.cause is InterruptedException ||
+                (failure is InterruptedIOException && failure !is SocketTimeoutException)
+            ) {
+                Thread.currentThread().interrupt()
+                throw DeviceCodeException(FailureCode.INTERRUPTED)
+            }
+            val code = if (failure is HttpTimeoutException || failure is SocketTimeoutException) {
+                FailureCode.TIMEOUT
+            } else {
+                FailureCode.TRANSPORT
+            }
+            throw DeviceCodeException(code)
+        }
+        ensureNotInterrupted()
+        return response
+    }
+
+    private fun ensureNotInterrupted() {
+        if (Thread.currentThread().isInterrupted) throw DeviceCodeException(FailureCode.INTERRUPTED)
+    }
+
+    private fun sleepSafely(delayMillis: Long, sleep: (Long) -> Unit) {
+        ensureNotInterrupted()
+        try {
+            sleep(delayMillis)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw DeviceCodeException(FailureCode.INTERRUPTED)
+        }
+        ensureNotInterrupted()
+    }
+
+    private fun retryBackoffMillis(attempt: Int): Long = if (attempt == 1) 250L else 750L
+
+    private fun isRetryableStatus(status: Int): Boolean = status in setOf(408, 429, 500, 502, 503, 504)
+
+    private fun httpFailureCode(status: Int): FailureCode = when (status) {
+        429 -> FailureCode.RATE_LIMITED
+        408, in 500..599 -> FailureCode.UPSTREAM_UNAVAILABLE
+        else -> FailureCode.REQUEST_REJECTED
+    }
+
+    /** Return the actual server delay; begin refuses waits over its budget, while polls can schedule them. */
+    private fun retryAfterMillis(response: Http.Response): Long? {
+        val value = response.headers.entries.firstOrNull { it.key.equals("Retry-After", ignoreCase = true) }
+            ?.value?.firstOrNull()?.trim() ?: return null
+        value.toLongOrNull()?.let { seconds ->
+            if (seconds < 0) return null
+            return if (seconds > Long.MAX_VALUE / 1000) Long.MAX_VALUE else seconds * 1000
+        }
+        if (value.isNotEmpty() && value.all { it in '0'..'9' }) return Long.MAX_VALUE
+        val instant = try {
+            ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant()
+        } catch (_: DateTimeParseException) {
+            return null
+        }
+        val duration = Duration.between(Instant.now(), instant)
+        return when {
+            duration.isNegative -> 0L
+            duration.seconds > Long.MAX_VALUE / 1000 -> Long.MAX_VALUE
+            else -> duration.toMillis()
+        }
     }
 
     private fun JsonObject.stringOrNull(key: String): String? =
-        get(key)?.takeIf { !it.isJsonNull }?.asString?.takeIf { it.isNotEmpty() }
+        get(key)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }
+            ?.asString?.takeIf { it.isNotBlank() }
 
     private fun JsonObject.intOrNull(key: String): Int? =
-        get(key)?.takeIf { !it.isJsonNull }?.asInt
+        get(key)?.takeIf { it.isJsonPrimitive }?.asString?.toIntOrNull()
 }

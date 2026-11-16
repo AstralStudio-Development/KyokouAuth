@@ -4,6 +4,7 @@ run-live/
 run-geyser/
 run-lobby/
 run-proxy/
+run-proxy-test/
 
 build/
 .gradle/
@@ -14,6 +15,10 @@ build/
 # Compiled probe classes. The .java sources are kept; the .class files are build output.
 tools/*.class
 
+# A checkout of LimboAPI, kept only to read how it solves the same protocol problems. It is AGPL and
+# nothing from it is copied into this project, so it must never be committed.
+tools/limboapi-ref/
+
 # JVM crash dumps and replay logs, if a run dies badly.
 hs_err_pid*.log
 replay_pid*.log
@@ -21,3 +26,6 @@ replay_pid*.log
 
 # Session attachments and generated plans. Not part of the project.
 .narrafork/
+
+# Python helper bytecode is generated test output, not source.
+__pycache__/

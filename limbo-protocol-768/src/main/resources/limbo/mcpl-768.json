@@ -1,0 +1,114 @@
+{
+  "protocol": 768,
+  "fixed": "1.21.2-20241209.154112-6",
+  "maven-directory": "1.21.2-SNAPSHOT",
+  "pom-version": "1.21.2-SNAPSHOT",
+  "unique-snapshot": true,
+  "licenses": [
+    "The MIT License"
+  ],
+  "dependencies": [
+    {
+      "groupId": "org.cloudburstmc",
+      "artifactId": "nbt",
+      "version": "3.0.0.Final",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.google.code.gson",
+      "artifactId": "gson",
+      "version": "2.11.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "net.raphimc",
+      "artifactId": "MinecraftAuth",
+      "version": "4.0.2",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.slf4j",
+      "artifactId": "slf4j-api",
+      "version": "2.0.9",
+      "scope": "compile"
+    },
+    {
+      "groupId": "net.kyori",
+      "artifactId": "adventure-text-serializer-gson",
+      "version": "4.15.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "net.kyori",
+      "artifactId": "adventure-text-serializer-json-legacy-impl",
+      "version": "4.15.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.cloudburstmc.math",
+      "artifactId": "api",
+      "version": "2.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.cloudburstmc.math",
+      "artifactId": "immutable",
+      "version": "2.0",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-object-int-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-int-object-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "com.nukkitx.fastutil",
+      "artifactId": "fastutil-int-int-maps",
+      "version": "8.5.3",
+      "scope": "compile"
+    },
+    {
+      "groupId": "io.netty",
+      "artifactId": "netty-all",
+      "version": "4.1.103.Final",
+      "scope": "compile"
+    },
+    {
+      "groupId": "io.netty.incubator",
+      "artifactId": "netty-incubator-transport-native-io_uring",
+      "version": "0.0.24.Final",
+      "scope": "compile"
+    },
+    {
+      "groupId": "org.checkerframework",
+      "artifactId": "checker-qual",
+      "version": "3.42.0",
+      "scope": "compile"
+    }
+  ],
+  "artifacts": [
+    {
+      "url": "https://repo.opencollab.dev/maven-snapshots/org/geysermc/mcprotocollib/protocol/1.21.2-SNAPSHOT/protocol-1.21.2-20241209.154112-6.pom",
+      "sha256": "d206acaa9b64ceff7a07fa6ce92bd01e92ad8646a7ab5c0901ad0ef5a477d3c7",
+      "filename": "protocol-1.21.2-20241209.154112-6.pom"
+    },
+    {
+      "url": "https://repo.opencollab.dev/maven-snapshots/org/geysermc/mcprotocollib/protocol/1.21.2-SNAPSHOT/protocol-1.21.2-20241209.154112-6.jar",
+      "sha256": "cfc9681fe588847381cb9e67a49aa378e45faeb40bf8d6673a48bafeea956da1",
+      "filename": "protocol-1.21.2-20241209.154112-6.jar"
+    },
+    {
+      "url": "https://repo.opencollab.dev/maven-snapshots/org/geysermc/mcprotocollib/protocol/1.21.2-SNAPSHOT/protocol-1.21.2-20241209.154112-6-sources.jar",
+      "sha256": "4b0d4bbcc5a3534ac14dc5d42a6443f36e80852e90816e27ae71cb6f93861ee3",
+      "filename": "protocol-1.21.2-20241209.154112-6-sources.jar"
+    }
+  ],
+  "dependency-overrides": {}
+}

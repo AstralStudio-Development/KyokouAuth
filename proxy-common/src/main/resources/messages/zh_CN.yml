@@ -1,0 +1,78 @@
+# KyokouAuth 玩家消息
+#
+# 语法：<#RRGGBB> 十六进制颜色，<red> 等为命名颜色，<newline> 换行，
+# <click:open_url:'URL'>…</click> 可点击文本。尖括号占位符在运行时替换。无法识别的标签会原样显示，
+# 因此写错一个标签不会导致消息发不出去。
+#
+# 调色板
+#   #22D3EE  品牌     #FFFFFF  正文
+#   #D4D4D8  次要     #8B8B94  弱化
+#   #4ADE80  成功     #FACC15  警告     #F87171  危险
+
+login:
+  directory-throttled: "<#FACC15>名字归属查询暂时受限</#FACC15><newline><#D4D4D8><reason><newline><#8B8B94>已缓存名字不受影响，未知名字不会被直接放行"
+  directory-busy: "<#FACC15>名字查询暂时繁忙或正在限流</#FACC15><newline><#D4D4D8>服务器已暂停新查询，请稍后再试，不要连续重连"
+  busy: "<#FACC15>登录繁忙</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Mojang 查询配额已用尽，一分钟后再试"
+  invalid-name: "<#F87171>用户名不合法</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>只允许 3-16 位字母、数字、下划线"
+  name-taken: "<#F87171>这个名字不属于你的微软账户"
+  premium-name: "<#F87171>这个名字属于正版账号</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>用正版启动器连接即可自动验证"
+  premium-retry: "<#FACC15>这个名字属于正版账号</#FACC15><newline><#D4D4D8>正版握手过于频繁，请稍候再试；离线账号请更换名字"
+  premium-in-flight: "<#FACC15>同一来源的这个账号正在验证</#FACC15><newline><#D4D4D8>请等待当前连接结束，不要重复连接"
+  premium-backoff: "<#FACC15>正版会话验证正在冷却</#FACC15><newline><#D4D4D8>请稍后再试，重复失败会延长等待时间；离线账号请更换未被正版占用的名字"
+  identity-already-bound: "<#FACC15>此微软账号已绑定名字「<name>」</#FACC15><newline><#D4D4D8>自动改名未启用，请使用已绑定的名字，或联系管理员改名"
+  name-changed: "<#FACC15>此微软身份已改名为「<name>」</#FACC15><newline><#D4D4D8>请使用这个新名字重新连接"
+  premium-busy: "<#FACC15>正版会话验证暂时繁忙</#FACC15><newline><#D4D4D8>请稍候再试，不要连续重连"
+  premium-name-claimed: "<#F87171>这个名字已被正版账号注册</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>联系管理员换名"
+  identity-renamed: "<#FACC15>账户已改名</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接"
+  directory-unavailable: "<#F87171>无法连接 Mojang</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8><reason>"
+  proxy: "<#F87171>本服无法完成登录握手</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>联系管理员"
+  internal-error: "<#F87171>登录失败</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>联系管理员，控制台有原因"
+  too-many-connections: "<#FACC15>连接过于频繁</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>等待一分钟后重试"
+
+limbo:
+  unsupported-version: "<#FACC15>验证界面支持 Minecraft 1.21 至 26.3 正式版（协议 767–777）。"
+  title: "<#22D3EE>请完成微软验证"
+  subtitle: "<#D4D4D8>点击聊天栏中的链接"
+  command-blocked: "<#FACC15>验证完成前不能离开</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>点击聊天栏中的链接完成验证"
+
+verification:
+  starting: "<#22D3EE>正在连接微软并申请验证码</#22D3EE><newline><#D4D4D8>网络波动时会自动重试，请稍候，不必反复重连"
+  start-unavailable: "<#FACC15>暂时无法连接微软登录服务</#FACC15><newline><#D4D4D8>已进行有限次数重试，请稍后再连接"
+  start-busy: "<#FACC15>微软登录服务正在限流</#FACC15><newline><#D4D4D8>请稍后再试，不要连续重连"
+  prompt: "<#22D3EE>微软账户验证<newline><click:open_url:'<url>'><#FFFFFF><u><url></u></#FFFFFF></click><newline><#D4D4D8>或到 microsoft.com/link 输入 <#FFFFFF><code><newline><#8B8B94><minutes> 分钟内有效"
+  start-failed: "<#F87171>无法启动微软登录</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接"
+  expired: "<#FACC15>验证超时</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接"
+  declined: "<#FACC15>已取消登录</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接"
+  retry: "<#F87171>验证出错</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接"
+  xbox-failed: "<#F87171>该微软账户不可用</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8><reason>"
+  refused: "<#F87171>无法绑定这个名字</#F87171> <#8B8B94>»</#8B8B94> <#D4D4D8><reason>"
+  success: "<#4ADE80>验证成功</#4ADE80> <#8B8B94>»</#8B8B94> <#D4D4D8>欢迎回来，<#FFFFFF><name>"
+  renamed-reconnect: "<#4ADE80>改名成功：「<from>」→「<name>」</#4ADE80><newline><#D4D4D8>身份 UUID 不变，请使用新名字重新连接"
+  reconnect: "<#4ADE80>验证成功</#4ADE80> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接"
+
+command:
+  no-permission: "<#F87171>没有权限"
+  unknown-subcommand: "<#F87171>未知子命令 <#FFFFFF><name></#FFFFFF></#F87171><newline><#D4D4D8>输入 /kyokouauth 查看全部"
+  usage-header: "<#8B8B94>[</#8B8B94><#22D3EE>KyokouAuth</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8>命令"
+  usage-whois: "<#8B8B94>- [</#8B8B94><#22D3EE>whois</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><名字> <#8B8B94>| <#D4D4D8>绑定详情"
+  usage-session: "<#8B8B94>- [</#8B8B94><#22D3EE>session</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><名字> <#8B8B94>| <#D4D4D8>可信会话"
+  usage-verify: "<#8B8B94>- [</#8B8B94><#22D3EE>verify</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><玩家> <#8B8B94>| <#D4D4D8>重发验证码"
+  usage-unbind: "<#8B8B94>- [</#8B8B94><#22D3EE>unbind</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><名字> <#8B8B94>| <#D4D4D8>解除绑定"
+  usage-rename: "<#8B8B94>- [</#8B8B94><#22D3EE>rename</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><旧> <新> <#8B8B94>| <#D4D4D8>改名"
+  usage-untrust: "<#8B8B94>- [</#8B8B94><#22D3EE>untrust</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8><名字> <#8B8B94>| <#D4D4D8>清除会话"
+  usage-status: "<#8B8B94>- [</#8B8B94><#22D3EE>status</#22D3EE><#8B8B94>]</#8B8B94> <#8B8B94>| <#D4D4D8>运行状态"
+  usage-reload: "<#8B8B94>- [</#8B8B94><#22D3EE>reload</#22D3EE><#8B8B94>]</#8B8B94> <#8B8B94>| <#D4D4D8>重载语言文件"
+  reloaded: "<#4ADE80>语言文件已重载 <#8B8B94>»</#8B8B94> <#D4D4D8>数据库与 limbo 设置需重启生效"
+  status: "<#8B8B94>存储 <#FFFFFF><dialect><newline><#8B8B94>会话 <#FFFFFF><session><#D4D4D8> 小时<newline><#8B8B94>语言 <#FFFFFF><locale><newline><#8B8B94>验证中 <#FFFFFF><verifying><#D4D4D8> 人<newline><#8B8B94>Mojang 查询 <#FFFFFF><budget><newline><#8B8B94>身份缓存 <#FFFFFF><cached><#D4D4D8> 条"
+  unknown-name: "<#F87171>没有名为 <#FFFFFF><name></#FFFFFF> 的记录"
+  unknown-player: "<#F87171><#FFFFFF><name></#FFFFFF> 不在线"
+  whois: "<#8B8B94>名字 <#FFFFFF><name><newline><#8B8B94>UUID <#FFFFFF><uuid><newline><#8B8B94>类型 <#FFFFFF><kind><newline><#8B8B94>标识 <#FFFFFF><subject><newline><#8B8B94>玩家代号 <#FFFFFF><gamertag>"
+  session: "<#8B8B94>玩家 <#FFFFFF><name><newline><#8B8B94>来源 <#FFFFFF><address><newline><#8B8B94>剩余 <#FFFFFF><minutes><#D4D4D8> 分钟"
+  session-none: "<#D4D4D8><#FFFFFF><name></#FFFFFF> 没有可信会话"
+  not-verifying: "<#D4D4D8><#FFFFFF><name></#FFFFFF> 不在验证中"
+  verify-resent: "<#4ADE80>已为 <#FFFFFF><name></#FFFFFF> 重新发送验证码"
+  unbound: "<#4ADE80>已解除 <#FFFFFF><name></#FFFFFF> 的绑定"
+  untrusted: "<#4ADE80>已清除 <#FFFFFF><name></#FFFFFF> 的可信会话"
+  renamed: "<#4ADE80>已将 <#FFFFFF><from></#FFFFFF> 改名为 <#FFFFFF><to>"
+  rename-taken: "<#F87171><#FFFFFF><name></#FFFFFF> 已被 <#FFFFFF><owner></#FFFFFF> 占用"
+  internal-error: "<#F87171>操作失败，控制台有原因"

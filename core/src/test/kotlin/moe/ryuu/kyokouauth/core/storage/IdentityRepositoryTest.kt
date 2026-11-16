@@ -51,6 +51,26 @@ class IdentityRepositoryTest {
         Identity.Microsoft(GameName.parseOrThrow(name), Xuid(xuid), gamertag)
 
     @Test
+    fun `verified Microsoft rename preserves identity and refreshes profile atomically on H2`() {
+        val h2 = Database(DatabaseDescriptor(dialect = Dialect.H2, database = File(directory, "rename-h2").absolutePath))
+        try {
+            val store = IdentityRepository(h2)
+            val first = assertIs<ClaimResult.Bound>(store.claim(microsoft("Steve", 1001L, "OldGT"), 1_000L))
+            val renamed = assertIs<ClaimResult.Bound>(store.claimRenamingMicrosoft(microsoft("Alex", 1001L, "NewGT"), 2_000L))
+            assertEquals(first.record.uuid, renamed.record.uuid)
+            assertEquals(first.record.createdAt, renamed.record.createdAt)
+            assertEquals(GameName.parseOrThrow("Steve"), renamed.previousName)
+            assertEquals("NewGT", renamed.record.gamertag)
+            assertEquals(2_000L, renamed.record.lastSeenAt)
+            assertNull(store.byName(GameName.parseOrThrow("Steve")))
+            assertEquals(1, store.all().size)
+            store.claim(microsoft("Other", 2002L), 3_000L)
+            assertIs<ClaimResult.NameTaken>(store.claimRenamingMicrosoft(microsoft("Other", 1001L), 4_000L))
+            assertEquals(GameName.parseOrThrow("Alex"), store.byUuid(first.record.uuid)?.name)
+        } finally { h2.close() }
+    }
+
+    @Test
     fun `a fresh xuid binds its name`() {
         val result = repository.claim(microsoft("Steve", 1001L), 1_000L)
         val bound = assertIs<ClaimResult.Bound>(result)

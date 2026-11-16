@@ -1,0 +1,300 @@
+package moe.ryuu.kyokouauth.proxy
+import moe.ryuu.kyokouauth.core.auth.MojangDirectory
+import moe.ryuu.kyokouauth.core.identity.GameName
+import moe.ryuu.kyokouauth.core.storage.BoundIdentity
+import moe.ryuu.kyokouauth.core.storage.ClaimResult
+import moe.ryuu.kyokouauth.core.text.MessageCatalogue
+import moe.ryuu.kyokouauth.core.text.RichText
+
+/**
+ * The operator's view of the plugin: what is bound, who is trusted, and how to take it away.
+ *
+ * Every subcommand that touches the database does so on the IO pool and answers when the answer
+ * exists. A proxy command must not block a Netty worker on a query, and unlike the login gate there
+ * is no player waiting for the result - so nothing here needs to be synchronous.
+ *
+ * What is deliberately absent compared with the backend plugin: `setspawn`, because the limbo has a
+ * fixed position in the config and no world to write; and the anti-cheat style commands that only
+ * made sense when the plugin owned a server.
+ */
+class KyokouAuthCommand(
+    private val server: ProxyServer,
+    private val config: ProxyConfig,
+    private val messages: MessageCatalogue,
+    private val auth: AuthService,
+    private val gate: LoginGate,
+    private val reloadMessages: () -> Unit,
+) {
+
+    private val usages = listOf(
+        "usage-whois",
+        "usage-session",
+        "usage-verify",
+        "usage-unbind",
+        "usage-rename",
+        "usage-untrust",
+        "usage-status",
+        "usage-reload",
+    )
+
+    fun hasPermission(source: CommandSource): Boolean = source.hasPermission(PERMISSION)
+
+    fun execute(source: CommandSource, args: Array<out String>) {
+        if (!hasPermission(source)) return
+
+        if (args.isEmpty()) {
+            usage(source)
+            return
+        }
+
+        when (args[0].lowercase()) {
+            "whois" -> whois(source, args)
+            "session" -> session(source, args)
+            "verify" -> verify(source, args)
+            "unbind" -> unbind(source, args)
+            "rename" -> rename(source, args)
+            "untrust" -> untrust(source, args)
+            "status" -> status(source)
+            "reload" -> reload(source)
+            else -> tell(source, "command.unknown-subcommand", "name" to args[0])
+        }
+    }
+
+    fun suggest(args: Array<out String>): List<String> {
+        val typed = args.lastOrNull() ?: ""
+
+        if (args.size <= 1) {
+            return NAMES.filter { it.startsWith(typed, ignoreCase = true) }
+        }
+
+        // Only `/kyokouauth verify` names a player; the rest take a name that is not in the proxy's
+        // player list by definition (an offline player's binding).
+        return when (args[0].lowercase()) {
+            "verify" -> server.allPlayers.map { it.username }.filter { it.startsWith(typed, ignoreCase = true) }
+            else -> emptyList()
+        }
+    }
+
+    // --- subcommands -----------------------------------------------------------------------
+
+    private fun usage(source: CommandSource) {
+        tell(source, "command.usage-header")
+        usages.forEach { tell(source, "command.$it") }
+    }
+
+    private fun status(source: CommandSource) {
+        val limit = config.directoryBudget
+        val used = MojangDirectory.budgetUsage()
+
+        tell(
+            source,
+            "command.status",
+            "dialect" to config.database.dialect.displayName,
+            "session" to config.sessionHours.toString(),
+            "locale" to config.locale,
+            "verifying" to gate.verifyingCount().toString(),
+            "budget" to if (limit <= 0) "$used (unlimited)" else "$used/$limit",
+            "cached" to auth.identities.size().toString(),
+        )
+    }
+
+    /**
+     * Reloads what can be reloaded.
+     *
+     * Message files, because they are read per delivery and an operator translates in place. The
+     * database, the limbo bind and the pools are not: rebuilding them under live players would drop
+     * every connection in the limbo, so those changes are a restart.
+     */
+    private fun reload(source: CommandSource) {
+        reloadMessages()
+        tell(source, "command.reloaded")
+    }
+
+    private fun whois(source: CommandSource, args: Array<out String>) {
+        val name = args.getOrNull(1)?.let(GameName::parse)
+        if (name == null) {
+            tell(source, "command.usage-whois")
+            return
+        }
+
+        auth.submit { auth.identities.byName(name) }.thenAccept { record ->
+            if (record == null) {
+                tell(source, "command.unknown-name", "name" to name.value)
+                return@thenAccept
+            }
+
+            tell(
+                source,
+                "command.whois",
+                "name" to record.name.value,
+                "uuid" to record.uuid.toString(),
+                "kind" to when (record.kind) {
+                    BoundIdentity.Kind.MOJANG -> "premium"
+                    BoundIdentity.Kind.XUID -> "microsoft"
+                },
+                "subject" to record.subject,
+                "gamertag" to (record.gamertag ?: "-"),
+            )
+        }
+    }
+
+    private fun session(source: CommandSource, args: Array<out String>) {
+        val name = args.getOrNull(1)?.let(GameName::parse)
+        if (name == null) {
+            tell(source, "command.usage-session")
+            return
+        }
+
+        auth.submit {
+            val record = auth.identities.byName(name)
+            record to record?.let { auth.sessions.find(it.uuid) }
+        }.thenAccept { (record, session) ->
+            if (record == null) {
+                tell(source, "command.unknown-name", "name" to name.value)
+                return@thenAccept
+            }
+
+            if (session == null) {
+                tell(source, "command.session-none", "name" to record.name.value)
+                return@thenAccept
+            }
+
+            val remainingMinutes = ((session.expiresAt - System.currentTimeMillis()) / 60_000L).coerceAtLeast(0)
+            tell(
+                source,
+                "command.session",
+                "name" to record.name.value,
+                "address" to session.address,
+                "minutes" to remainingMinutes.toString(),
+            )
+        }
+    }
+
+    private fun verify(source: CommandSource, args: Array<out String>) {
+        val requested = args.getOrNull(1)
+        val target = requested?.let { name -> server.getPlayer(name).orElse(null) }
+        if (target == null) {
+            tell(source, "command.unknown-player", "name" to (requested ?: ""))
+            return
+        }
+
+        // Asks Microsoft for a fresh code, so the answer comes from the IO pool like every other
+        // network call here.
+        auth.submit { gate.restartVerification(target) }.thenAccept { restarted ->
+            if (restarted) {
+                tell(source, "command.verify-resent", "name" to target.username)
+            } else {
+                tell(source, "command.not-verifying", "name" to target.username)
+            }
+        }
+    }
+
+    private fun unbind(source: CommandSource, args: Array<out String>) {
+        val name = args.getOrNull(1)?.let(GameName::parse)
+        if (name == null) {
+            tell(source, "command.usage-unbind")
+            return
+        }
+
+        auth.submit {
+            val record = auth.identities.byName(name) ?: return@submit null
+            auth.auth.revokeSession(record.uuid)
+            auth.identities.unbind(record.uuid)
+            record
+        }.thenAccept { record ->
+            if (record == null) {
+                tell(source, "command.unknown-name", "name" to name.value)
+            } else {
+                tell(source, "command.unbound", "name" to record.name.value)
+            }
+        }
+    }
+
+    private fun untrust(source: CommandSource, args: Array<out String>) {
+        val name = args.getOrNull(1)?.let(GameName::parse)
+        if (name == null) {
+            tell(source, "command.usage-untrust")
+            return
+        }
+
+        auth.submit {
+            val record = auth.identities.byName(name) ?: return@submit null
+            auth.auth.revokeSession(record.uuid)
+            record
+        }.thenAccept { record ->
+            if (record == null) {
+                tell(source, "command.unknown-name", "name" to name.value)
+            } else {
+                tell(source, "command.untrusted", "name" to record.name.value)
+            }
+        }
+    }
+
+    private fun rename(source: CommandSource, args: Array<out String>) {
+        val from = args.getOrNull(1)?.let(GameName::parse)
+        val to = args.getOrNull(2)?.let(GameName::parse)
+        if (from == null || to == null) {
+            tell(source, "command.usage-rename")
+            return
+        }
+
+        auth.submit {
+            val record = auth.identities.byName(from) ?: return@submit null
+            record to auth.identities.rename(record.uuid, to, System.currentTimeMillis())
+        }.thenAccept { result ->
+            if (result == null) {
+                tell(source, "command.unknown-name", "name" to from.value)
+                return@thenAccept
+            }
+
+            val (record, outcome) = result
+            when (outcome) {
+                is ClaimResult.Bound -> {
+                    tell(source, "command.renamed", "from" to from.value, "to" to to.value)
+
+                    // An online player would keep a name the database no longer agrees with, so they
+                    // are moved off to resolve it again.
+                    server.getPlayer(record.uuid).ifPresent { player ->
+                        player.disconnect(messages.parsed("login.identity-renamed", localeOf(player)))
+                    }
+                }
+
+                is ClaimResult.NameTaken -> tell(
+                    source,
+                    "command.rename-taken",
+                    "name" to to.value,
+                    "owner" to outcome.by.name.value,
+                )
+
+                else -> tell(source, "command.internal-error")
+            }
+        }
+    }
+
+    // --- plumbing --------------------------------------------------------------------------
+
+    private fun tell(
+        source: CommandSource,
+        key: String,
+        vararg placeholders: Pair<String, String>,
+    ) {
+        val locale = (source as? Player)?.let { localeOf(it) }
+        source.sendMessage(component(key, locale, *placeholders))
+    }
+
+    private fun component(key: String, locale: String?, vararg placeholders: Pair<String, String>): RichText.Parsed =
+        messages.parsed(key, locale, *placeholders)
+
+    private fun localeOf(player: Player): String? = player.effectiveLocale.toString()
+
+    companion object {
+        const val NAME = "kyokouauth"
+
+        /** The short form operators type most often; `/ka status` twice a day. */
+        const val ALIAS = "ka"
+
+        const val PERMISSION = "kyokouauth.admin"
+
+        private val NAMES = listOf("whois", "session", "verify", "unbind", "rename", "untrust", "status", "reload")
+    }
+}

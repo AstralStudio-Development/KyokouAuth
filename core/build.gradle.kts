@@ -7,6 +7,7 @@ dependencies {
     implementation(libs.caffeine)
     implementation(libs.hikaricp)
     implementation(libs.gson)
+    implementation(libs.snakeyaml)
 
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)

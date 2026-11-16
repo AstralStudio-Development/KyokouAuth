@@ -25,6 +25,7 @@ class AuthCoordinator(
     private val clock: () -> Long = System::currentTimeMillis,
     private val sessionMillis: Long = 0L,
     private val sessionBindsAddress: Boolean = true,
+    private val autoRenameMicrosoft: Boolean = false,
     private val directory: (String) -> MojangDirectory.Lookup = MojangDirectory::lookup,
 ) {
 
@@ -47,6 +48,16 @@ class AuthCoordinator(
         ) : Decision()
 
         data class Reject(val reason: RejectReason, val detail: String = "") : Decision()
+
+        /**
+         * The name is Mojang's, so this connection has to prove it by passing Mojang's own session
+         * check before anything else happens.
+         *
+         * This is the only door that is invisible to the player: a premium client answers the
+         * challenge by itself, and the proxy then knows the real profile. A device code would ask the
+         * owner of the name to prove something they already proved by starting the game.
+         */
+        data class MojangSession(val expectedUuid: UUID) : Decision()
     }
 
     enum class Reason {
@@ -91,6 +102,16 @@ class AuthCoordinator(
         /** Mojang could not be reached, so we cannot tell whether this name is premium. */
         DIRECTORY_UNAVAILABLE,
 
+        /**
+         * The plugin declined to ask Mojang - its own lookup budget is spent, or Mojang asked us to
+         * back off - and this name has no binding to fall back on.
+         *
+         * Reported separately from [DIRECTORY_UNAVAILABLE] because it is almost always the result of
+         * someone spending the budget on purpose, and the remedy is to wait for the window rather
+         * than to go looking for a network problem.
+         */
+        DIRECTORY_THROTTLED,
+
         /** Proxy forwarding detected; the login handshake never reaches this server. */
         PROXY_FORWARDING,
 
@@ -108,23 +129,43 @@ class AuthCoordinator(
         // Ownership by Mojang is checked first, before any stored binding, because it decides which
         // door this connection is allowed to use at all - not what state it is in.
         //
-        // Reaching this point with a Mojang-owned name means the handshake did NOT happen for this
-        // connection: either the client could not complete it, or it is not installed. Either way
-        // there is no second way in. See [RejectReason.PREMIUM_NAME].
+        // The proxy can force online mode per connection. A directory match is not authentication:
+        // it selects Mojang's session handshake and provides the UUID the verified profile must own.
         when (val lookup = directory(name.key)) {
-            is MojangDirectory.Lookup.Failed ->
-                return Decision.Reject(RejectReason.DIRECTORY_UNAVAILABLE, lookup.reason)
+            is MojangDirectory.Lookup.Failed -> {
+                if (!lookup.withheld) {
+                    return Decision.Reject(RejectReason.DIRECTORY_UNAVAILABLE, lookup.reason)
+                }
+
+                // Nothing was asked, so nothing is known about this name. A binding already on record
+                // still decides what happens to its owner; a name with no binding is refused,
+                // because admitting one unexamined is exactly the window this check closes.
+                //
+                // The trade this makes: a bound name that Mojang has since claimed keeps working
+                // until the window resets. The alternative is worse - whoever spends the lookup
+                // budget would also disconnect every regular player on the server.
+                val known = identities.byName(name)
+                    ?: return Decision.Reject(RejectReason.DIRECTORY_THROTTLED, lookup.reason)
+
+                return decideForBound(known, address, now)
+            }
 
             is MojangDirectory.Lookup.Premium -> {
+                val bound = identities.byName(name)
+
                 // Distinguish "someone else's name" from "your name, taken from you". The second is a
                 // real incident the operator has to act on, and the player needs to hear that their
                 // data still exists rather than a flat refusal.
-                val bound = identities.byName(name)
-                return if (bound != null && bound.kind == BoundIdentity.Kind.XUID) {
-                    Decision.Reject(RejectReason.PREMIUM_NAME_CLAIMED, "uuid=${bound.uuid} xuid=${bound.subject}")
-                } else {
-                    Decision.Reject(RejectReason.PREMIUM_NAME, "'${name.value}' is owned by Mojang")
+                if (bound != null && bound.kind == BoundIdentity.Kind.XUID) {
+                    return Decision.Reject(RejectReason.PREMIUM_NAME_CLAIMED, "uuid=${bound.uuid} xuid=${bound.subject}")
                 }
+
+                // Bound or not, every connection under a Mojang-owned name is proved the same way:
+                // the session check runs before anything else, the profile arrives final, and the
+                // binding is recorded on the way in. A trust record cannot stand in for it - a name
+                // Mojang owns belongs to whoever holds that account now, not to whoever held it when
+                // the record was written.
+                return Decision.MojangSession(lookup.uuid)
             }
 
             MojangDirectory.Lookup.Free -> Unit
@@ -137,9 +178,9 @@ class AuthCoordinator(
     }
 
     private fun decideForBound(bound: BoundIdentity, address: String, now: Long): Decision {
-        // No Mojang re-check here: `decide` already rejected the connection if the name belongs to a
-        // Mojang account, which also covers the case of a name that became premium *after* it was
-        // bound - that binding simply never reaches this function again.
+        // A local play-session record can never replace Mojang authentication, even if the
+        // directory is throttled. Only XUID identities may use the device-code/session path.
+        if (bound.kind == BoundIdentity.Kind.MOJANG) return Decision.MojangSession(bound.uuid)
         val session = sessions.find(bound.uuid)
         if (session != null && session.isValidFor(address, now, sessionBindsAddress) && sessionMillis > 0) {
             return Decision.Admit(bound.toIdentity(), bound)
@@ -164,40 +205,49 @@ class AuthCoordinator(
     fun revokeSession(uuid: UUID) = sessions.delete(uuid)
 
     /**
-     * Turns a verified XUID into a binding, refusing the states the domain forbids.
+     * Turns a verified Microsoft sign-in into a binding, refusing the states the domain forbids.
      *
-     * Called only after Microsoft has proven the XUID, so the XUID is trustworthy here - what can
+     * Called only after Microsoft has proven the account, so the XUID is trustworthy here - what can
      * still go wrong is the name being taken, or this XUID already having a different name.
      */
-    fun bindMicrosoft(name: GameName, xuid: moe.ryuu.kyokouauth.core.identity.Xuid, gamertag: String): ClaimOutcome {
-        val identity = Identity.Microsoft(name, xuid, gamertag)
-
-        // A name Mojang owns can never be claimed by an XUID, even if nothing is bound to it yet.
-        when (directory(name.key)) {
+    fun bindMicrosoft(
+        name: GameName,
+        xuid: moe.ryuu.kyokouauth.core.identity.Xuid,
+        gamertag: String,
+    ): ClaimOutcome {
+        // A name Mojang owns can never be claimed by an XUID, even if nothing is bound to it yet. It
+        // has one door - the session check the proxy runs before the player ever reaches the limbo -
+        // and a device code is not that door. See [RejectReason.PREMIUM_NAME].
+        when (val lookup = directory(name.key)) {
             MojangDirectory.Lookup.Free -> Unit
+
             is MojangDirectory.Lookup.Premium ->
-                return ClaimOutcome.Refused(RejectReason.NAME_TAKEN, "name is owned by a Mojang account")
+                return ClaimOutcome.Refused(RejectReason.PREMIUM_NAME, "name is owned by a Mojang account")
+
             is MojangDirectory.Lookup.Failed ->
-                return ClaimOutcome.Refused(RejectReason.DIRECTORY_UNAVAILABLE, "could not verify name ownership")
+                return ClaimOutcome.Refused(
+                    if (lookup.withheld) RejectReason.DIRECTORY_THROTTLED else RejectReason.DIRECTORY_UNAVAILABLE,
+                    lookup.reason,
+                )
         }
 
-        return when (val result = identities.claim(identity, clock())) {
-            is moe.ryuu.kyokouauth.core.storage.ClaimResult.Bound -> ClaimOutcome.Bound(result.record)
-            is moe.ryuu.kyokouauth.core.storage.ClaimResult.NameTaken ->
-                ClaimOutcome.Refused(RejectReason.NAME_TAKEN, "name belongs to ${result.by.uuid}")
-            is moe.ryuu.kyokouauth.core.storage.ClaimResult.IdentityAlreadyNamed ->
-                ClaimOutcome.Refused(RejectReason.IDENTITY_RENAMED, "this account is already named ${result.existing.name}")
-            is moe.ryuu.kyokouauth.core.storage.ClaimResult.UnknownIdentity ->
-                ClaimOutcome.Refused(RejectReason.INTERNAL_ERROR, "unknown identity")
-        }
+        return claim(Identity.Microsoft(name, xuid, gamertag))
     }
 
     /** Same as [bindMicrosoft], for an identity whose Mojang UUID has just been proven. */
     fun bindPremium(mojangUuid: UUID, mojangName: GameName): ClaimOutcome {
         MojangDirectory.rememberPremium(mojangName.key, mojangUuid)
-        val identity = Identity.Premium(mojangName, mojangUuid)
-        return when (val result = identities.claim(identity, clock())) {
-            is moe.ryuu.kyokouauth.core.storage.ClaimResult.Bound -> ClaimOutcome.Bound(result.record)
+        return claim(Identity.Premium(mojangName, mojangUuid))
+    }
+
+    private fun claim(identity: Identity): ClaimOutcome {
+        val result = if (identity is Identity.Microsoft && autoRenameMicrosoft) {
+            identities.claimRenamingMicrosoft(identity, clock())
+        } else {
+            identities.claim(identity, clock())
+        }
+        return when (result) {
+            is moe.ryuu.kyokouauth.core.storage.ClaimResult.Bound -> ClaimOutcome.Bound(result.record, result.previousName)
 
             is moe.ryuu.kyokouauth.core.storage.ClaimResult.NameTaken ->
                 ClaimOutcome.Refused(RejectReason.NAME_TAKEN, "name belongs to ${result.by.uuid}")
@@ -210,11 +260,16 @@ class AuthCoordinator(
             // common case of them having done it outside the server - and would freeze their old name
             // forever, since that row still holds the primary key.
             is moe.ryuu.kyokouauth.core.storage.ClaimResult.IdentityAlreadyNamed -> {
+                if (identity !is Identity.Premium) {
+                    return ClaimOutcome.Refused(RejectReason.IDENTITY_RENAMED,
+                        "this account is already named ${result.existing.name}", result.existing.name)
+                }
+
                 val existing = result.existing
                 // The old name may be free at Mojang again; drop any stale "this is premium" answer.
                 MojangDirectory.forget(existing.name.key)
 
-                when (val renamed = identities.rename(existing.uuid, mojangName, clock())) {
+                when (val renamed = identities.rename(existing.uuid, identity.name, clock())) {
                     is moe.ryuu.kyokouauth.core.storage.ClaimResult.Bound ->
                         ClaimOutcome.Bound(renamed.record)
 
@@ -231,8 +286,8 @@ class AuthCoordinator(
     }
 
     sealed class ClaimOutcome {
-        data class Bound(val record: BoundIdentity) : ClaimOutcome()
-        data class Refused(val reason: RejectReason, val detail: String) : ClaimOutcome()
+        data class Bound(val record: BoundIdentity, val previousName: GameName? = null) : ClaimOutcome()
+        data class Refused(val reason: RejectReason, val detail: String, val existingName: GameName? = null) : ClaimOutcome()
     }
 
     companion object {

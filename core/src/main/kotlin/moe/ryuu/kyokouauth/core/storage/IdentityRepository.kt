@@ -56,8 +56,8 @@ data class BoundIdentity(
 
 /** Outcome of trying to claim a name. Every branch is a state the login flow must handle differently. */
 sealed class ClaimResult {
-    /** The name is now bound to this identity. Either a first bind or a routine refresh. */
-    data class Bound(val record: BoundIdentity) : ClaimResult()
+    /** A committed bind, refresh or authorized rename; previousName is set only after a name move. */
+    data class Bound(val record: BoundIdentity, val previousName: GameName? = null) : ClaimResult()
 
     /** The name belongs to a different identity. Never overridable by the player. */
     data class NameTaken(val by: BoundIdentity) : ClaimResult()
@@ -104,13 +104,23 @@ class IdentityRepository(private val database: Database) : IdentityStore {
     /**
      * Binds [identity] to its name, or explains why it cannot.
      *
-     * The check-then-insert is not racy despite running on a pool: the two unique constraints in the
-     * schema are the real authority, and a losing race surfaces as an [java.sql.SQLIntegrityConstraintViolationException]
-     * which is translated back into the same [ClaimResult] vocabulary rather than escaping as a crash.
+     * The unique constraints remain authoritative if callers race: conflicting writes roll back,
+     * never overwrite another identity. An enabled name move, gamertag refresh and identity update
+     * commit in the same transaction, with the old name untouched on failure.
      */
-    override fun claim(identity: Identity, now: Long): ClaimResult = database.transaction { connection ->
+    override fun claim(identity: Identity, now: Long): ClaimResult = claim(identity, now, allowNameChange = false)
+
+    override fun claimRenamingMicrosoft(identity: Identity.Microsoft, now: Long): ClaimResult =
+        claim(identity, now, allowNameChange = true)
+
+    private fun claim(identity: Identity, now: Long, allowNameChange: Boolean): ClaimResult = database.transaction { connection ->
         val existing = byUuidUnsafe(connection, identity.uuid)
-        if (existing != null && existing.name.key != identity.name.key) {
+        if (allowNameChange && existing != null && (existing.kind != BoundIdentity.Kind.XUID ||
+                existing.subject != (identity as Identity.Microsoft).xuid.value.toString())) {
+            return@transaction ClaimResult.NameTaken(existing)
+        }
+        val changingName = existing != null && existing.name.key != identity.name.key
+        if (changingName && !allowNameChange) {
             return@transaction ClaimResult.IdentityAlreadyNamed(existing)
         }
 
@@ -127,7 +137,7 @@ class IdentityRepository(private val database: Database) : IdentityStore {
         upsertIdentity(connection, record)
         upsertName(connection, record)
 
-        ClaimResult.Bound(record)
+        ClaimResult.Bound(record, existing?.name?.takeIf { changingName })
     }
 
     /** Records that this identity was seen, without changing anything else. */

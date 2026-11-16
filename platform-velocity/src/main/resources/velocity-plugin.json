@@ -1,0 +1,9 @@
+{
+  "id": "kyokouauth",
+  "name": "KyokouAuth",
+  "version": "${version}",
+  "description": "Microsoft-account verification for offline-mode proxies.",
+  "url": "https://github.com/ryuu/kyokouauth",
+  "authors": ["Ryuu"],
+  "main": "moe.ryuu.kyokouauth.velocity.KyokouAuthVelocity"
+}

@@ -10,11 +10,9 @@ pluginManagement {
 dependencyResolutionManagement {
     repositories {
         mavenCentral()
-        maven("https://repo.papermc.io/repository/maven-public/")
-        maven("https://hub.spigotmc.org/nexus/content/repositories/snapshots/")
-        // PlaceholderAPI. Compile-time only - the runtime plugin is the server owner's business.
-        maven("https://repo.extendedclip.com/releases/")
     }
 }
 
-include("core", "platform-bukkit", "floodgate-link")
+include("core", "limbo-api", "limbo", "proxy-common", "platform-velocity", "platform-bungee")
+(767..777).forEach { include("limbo-protocol-$it") }
+include("limbo-runtime", "limbo-text-legacy", "limbo-text-json", "limbo-text-nbt")

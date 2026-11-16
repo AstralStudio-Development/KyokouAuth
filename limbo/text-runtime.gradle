@@ -1,0 +1,21 @@
+// Text format families share dependencies, not per-protocol copies.
+def family = project.name.substring('limbo-text-'.length())
+def versions = [legacy: '4.17.0', json: '4.25.0', nbt: '5.2.0']
+def version = versions[family]
+if (version == null) throw new GradleException("Unknown Limbo text family: $family")
+dependencies {
+    api("net.kyori:adventure-text-serializer-gson:$version") { exclude group: 'com.google.code.gson' }
+    if (family != 'nbt') api("net.kyori:adventure-text-serializer-json-legacy-impl:$version") { exclude group: 'com.google.code.gson' }
+}
+java { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
+tasks.named('shadowJar') {
+    archiveClassifier.set('isolated')
+    mergeServiceFiles()
+    filesMatching('META-INF/services/**') { duplicatesStrategy = DuplicatesStrategy.INCLUDE }
+    relocate 'net.kyori', "moe.ryuu.kyokouauth.limbo.text.${family}.net.kyori"
+    relocate 'com.google.gson', 'moe.ryuu.kyokouauth.limbo.shared.com.google.gson'
+    dependencies { exclude(dependency('org.jetbrains.kotlin:.*:.*')) }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/versions/**/module-info.class', 'module-info.class'
+}
+configurations.create('isolated') { canBeConsumed = true; canBeResolved = false }
+artifacts { isolated tasks.named('shadowJar') }

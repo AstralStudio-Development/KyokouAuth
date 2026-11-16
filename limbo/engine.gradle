@@ -1,0 +1,98 @@
+// Protocol code remains isolated; transport/runtime libraries are not duplicated per version.
+def protocol = project.name.tokenize('-').last().toInteger()
+def versions = [767:'1.21-20241010.155958-24', 768:'1.21.2-20241209.154112-6',
+    769:'1.21.4-20250612.174129-27', 770:'1.21.5-1', 771:'1.21.6-1', 772:'1.21.7-1',
+    773:'1.21.9-20251210.010914-21', 774:'1.21.11-1', 775:'26.1-1', 776:'26.2', 777:'26.3-4']
+def coordinate = "org.geysermc.mcprotocollib:protocol:${versions[protocol]}"
+def family = protocol <= 769 ? 'legacy' : protocol <= 775 ? 'json' : 'nbt'
+repositories {
+    maven { url = 'https://repo.opencollab.dev/maven-releases/' }
+    maven { url = 'https://repo.opencollab.dev/maven-snapshots/' }
+    maven { url = 'https://maven.lenni0451.net/releases/' }
+}
+configurations.configureEach {
+    ['netty-transport-native-epoll','netty-transport-native-io_uring','netty-transport-native-kqueue',
+     'netty-resolver-dns-native-macos','netty-codec-native-quic','netty-incubator-transport-native-io_uring',
+     'netty-incubator-codec-native-quic'].each { exclude group: 'io.netty', module: it }
+    exclude group: 'io.netty.incubator', module: 'netty-incubator-transport-native-io_uring'
+    exclude group: 'io.netty.incubator', module: 'netty-incubator-codec-native-quic'
+}
+def codecUpstream = configurations.create('codecUpstream') { canBeConsumed = false; canBeResolved = true }
+def codecSources = configurations.create('codecSources') { canBeConsumed = false; canBeResolved = true; transitive = false }
+dependencies {
+    compileOnly project(':limbo-api')
+    compileOnly project(':limbo-runtime')
+    compileOnly project(":limbo-text-${family}")
+    compileOnly 'io.netty:netty-all:4.2.1.Final'
+    compileOnly 'org.jspecify:jspecify:1.0.0'
+    compileOnly 'org.checkerframework:checker-qual:3.42.0'
+    // Only the MCPL implementation itself enters this engine's artifact.
+    implementation(coordinate) { transitive = false }
+    if (protocol >= 776) implementation("org.geysermc.mcprotocollib:text-serializer-nbt:${protocol == 776 ? '0.1.0' : '0.2.1'}") { transitive = false }
+    add(codecUpstream.name, coordinate)
+    add(codecSources.name, "${coordinate}:sources")
+    // Independent full upstream clients are test/tool dependencies, never production dependencies.
+    testImplementation project(':limbo-api')
+    testImplementation project(':limbo-runtime')
+    testImplementation project(":limbo-text-${family}")
+    testImplementation coordinate
+    testImplementation 'io.netty:netty-all:4.2.1.Final'
+    testImplementation 'org.jetbrains.kotlin:kotlin-test:2.4.21'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
+}
+java { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
+def generated = layout.buildDirectory.dir('generated/limbo-codec')
+def generateCodec = tasks.register('generateLimboCodec', Exec) {
+    inputs.files(codecUpstream, codecSources)
+    inputs.file(rootProject.file('tools/generate-limbo-codec.py'))
+    inputs.dir(rootProject.file('limbo/codec-generator'))
+    outputs.dir(generated)
+    doFirst {
+        def mcpl = codecUpstream.files.find { it.name.startsWith('protocol-') }
+        if (mcpl == null) throw new GradleException("Missing upstream protocol artifact for ${protocol}")
+        def javaHome = javaToolchains.launcherFor { languageVersion = org.gradle.jvm.toolchain.JavaLanguageVersion.of(25) }.get().metadata.installationPath.asFile
+        def suffix = System.getProperty('os.name').toLowerCase().contains('windows') ? '.exe' : ''
+        def output = generated.get().asFile
+        output.mkdirs()
+        new File(output, 'tool-classpath.txt').text = codecUpstream.asPath
+        commandLine 'python', rootProject.file('tools/generate-limbo-codec.py'), '--protocol', protocol,
+            '--mcpl-jar', mcpl, '--sources-jar', codecSources.singleFile, '--classpath', codecUpstream.asPath,
+            '--output-dir', output, '--java', new File(javaHome, "bin/java${suffix}"),
+            '--javac', new File(javaHome, "bin/javac${suffix}"), '--verify'
+    }
+}
+kotlin.sourceSets.main.kotlin.srcDir(rootProject.file('limbo/engine-src/main/kotlin'))
+if (protocol <= 768) kotlin.sourceSets.main.kotlin.srcDir(rootProject.file("limbo/engine-src/transport-${protocol}/kotlin"))
+kotlin.sourceSets.main.kotlin.srcDir(rootProject.file("limbo/engine-src/${protocol <= 768 ? 'legacy' : 'modern'}/kotlin"))
+kotlin.sourceSets.main.kotlin.srcDir(rootProject.file("limbo/engine-src/${protocol == 767 ? 'ping-legacy' : 'ping-modern'}/kotlin"))
+kotlin.sourceSets.test.kotlin.srcDir(rootProject.file('limbo/engine-src/test/kotlin'))
+sourceSets.main.java.srcDir(generated.map { it.dir('java') })
+sourceSets.main.resources.srcDir(rootProject.file('limbo/engine-src/main/resources'))
+sourceSets.main.resources.srcDir(generated.map { it.dir('resources') })
+tasks.named('compileKotlin') { dependsOn generateCodec }
+tasks.named('compileJava') { dependsOn generateCodec }
+tasks.named('processResources') { dependsOn generateCodec }
+tasks.named('test') {
+    systemProperty 'expected.protocol', protocol
+    maxHeapSize = '256m'
+    maxParallelForks = 1
+    jvmArgs '-XX:ActiveProcessorCount=2'
+}
+tasks.named('shadowJar') {
+    archiveClassifier.set('isolated')
+    mergeServiceFiles()
+    filesMatching('META-INF/services/**') { duplicatesStrategy = DuplicatesStrategy.INCLUDE }
+    def base = "moe.ryuu.kyokouauth.limbo.engine.p${protocol}"
+    relocate 'moe.ryuu.kyokouauth.limbo.session', "${base}.session"
+    relocate 'org.geysermc', "${base}.libs.org.geysermc"
+    ['org.cloudburstmc','it.unimi.dsi.fastutil','com.nukkitx','com.google.gson','org.slf4j'].each {
+        relocate it, "moe.ryuu.kyokouauth.limbo.shared.${it}"
+    }
+    relocate 'net.kyori', "moe.ryuu.kyokouauth.limbo.text.${family}.net.kyori"
+    dependencies { exclude(dependency('org.jetbrains.kotlin:.*:.*')) }
+    exclude 'META-INF/*.SF','META-INF/*.DSA','META-INF/*.RSA','META-INF/versions/**/module-info.class','module-info.class','META-INF/native/**'
+}
+configurations.create('isolated') { canBeConsumed = true; canBeResolved = false }
+artifacts { isolated tasks.named('shadowJar') }
+tasks.named('build') { dependsOn tasks.named('shadowJar') }

@@ -18,6 +18,9 @@ interface IdentityStore {
 
     fun claim(identity: Identity, now: Long): ClaimResult
 
+    /** Atomic name move plus profile refresh, only after the caller verified this Microsoft identity. */
+    fun claimRenamingMicrosoft(identity: Identity.Microsoft, now: Long): ClaimResult
+
     fun touch(uuid: UUID, now: Long)
 
     fun unbind(uuid: UUID): Boolean

@@ -15,6 +15,7 @@ import java.io.File
 import java.nio.file.Files
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -40,6 +41,9 @@ class AuthCoordinatorTest {
     /** When true, the directory reports an outage instead of an answer. */
     private var directoryDown = false
 
+    /** When true, the plugin declines to ask at all - the state a spent lookup budget produces. */
+    private var directoryWithheld = false
+
     @BeforeEach
     fun setUp() {
         directory = Files.createTempDirectory("kyokouauth-auth").toFile()
@@ -54,7 +58,9 @@ class AuthCoordinatorTest {
             clock = { now },
             sessionMillis = 60_000L,
             directory = { key ->
-                if (directoryDown) {
+                if (directoryWithheld) {
+                    MojangDirectory.Lookup.Failed("simulated spent budget", withheld = true)
+                } else if (directoryDown) {
                     MojangDirectory.Lookup.Failed("simulated outage")
                 } else if (key in premiumNames) {
                     MojangDirectory.Lookup.Premium(
@@ -87,16 +93,15 @@ class AuthCoordinatorTest {
     }
 
     @Test
-    fun `a premium name is refused outright, never offered a second path`() {
+    fun `a premium name is proved by the mojang session, never by a device code`() {
         premiumNames += "notch"
 
         val decision = coordinator.decide(name("Notch"), "10.0.0.1")
 
-        // The Mojang handshake is the only door for a premium name. Reaching `decide` at all means
-        // that handshake did not happen for this connection, so there is nothing left to try -
-        // falling through to a device code would let an offline client sit under someone else's name.
-        val reject = assertIs<AuthCoordinator.Decision.Reject>(decision)
-        assertEquals(AuthCoordinator.RejectReason.PREMIUM_NAME, reject.reason)
+        // The name is Mojang's, so the connection has to pass Mojang's own session check before
+        // anything else. A device code would ask the owner to prove again something they proved by
+        // starting the game; a trust record would outlive the account it was written for.
+        assertIs<AuthCoordinator.Decision.MojangSession>(decision)
     }
 
     @Test
@@ -119,6 +124,59 @@ class AuthCoordinatorTest {
 
         val reject = assertIs<AuthCoordinator.Decision.Reject>(decision)
         assertEquals(AuthCoordinator.RejectReason.DIRECTORY_UNAVAILABLE, reject.reason)
+    }
+
+    /**
+     * The lookup budget is spent.
+     *
+     * That is a local condition, not an outage: nothing was asked, so nothing is known about the name
+     * - but a binding already on record still describes its owner. Serving those players is what
+     * keeps a spent budget from being a server-wide lockout, which is exactly what someone spending
+     * the budget on purpose would be aiming for.
+     */
+    @Test
+    fun `a spent lookup budget still admits a bound player with a live session`() {
+        coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        coordinator.grantSession(Identity.ofXuid(Xuid(1001L)), "10.0.0.1")
+
+        directoryWithheld = true
+
+        val admitted = assertIs<AuthCoordinator.Decision.Admit>(coordinator.decide(name("Steve"), "10.0.0.1"))
+        assertEquals(Identity.ofXuid(Xuid(1001L)), admitted.identity.uuid)
+    }
+
+    @Test
+    fun `a spent lookup budget still sends a bound player to verification`() {
+        coordinator.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+
+        directoryWithheld = true
+
+        val decision = assertIs<AuthCoordinator.Decision.Verify>(coordinator.decide(name("Steve"), "10.0.0.1"))
+        assertEquals(AuthCoordinator.Reason.SESSION_EXPIRED, decision.reason)
+        assertEquals(false, decision.provisional)
+    }
+
+    @Test
+    fun `a stored premium identity still requires a handshake when the directory budget is spent`() {
+        val premiumUuid = UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5")
+        identities.claim(Identity.Premium(name("Notch"), premiumUuid), now)
+        coordinator.grantSession(premiumUuid, "10.0.0.1")
+        directoryWithheld = true
+        val decision = assertIs<AuthCoordinator.Decision.MojangSession>(coordinator.decide(name("Notch"), "10.0.0.1"))
+        assertEquals(premiumUuid, decision.expectedUuid)
+    }
+
+    @Test
+    fun `a spent lookup budget refuses an unknown name instead of binding it unexamined`() {
+        directoryWithheld = true
+
+        val decision = coordinator.decide(name("Notch"), "10.0.0.1")
+
+        // The one thing that must not happen here: admitting the name because we could not ask. That
+        // is the window in which a premium name could be bound to whichever Microsoft account
+        // completes a sign-in first.
+        val reject = assertIs<AuthCoordinator.Decision.Reject>(decision)
+        assertEquals(AuthCoordinator.RejectReason.DIRECTORY_THROTTLED, reject.reason)
     }
 
     @Test
@@ -181,8 +239,10 @@ class AuthCoordinatorTest {
 
         val outcome = coordinator.bindMicrosoft(name("Notch"), Xuid(1001L), "NotchGT")
 
+        // The name is Mojang's, and a device code is not its door: only the session check the proxy
+        // runs before the limbo can prove it. So this binding never happens.
         val refused = assertIs<AuthCoordinator.ClaimOutcome.Refused>(outcome)
-        assertEquals(AuthCoordinator.RejectReason.NAME_TAKEN, refused.reason)
+        assertEquals(AuthCoordinator.RejectReason.PREMIUM_NAME, refused.reason)
     }
 
     @Test
@@ -215,6 +275,90 @@ class AuthCoordinatorTest {
         val outcome = coordinator.bindMicrosoft(name("Alex"), Xuid(1001L), "SteveGT")
         val refused = assertIs<AuthCoordinator.ClaimOutcome.Refused>(outcome)
         assertEquals(AuthCoordinator.RejectReason.IDENTITY_RENAMED, refused.reason)
+        assertEquals(name("Steve"), refused.existingName, "disabled mode must tell the actual bound name")
+    }
+
+    private fun autoRenaming(store: moe.ryuu.kyokouauth.core.storage.IdentityStore = identities) = AuthCoordinator(
+        identities = store, sessions = sessions, clock = { now }, sessionMillis = 60_000L,
+        autoRenameMicrosoft = true,
+        directory = { key -> when {
+            directoryDown -> MojangDirectory.Lookup.Failed("simulated outage")
+            directoryWithheld -> MojangDirectory.Lookup.Failed("simulated limit", withheld = true)
+            key in premiumNames -> MojangDirectory.Lookup.Premium(UUID.randomUUID(), key)
+            else -> MojangDirectory.Lookup.Free
+        } },
+    )
+
+    @Test
+    fun `enabled Microsoft rename keeps the identity and admits the new name after one reconnect`() {
+        val auth = autoRenaming()
+        val first = assertIs<AuthCoordinator.ClaimOutcome.Bound>(auth.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT"))
+        now += 1_000
+        val pending = assertIs<AuthCoordinator.Decision.Verify>(auth.decide(name("Alex"), "10.0.0.1"))
+        assertTrue(pending.provisional)
+        val renamed = assertIs<AuthCoordinator.ClaimOutcome.Bound>(auth.bindMicrosoft(name("Alex"), Xuid(1001L), "SteveGT"))
+        assertEquals(first.record.uuid, renamed.record.uuid)
+        assertEquals(first.record.createdAt, renamed.record.createdAt)
+        assertEquals(name("Steve"), renamed.previousName)
+        assertEquals(name("Alex"), renamed.record.name)
+        assertEquals(null, identities.byName(name("Steve")))
+        assertEquals(1, identities.all().size)
+        auth.grantSession(renamed.record.uuid, "10.0.0.1")
+        val reconnect = assertIs<AuthCoordinator.Decision.Admit>(auth.decide(name("Alex"), "10.0.0.1"))
+        assertEquals(first.record.uuid, reconnect.identity.uuid)
+        assertEquals(name("Alex"), reconnect.identity.name)
+    }
+
+    @Test
+    fun `automatic rename cannot take another identity's name`() {
+        val auth = autoRenaming()
+        auth.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        auth.bindMicrosoft(name("Alex"), Xuid(2002L), "AlexGT")
+        val refused = assertIs<AuthCoordinator.ClaimOutcome.Refused>(auth.bindMicrosoft(name("Alex"), Xuid(1001L), "SteveGT"))
+        assertEquals(AuthCoordinator.RejectReason.NAME_TAKEN, refused.reason)
+        assertEquals(Identity.ofXuid(Xuid(1001L)), identities.byName(name("Steve"))?.uuid)
+        assertEquals(Identity.ofXuid(Xuid(2002L)), identities.byName(name("Alex"))?.uuid)
+    }
+
+    @Test
+    fun `automatic rename cannot claim a premium or unexamined name`() {
+        val auth = autoRenaming()
+        auth.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT")
+        premiumNames += "notch"
+        assertEquals(AuthCoordinator.RejectReason.PREMIUM_NAME,
+            assertIs<AuthCoordinator.ClaimOutcome.Refused>(auth.bindMicrosoft(name("Notch"), Xuid(1001L), "SteveGT")).reason)
+        directoryDown = true
+        assertIs<AuthCoordinator.ClaimOutcome.Refused>(auth.bindMicrosoft(name("Alex"), Xuid(1001L), "SteveGT"))
+        directoryDown = false
+        directoryWithheld = true
+        assertIs<AuthCoordinator.ClaimOutcome.Refused>(auth.bindMicrosoft(name("Alex"), Xuid(1001L), "SteveGT"))
+        assertEquals(name("Steve"), identities.byUuid(Identity.ofXuid(Xuid(1001L)))?.name)
+    }
+
+    @Test
+    fun `automatic rename rolls back both name and profile refresh if its write fails`() {
+        val auth = autoRenaming()
+        val original = assertIs<AuthCoordinator.ClaimOutcome.Bound>(auth.bindMicrosoft(name("Steve"), Xuid(1001L), "OldGT"))
+        database.withConnection { connection ->
+            connection.createStatement().use { it.execute("""
+                CREATE TRIGGER reject_auto_rename BEFORE UPDATE ON kyokouauth_name
+                WHEN NEW.name_key = 'alex'
+                BEGIN SELECT RAISE(ABORT, 'simulated name write failure'); END
+            """.trimIndent()) }
+        }
+        assertFails { auth.bindMicrosoft(name("Alex"), Xuid(1001L), "NewGT") }
+        assertEquals(original.record, identities.byUuid(original.record.uuid), "profile and name updates must roll back together")
+        assertEquals(null, identities.byName(name("Alex")))
+    }
+
+    @Test
+    fun `automatic rename invalidates the identity cache`() {
+        val cached = moe.ryuu.kyokouauth.core.storage.CachedIdentityRepository(identities)
+        val auth = autoRenaming(cached)
+        val first = assertIs<AuthCoordinator.ClaimOutcome.Bound>(auth.bindMicrosoft(name("Steve"), Xuid(1001L), "SteveGT"))
+        assertEquals(name("Steve"), cached.cached(first.record.uuid)?.name)
+        assertIs<AuthCoordinator.ClaimOutcome.Bound>(auth.bindMicrosoft(name("Alex"), Xuid(1001L), "SteveGT"))
+        assertEquals(name("Alex"), cached.cached(first.record.uuid)?.name)
     }
 
     @Test
@@ -265,13 +409,8 @@ class AuthCoordinatorTest {
         val bound = assertIs<AuthCoordinator.ClaimOutcome.Bound>(outcome)
         assertEquals(name("NewName"), bound.record.name)
         assertEquals(mojangUuid, bound.record.uuid, "a rename must not change the UUID")
-        assertEquals(mojangUuid, coordinator.decide(name("NewName"), "10.0.0.1").let {
-            when (it) {
-                is AuthCoordinator.Decision.Verify -> it.uuid
-                is AuthCoordinator.Decision.Admit -> it.identity.uuid
-                else -> null
-            }
-        })
+        val nextLogin = assertIs<AuthCoordinator.Decision.MojangSession>(coordinator.decide(name("NewName"), "10.0.0.1"))
+        assertEquals(mojangUuid, nextLogin.expectedUuid, "a renamed premium identity still uses the real session handshake")
     }
 
     @Test
