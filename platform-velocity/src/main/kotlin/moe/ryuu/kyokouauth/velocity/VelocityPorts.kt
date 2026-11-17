@@ -22,7 +22,8 @@ import moe.ryuu.kyokouauth.proxy.InboundConnection as PortConnection
 import moe.ryuu.kyokouauth.proxy.ConnectionRequestBuilder as PortRequest
 
 /** One wrapper per actual Player, so shared-flow identity checks remain exact-reference checks. */
-internal class VelocityPorts(private val proxy: ProxyServer) : moe.ryuu.kyokouauth.proxy.ProxyServer {
+internal class VelocityPorts(private val proxy: ProxyServer,
+                             private val roleTransfer: VelocityRoleTransfer? = null) : moe.ryuu.kyokouauth.proxy.ProxyServer {
     private data class ServerBinding(val native: RegisteredServer, val port: PortServer)
     private val servers = ConcurrentHashMap<String, ServerBinding>()
     private val engines = ConcurrentHashMap<String, ServerBinding>()
@@ -110,6 +111,9 @@ internal class VelocityPorts(private val proxy: ProxyServer) : moe.ryuu.kyokouau
         override fun hasPermission(permission: String) = native.hasPermission(permission)
         override fun sendMessage(message: RichText.Parsed) { native.sendMessage(message.toAdventure()) }
         override fun disconnect(message: RichText.Parsed) { native.disconnect(message.toAdventure()) }
+        override fun transferRole(host: String, port: Int, cookie: ByteArray?) =
+            roleTransfer?.transfer(native, host, port, cookie)
+                ?: java.util.concurrent.CompletableFuture.failedFuture<Unit>(IllegalStateException("Role transfer is unavailable"))
         override fun createConnectionRequest(target: PortServer) = object : PortRequest {
             override fun connect() = native.createConnectionRequest(unwrap(target)).connect().thenApply { result ->
                 PortRequest.Result(when (result.status) {

@@ -3,6 +3,10 @@ package moe.ryuu.kyokouauth.bungee
 import moe.ryuu.kyokouauth.core.auth.AuthCoordinator
 import moe.ryuu.kyokouauth.core.text.MessageCatalogue
 import moe.ryuu.kyokouauth.limbo.PrivateTicketAuthority
+import moe.ryuu.kyokouauth.proxy.BedrockFailure
+import moe.ryuu.kyokouauth.proxy.BedrockLogin
+import moe.ryuu.kyokouauth.proxy.BedrockProof
+import moe.ryuu.kyokouauth.proxy.GameProfile
 import moe.ryuu.kyokouauth.proxy.LoginGate
 import moe.ryuu.kyokouauth.proxy.ProxyConfig
 import moe.ryuu.kyokouauth.proxy.ProxyLog
@@ -15,19 +19,33 @@ import java.util.UUID
 import kotlin.test.*
 
 class BungeeLoginGateTest {
-    private class Harness {
+    private class Harness(
+        bedrockEnabled: Boolean = false,
+        bedrock: (BungeePlayer) -> BedrockLogin = { BedrockLogin.Java },
+        rolesEnabled: Boolean = false,
+    ) {
         val proxy = TestProxy()
-        val platform = BungeePlatform(proxy)
+        val transfer = if (rolesEnabled) BungeeRoleTransfer() else null
+        val platform = BungeePlatform(proxy, transfer)
+        val fixtures = java.util.IdentityHashMap<net.md_5.bungee.api.connection.PendingConnection, PendingFixture>()
         val services = TestServices()
         val profiles = TestProfiles()
         val authority = PrivateTicketAuthority()
         val tickets = BungeeTickets(platform, profiles, authority)
         val log = ProxyLog { _, _, _ -> }
-        val config = ProxyConfig(mapOf("post-login.server" to "backend"), File("build/bungee-tests"))
+        val config = ProxyConfig(mapOf("post-login.server" to "backend", "bedrock.enabled" to bedrockEnabled.toString(),
+            "role-selection.enabled" to rolesEnabled.toString(), "role-selection.reconnect-host" to "proxy.invalid"), File("build/bungee-tests"))
         val gate = LoginGate(platform, config, MessageCatalogue("en_US", File("build/bungee-tests/messages")), services, log)
         var accepting = true
         val adapter = BungeeLoginGate(object : Plugin(proxy, net.md_5.bungee.api.plugin.PluginDescription()) {}, platform, profiles, tickets, gate, log,
-            services::submit, services::schedule, { accepting })
+            services::submit, services::schedule, { accepting }, bedrock = bedrock, rolesEnabled = rolesEnabled, roleTransfer = transfer,
+            prepareRole = { player, profile ->
+                val fixture = checkNotNull(fixtures[player.pending])
+                fixture.pending.uniqueId = profile.id
+                fixture.name = profile.name
+                player.rememberRoleProfile(profile)
+                profiles.apply(player.pending, profile)
+            })
         val backend = proxy.constructServerInfo("backend", InetSocketAddress("127.0.0.1", 29001), "test", false)
         init {
             proxy.registered["backend"] = backend
@@ -35,6 +53,7 @@ class BungeeLoginGateTest {
             gate.activate()
         }
         fun pre(fixture: PendingFixture): PreLoginEvent {
+            fixtures[fixture.pending] = fixture
             profiles.add(fixture)
             val event = PreLoginEvent(fixture.pending, null)
             adapter.onPreLogin(event)
@@ -52,6 +71,169 @@ class BungeeLoginGateTest {
         }
     }
 
+    @Test fun `enabled Java roles retrieve cookie under intent then construct a real isolated chooser identity`() {
+        val h = Harness(rolesEnabled = true)
+        val fixture = PendingFixture()
+        val originalId = fixture.uuid
+        val originalName = fixture.name
+        assertFalse(h.pre(fixture).isCancelled)
+        val player = assertNotNull(h.platform.find(fixture.pending))
+        assertEquals(1, fixture.cookieRequests)
+        assertTrue(fixture.name.startsWith("KA") && fixture.name.length == 16)
+        assertNotEquals(originalName, fixture.name)
+        assertNotEquals(originalId, fixture.uuid)
+        assertEquals(fixture.uuid, h.profiles.read(fixture.pending).id)
+        assertEquals(fixture.name, h.profiles.read(fixture.pending).name)
+        assertNotNull(player.currentRoleProfile())
+        assertTrue(h.gate.requiresRoleProfile(player))
+        assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == "textures" })
+        h.adapter.close()
+    }
+
+    @Test fun `invalid Java role cookie never falls back to a fresh ordinary authentication decision`() {
+        val h = Harness(rolesEnabled = true)
+        val fixture = PendingFixture()
+        val original = fixture.uuid
+        fixture.cookie = java.util.concurrent.CompletableFuture.completedFuture(ByteArray(32))
+        assertTrue(h.pre(fixture).isCancelled)
+        assertEquals(1, fixture.cookieRequests)
+        assertEquals(original, fixture.uuid)
+        assertEquals("OracleLocal", fixture.name)
+        assertTrue(fixture.setterOrder.isEmpty())
+        assertNull(h.platform.find(fixture.pending))
+        h.adapter.close()
+    }
+
+    @Test fun `timeout during native cookie request cancels source and completes intent once before late work`() {
+        val h = Harness(rolesEnabled = true)
+        val fixture = PendingFixture()
+        fixture.cookie = java.util.concurrent.CompletableFuture()
+        fixture.beforeCookie = { h.services.tasks.first().fire() }
+        h.fixtures[fixture.pending] = fixture
+        h.profiles.add(fixture)
+        var callbacks = 0
+        val event = PreLoginEvent(fixture.pending) { _, _ -> callbacks++ }
+        h.adapter.onPreLogin(event)
+        event.postCall()
+        h.services.drain()
+        assertEquals(1, callbacks)
+        assertTrue(event.isCancelled)
+        assertTrue(fixture.cookie.isCancelled)
+        assertFalse(fixture.connected)
+        assertTrue(fixture.setterOrder.isEmpty())
+        fixture.cookie.complete(byteArrayOf(1))
+        h.services.drain()
+        assertEquals(1, callbacks)
+        h.adapter.close()
+    }
+
+    @Test fun `FG roles keep native proof separate from chooser and reset replaced skins at Login PostLogin and backend boundary`() {
+        val fixture = bedrockFixture()
+        val proof = bedrockProof(fixture, Any())
+        val h = Harness(bedrockEnabled = true, rolesEnabled = true, bedrock = { BedrockLogin.Verified(proof) })
+        assertFalse(h.pre(fixture).isCancelled)
+        val player = assertNotNull(h.platform.find(fixture.pending))
+        val chooser = assertNotNull(player.currentRoleProfile())
+        assertEquals(proof.uniqueId, fixture.uuid, "Official Floodgate messages must resolve this Player")
+        assertNotEquals(proof.username, fixture.name, "The private Limbo alias stays isolated while the native UUID remains registered")
+        assertTrue(fixture.name.matches(Regex("KA[A-Fa-f0-9]{14}")))
+        assertFalse(h.gate.isAuthenticated(player))
+        assertEquals(0, fixture.cookieRequests)
+        assertSame(proof, player.currentBedrockProof())
+        h.profiles.apply(fixture.pending, chooser.withProperties(chooser.properties +
+            GameProfile.Property("textures", "unwanted-linked-skin", "old") + GameProfile.Property("pre-extra", "keep", "")))
+        val mutations = fixture.setterOrder.toList()
+        val login = LoginEvent(fixture.pending, null)
+        h.adapter.onLogin(login)
+        h.services.drain()
+        assertFalse(login.isCancelled)
+        assertEquals(mutations, fixture.setterOrder, "FINISHING must never rewrite UUID/name")
+        assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == "textures" })
+        h.profiles.apply(fixture.pending, chooser.withProperties(listOf(
+            GameProfile.Property("textures", "FG-PostLogin-skin", "old"), GameProfile.Property("post-extra", "keep", ""))))
+        h.adapter.onPostLogin(PostLoginEvent(fixture.player, h.backend, null))
+        assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == "textures" })
+        assertTrue(h.profiles.read(fixture.pending).properties.any { it.name == "pre-extra" })
+        assertTrue(h.profiles.read(fixture.pending).properties.any { it.name == "post-extra" })
+        val engine = assertNotNull(h.platform.nativeServer(h.platform.getServer("kyokouauth-limbo-777").orElseThrow()))
+        h.profiles.apply(fixture.pending, h.profiles.read(fixture.pending).withProperties(
+            h.profiles.read(fixture.pending).properties + GameProfile.Property("textures", "later-plugin-skin", "old")))
+        val connect = ServerConnectEvent(fixture.player, engine, ServerConnectEvent.Reason.JOIN_PROXY)
+        h.adapter.onServerConnect(connect)
+        assertFalse(connect.isCancelled)
+        assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == "textures" })
+        assertEquals(".Controlled", proof.username)
+        assertSame(proof, player.currentBedrockProof())
+        h.adapter.close()
+    }
+
+    @Test fun `role identity changes during FINISHING are refused instead of repaired`() {
+        for (field in listOf("uuid", "name")) {
+            val h = Harness(rolesEnabled = true)
+            val fixture = PendingFixture()
+            assertFalse(h.pre(fixture).isCancelled)
+            val setters = fixture.setterOrder.toList()
+            if (field == "uuid") fixture.uuid = UUID.randomUUID() else fixture.name = "TamperedRole"
+            val event = LoginEvent(fixture.pending, null)
+            h.adapter.onLogin(event)
+            h.services.drain()
+            assertTrue(event.isCancelled)
+            assertFalse(fixture.connected)
+            assertEquals(setters, fixture.setterOrder)
+            h.adapter.close()
+        }
+    }
+
+    @Test fun `single Microsoft role transfers a native cookie and new login settles real role UUID name and explicit skin once`() {
+        val h = Harness(rolesEnabled = true)
+        val chooser = PendingFixture()
+        val identity = moe.ryuu.kyokouauth.core.identity.Identity.Microsoft(
+            moe.ryuu.kyokouauth.core.identity.GameName.parseOrThrow("OracleLocal"),
+            moe.ryuu.kyokouauth.core.identity.Xuid(h.services.stableUuid.leastSignificantBits), "Controlled")
+        val record = moe.ryuu.kyokouauth.core.storage.BoundIdentity.of(identity, 1L)
+        val skin = GameProfile.Property("textures", "explicit-role-skin", "role-signature")
+        h.services.roles = moe.ryuu.kyokouauth.proxy.RoleOptions(listOf(
+            moe.ryuu.kyokouauth.proxy.RoleOption(identity, record, skin)), null)
+        h.services.authorize = true
+        h.login(chooser)
+        h.gate.onJoin(ReadyPlayer(assertNotNull(h.platform.find(chooser.player))))
+        h.services.drain()
+        h.services.tasks.last().fire()
+        h.services.drain()
+        assertEquals(listOf("proxy.invalid" to 25577), chooser.transfers)
+        val cookie = chooser.storedCookies.single().second
+        assertEquals(32, cookie.size)
+        chooser.connected = false
+        h.adapter.sweepClosed()
+        h.proxy.online.clear()
+        val resumed = PendingFixture()
+        resumed.cookie = java.util.concurrent.CompletableFuture.completedFuture(cookie)
+        h.login(resumed)
+        assertEquals(identity.uuid, resumed.uuid)
+        assertEquals("OracleLocal", resumed.name)
+        assertEquals(listOf(skin), h.profiles.read(resumed.pending).properties.filter { it.name == "textures" })
+        val backend = ServerConnectEvent(resumed.player, h.backend, ServerConnectEvent.Reason.JOIN_PROXY)
+        h.adapter.onServerConnect(backend)
+        assertFalse(backend.isCancelled)
+        val replay = PendingFixture()
+        replay.cookie = java.util.concurrent.CompletableFuture.completedFuture(cookie)
+        assertTrue(h.pre(replay).isCancelled)
+        assertEquals(0, h.services.premiumBindings)
+        h.adapter.close()
+    }
+
+    @Test fun `closing adapter refuses fresh FG roles even when outer accepting flag remains true`() {
+        var probes = 0
+        val fixture = bedrockFixture()
+        val proof = bedrockProof(fixture, Any())
+        val h = Harness(bedrockEnabled = true, rolesEnabled = true, bedrock = { probes++; BedrockLogin.Verified(proof) })
+        h.adapter.close()
+        assertTrue(h.pre(fixture).isCancelled)
+        assertEquals(0, probes)
+        assertEquals(0, fixture.cookieRequests)
+        assertNull(h.platform.find(fixture.pending))
+    }
+
     @Test fun `intent holds USERNAME and stable UUID is applied after forcing offline`() {
         val h = Harness()
         val fixture = PendingFixture()
@@ -66,9 +248,193 @@ class BungeeLoginGateTest {
         h.services.drain()
         assertEquals(1, callbacks)
         assertEquals(listOf("online:false", "uuid"), fixture.setterOrder)
+        assertEquals(0, fixture.cookieRequests, "Feature-off Java must not request cookies or initialize a role bridge")
         assertEquals(h.services.stableUuid, fixture.uuid)
         assertSame(bridge, h.platform.find(fixture.pending))
         assertEquals("preserved", h.profiles.read(fixture.pending).properties.first { it.name == "textures" }.value)
+    }
+
+    private fun bedrockProof(fixture: PendingFixture, source: Any, current: () -> Boolean = { fixture.connected }): BedrockProof =
+        BedrockProof.create(moe.ryuu.kyokouauth.core.identity.Xuid(2535412345678901L),
+            UUID(0L, 2535412345678901L), fixture.name, "Controlled", ".", source, current)
+
+    private fun bedrockFixture(): PendingFixture = PendingFixture(".Controlled").also {
+        it.uuid = UUID(0L, 2535412345678901L)
+        it.profile = GameProfile(checkNotNull(it.uuid), it.name, it.profile.properties)
+    }
+
+    @Test fun `Bedrock samples exact source before async and again at profile and Login without rewriting Floodgate profile`() {
+        val fixture = bedrockFixture()
+        val source = Any()
+        val samples = mutableListOf<BungeePlayer>()
+        val h = Harness(bedrockEnabled = true, bedrock = { player ->
+            samples += player
+            BedrockLogin.Verified(bedrockProof(fixture, source))
+        })
+        h.profiles.add(fixture)
+        var preCallbacks = 0
+        val pre = PreLoginEvent(fixture.pending) { _, _ -> preCallbacks++ }
+        h.adapter.onPreLogin(pre)
+        pre.postCall()
+        assertEquals(1, samples.size, "PreLogin proof must be read synchronously after Floodgate LOWEST")
+        assertEquals(0, preCallbacks)
+        h.services.drain()
+        assertFalse(pre.isCancelled)
+        assertEquals(2, samples.size)
+        assertEquals(1, preCallbacks)
+        assertTrue(fixture.setterOrder.isEmpty(), "Floodgate already fixed offline UUID/name in USERNAME")
+        assertSame(fixture.profile, h.profiles.read(fixture.pending))
+        val nativeProof = assertNotNull(h.platform.find(fixture.pending)?.currentBedrockProof())
+        assertEquals(fixture.uuid, nativeProof.uniqueId)
+        assertEquals(fixture.name, nativeProof.username)
+        var loginCallbacks = 0
+        val login = LoginEvent(fixture.pending) { _, _ -> loginCallbacks++ }
+        h.adapter.onLogin(login)
+        login.postCall()
+        assertEquals(3, samples.size, "Login must use a fresh native read, not the PreLogin proof")
+        h.services.drain()
+        assertFalse(login.isCancelled)
+        assertEquals(1, loginCallbacks)
+        assertTrue(samples.all { it === samples.first() })
+        assertTrue(fixture.setterOrder.isEmpty(), "Login must not repair UUID or authentication mode")
+        assertEquals(0, h.services.premiumBindings)
+        assertTrue(h.services.granted.isEmpty())
+        val post = PostLoginEvent(fixture.player, h.backend, null)
+        h.adapter.onPostLogin(post)
+        assertSame(h.backend, post.target)
+        val connect = ServerConnectEvent(fixture.player, h.backend, ServerConnectEvent.Reason.JOIN_PROXY)
+        h.adapter.onServerConnect(connect)
+        assertFalse(connect.isCancelled)
+        assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == h.authority.propertyKey })
+    }
+
+    @Test fun `Bedrock source replacement and rejected fresh reads fail closed without Java fallback`() {
+        for (stage in listOf("profile", "Login")) for (failure in listOf("rejected", "wrong channel")) {
+            val fixture = bedrockFixture()
+            val source = Any()
+            var samples = 0
+            val h = Harness(bedrockEnabled = true, bedrock = {
+                samples++
+                if (samples == (if (stage == "profile") 2 else 3)) {
+                    if (failure == "rejected") BedrockLogin.Rejected(BedrockFailure.STALE)
+                    else BedrockLogin.Verified(bedrockProof(fixture, Any()))
+                } else BedrockLogin.Verified(bedrockProof(fixture, source))
+            })
+            val pre = h.pre(fixture)
+            val rejected = if (stage == "profile") pre.isCancelled else {
+                assertFalse(pre.isCancelled)
+                val login = LoginEvent(fixture.pending, null)
+                h.adapter.onLogin(login)
+                h.services.drain()
+                login.isCancelled
+            }
+            assertTrue(rejected, stage)
+            assertFalse(fixture.connected, stage)
+            assertTrue(fixture.setterOrder.isEmpty(), stage)
+            assertEquals(0, h.services.premiumBindings, stage)
+            assertEquals(0, h.gate.verifyingCount(), stage)
+            assertNull(h.platform.find(fixture.pending), stage)
+        }
+    }
+
+    @Test fun `Bedrock native UUID and profile mismatch are refused rather than repaired`() {
+        for (mismatch in listOf("uuid", "profile uuid", "profile name", "online")) {
+            val fixture = bedrockFixture()
+            val source = Any()
+            val h = Harness(bedrockEnabled = true, bedrock = { BedrockLogin.Verified(bedrockProof(fixture, source)) })
+            when (mismatch) {
+                "uuid" -> fixture.uuid = UUID.randomUUID()
+                "profile uuid" -> fixture.profile = fixture.profile.withId(UUID.randomUUID())
+                "profile name" -> fixture.profile = fixture.profile.copy(name = ".Other")
+                "online" -> fixture.online = true
+            }
+            assertTrue(h.pre(fixture).isCancelled, mismatch)
+            assertFalse(fixture.connected, mismatch)
+            assertTrue(fixture.setterOrder.isEmpty(), mismatch)
+        }
+    }
+
+    @Test fun `Bedrock provider disappearing after Login revokes backend route`() {
+        val fixture = bedrockFixture()
+        val source = Any()
+        var current = true
+        val h = Harness(bedrockEnabled = true, bedrock = {
+            BedrockLogin.Verified(bedrockProof(fixture, source) { current && fixture.connected })
+        })
+        h.login(fixture)
+        current = false
+        assertNull(h.platform.find(fixture.player)?.currentBedrockProof(), "Native skin-only view must not outlive its provider")
+        val connect = ServerConnectEvent(fixture.player, h.backend, ServerConnectEvent.Reason.PLUGIN)
+        h.adapter.onServerConnect(connect)
+        assertTrue(connect.isCancelled)
+        assertFalse(fixture.connected)
+        assertEquals(0, h.services.premiumBindings)
+    }
+
+    @Test fun `already cancelled native events keep original reason and never read provider or mutate UUID`() {
+        var samples = 0
+        val h = Harness(bedrock = { samples++; error("Cancelled native event must not be reinterpreted") })
+        val fixture = PendingFixture()
+        val reason = net.md_5.bungee.api.chat.TextComponent("another plugin refused")
+        val pre = PreLoginEvent(fixture.pending, null)
+        pre.isCancelled = true
+        pre.reason = reason
+        h.adapter.onPreLogin(pre)
+        assertSame(reason, pre.reason)
+        assertNull(h.platform.find(fixture.pending))
+        val login = LoginEvent(fixture.pending, null)
+        login.isCancelled = true
+        login.reason = reason
+        h.adapter.onLogin(login)
+        assertSame(reason, login.reason)
+        assertEquals(0, samples)
+        assertTrue(fixture.setterOrder.isEmpty())
+    }
+
+    @Test fun `native cancellation during an outstanding intent preserves refusal and completes once`() {
+        val h = Harness()
+        val fixture = PendingFixture()
+        h.profiles.add(fixture)
+        var callbacks = 0
+        val pre = PreLoginEvent(fixture.pending) { _, _ -> callbacks++ }
+        h.adapter.onPreLogin(pre)
+        pre.postCall()
+        val reason = net.md_5.bungee.api.chat.TextComponent("late native refusal")
+        pre.isCancelled = true
+        pre.reason = reason
+        h.services.drain()
+        h.services.tasks.forEach { it.fire() }
+        assertTrue(pre.isCancelled)
+        assertSame(reason, pre.reason)
+        assertEquals(1, callbacks)
+        assertTrue(fixture.setterOrder.isEmpty())
+        assertNull(h.platform.find(fixture.pending))
+    }
+
+    @Test fun `native proof read failure refuses before starting async work or mutating USERNAME`() {
+        val h = Harness(bedrock = { error("injected native source failure") })
+        val fixture = PendingFixture()
+        h.profiles.add(fixture)
+        var callbacks = 0
+        val event = PreLoginEvent(fixture.pending) { _, _ -> callbacks++ }
+        h.adapter.onPreLogin(event)
+        event.postCall()
+        h.services.drain()
+        assertTrue(event.isCancelled)
+        assertEquals(1, callbacks)
+        assertTrue(fixture.setterOrder.isEmpty())
+        assertNull(h.platform.find(fixture.pending))
+    }
+
+    @Test fun `explicit native Bedrock rejection cannot fall back to a Java-looking name`() {
+        for (reason in listOf(BedrockFailure.DISABLED, BedrockFailure.PROVIDER_DENIED, BedrockFailure.UNAVAILABLE)) {
+            val h = Harness(bedrockEnabled = true, bedrock = { BedrockLogin.Rejected(reason) })
+            val fixture = PendingFixture()
+            assertTrue(h.pre(fixture).isCancelled, reason.name)
+            assertTrue(fixture.setterOrder.isEmpty(), reason.name)
+            assertEquals(0, h.gate.verifyingCount(), reason.name)
+            assertEquals(0, h.services.premiumBindings, reason.name)
+        }
     }
 
     @Test fun `Login and PostLogin retain the same exact player and protocol engine`() {

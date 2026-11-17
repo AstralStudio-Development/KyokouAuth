@@ -5,9 +5,9 @@ import java.util.UUID
 /**
  * The account that a player is currently acting as.
  *
- * Two shapes only, matching the two Auth Channels:
+ * Two UUID namespaces; the XUID namespace supports more than one trusted proof source:
  *  - [Premium]   proven by a Mojang handshake, carries the real Mojang UUID and skin.
- *  - [Microsoft] proven by a device code, carries only an Xbox XUID.
+ *  - [Microsoft] proven by a device code or connection-verified Floodgate, carries an Xbox XUID.
  *
  * The identity of a Microsoft player is derived, never stored as a separate fact: see [uuid].
  */

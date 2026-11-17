@@ -31,6 +31,7 @@ internal class Engine(private val context: EngineContext) : LimboEngine {
         started = true
         require(context.bind.address?.isLoopbackAddress == true)
         val registry = RegistrySnapshot.load()
+        RoleSelectorPackets.verify()
         val world = LimboWorld(context.settings, registry)
         boss = NioEventLoopGroup(1)
         workers = NioEventLoopGroup(2)

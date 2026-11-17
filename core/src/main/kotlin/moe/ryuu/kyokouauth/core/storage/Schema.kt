@@ -21,6 +21,7 @@ internal object Schema {
     const val SESSION = "kyokouauth_session"
     const val META = "kyokouauth_meta"
     const val BEDROCK_LINK = "kyokouauth_bedrock_link"
+    const val ACCOUNT_LINK = "kyokouauth_account_link"
 
     val migrations: List<Migration> = listOf(
         Migration(1) { dialect ->
@@ -95,6 +96,24 @@ internal object Schema {
                         "linked_at" to dialect.bigint,
                     ),
                     listOf("PRIMARY KEY (bedrock_uuid)"),
+                ),
+            )
+        },
+        // Current link evidence is separate from the historical v2 table. Neither table is a
+        // credential; no historical row is imported, and a Java UUID may be linked to several XUIDs
+        // without granting those XUID roles to one another.
+        Migration(3) { dialect ->
+            listOf(
+                dialect.createTableStatement(
+                    ACCOUNT_LINK,
+                    listOf(
+                        "xuid" to "${dialect.text(20)} NOT NULL",
+                        "java_uuid" to "${dialect.text(36)} NOT NULL",
+                        "source" to "${dialect.text(64)} NOT NULL",
+                        "scope" to "${dialect.text(64)} NOT NULL",
+                        "verified_at" to "${dialect.bigint} NOT NULL",
+                    ),
+                    listOf("PRIMARY KEY (xuid)"),
                 ),
             )
         },

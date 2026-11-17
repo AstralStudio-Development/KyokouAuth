@@ -1,0 +1,6 @@
+id: kyokouauthtransfer
+name: KyokouAuthTransfer
+main: moe.ryuu.kyokouauth.geyser.KyokouRoleTransferExtension
+api: 2.0.0
+version: ${version}
+authors: [Ryuu]

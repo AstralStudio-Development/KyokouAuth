@@ -46,6 +46,9 @@
     public static *** INSTANCE;
     public *** loginFinished(moe.ryuu.kyokouauth.limbo.engine.p*.libs.org.geysermc.mcprotocollib.auth.GameProfile);
 }
+-keep,allowoptimization class moe.ryuu.kyokouauth.limbo.engine.p*.session.RoleSelectorPackets {
+    public *** playerInventory(int);
+}
 -keep,allowoptimization class moe.ryuu.kyokouauth.limbo.engine.p*.session.LibraryComponentsKt {
     public static *** toLibrary(moe.ryuu.kyokouauth.limbo.protocol.TextComponent);
 }

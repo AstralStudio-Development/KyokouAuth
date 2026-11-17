@@ -102,6 +102,7 @@ public final class NewExporter {
     }
 
     private void run() throws Exception {
+        verifyAvatarBudgets();
         Object companion = type(SESSION + "RegistrySnapshot").getField("Companion").get(null);
         Object snapshot = companion.getClass().getMethod("load").invoke(companion);
         Object defaults = construct(ROOT + "LimboSettings");
@@ -145,6 +146,109 @@ public final class NewExporter {
                 component(model("Oracle subtitle", "gray", null, null))));
         write("play", construct(PROTOCOL + "packet.ingame.clientbound.title.ClientboundSetTitleTextPacket",
                 component(model("Oracle title", "gold", true, null))));
+        Object microsoftName = roleLabel("微软角色", "MicrosoftName");
+        Object premiumName = roleLabel("正版角色", "OraclePlayer");
+        List<?> lore = List.of(model("点击进入服务器", null, false, null));
+        Object microsoft = construct(ROOT + "RoleSelectorItem", "microsoft", new UUID(0,42), "MicrosoftName",
+                "public-fixture-texture", "public-fixture-signature", microsoftName, lore);
+        Object premium = construct(ROOT + "RoleSelectorItem", "premium", PUBLIC_UUID, "OraclePlayer", null, null, premiumName, lore);
+        Object title = model("请选择角色", "#22D3EE", false, null);
+        Object menu = construct(ROOT + "RoleSelectorMenu", new UUID(4,5), title, microsoft, premium);
+        Object selector = type(SESSION + "RoleSelectorPackets").getField("INSTANCE").get(null);
+        Class<?> menuType = type(ROOT + "RoleSelectorMenu");
+        write("play", selector.getClass().getMethod("open", int.class, menuType).invoke(selector, 5, menu));
+        write("play", selector.getClass().getMethod("playerInventory", int.class).invoke(selector, 1));
+        write("play", selector.getClass().getMethod("content", int.class, int.class, menuType).invoke(selector, 5, 1, menu));
+        write("play", selector.getClass().getMethod("close", int.class).invoke(selector, 5));
+        Class<?> icons = type(ROOT + "RoleAvatarIcon");
+        Object markedMicrosoft = construct(ROOT + "RoleSelectorItem", "microsoft", new UUID(0,42), "MicrosoftName",
+                "public-fixture-texture", "public-fixture-signature", microsoftName, lore, icons.getField("MICROSOFT").get(null));
+        Object markedPremium = construct(ROOT + "RoleSelectorItem", "premium", PUBLIC_UUID, "OraclePlayer", null, null,
+                premiumName, lore, icons.getField("PREMIUM").get(null));
+        Object markedMenu = construct(ROOT + "RoleSelectorMenu", new UUID(4,6), title, markedMicrosoft, markedPremium);
+        write("play", selector.getClass().getMethod("open", int.class, menuType).invoke(selector, 6, markedMenu));
+        write("play", selector.getClass().getMethod("content", int.class, int.class, menuType).invoke(selector, 6, 1, markedMenu));
+        write("play", selector.getClass().getMethod("close", int.class).invoke(selector, 6));
+    }
+
+    private Object roleLabel(String category, String name) throws Exception {
+        return construct(ROOT + "protocol.TextComponent", "", null, null, null, null, null, null,
+            List.of(model(category, "#22D3EE", false, null), model(" » ", "gray", false, null), model(name, "white", false, null)));
+    }
+
+    /** Exercise the actual isolated artifact's guarded factories, never an untrimmed SDK substitute. */
+    private void verifyAvatarBudgets() throws Exception {
+        Object buffer = type("io.netty.buffer.Unpooled").getMethod("buffer").invoke(null);
+        int probes = 0;
+        try {
+            if (protocol <= 769) {
+                Class<?> owner = type(SESSION + (protocol <= 768 ? "BoundedItemCodecHelper" : "BoundedItemTypes"));
+                Object receiver = protocol <= 768 ? owner.getField("INSTANCE").get(null) : null;
+                Method reader = owner.getMethod("readDataComponentPatch", byteBufType);
+                variable(buffer, 5); variable(buffer, 0);
+                expectBudget(reader, receiver, buffer, "components"); probes++;
+            }
+            if (protocol >= 769) {
+                Object cmd = type(PROTOCOL + "data.game.item.component.DataComponentTypes").getField("CUSTOM_MODEL_DATA").get(null);
+                if (cmd == null) throw new IllegalStateException("Artifact has no CMD factory");
+                Method reader = cmd.getClass().getMethod("readDataComponent", byteBufType);
+                // Small invalid count first: an unguarded reader fails before any huge-allocation probe runs.
+                for (int length : new int[] {2, -1, Integer.MAX_VALUE}) {
+                    byteBufType.getMethod("clear").invoke(buffer); variable(buffer, length);
+                    expectBudget(reader, cmd, buffer, "customModelData"); probes++;
+                }
+                for (int field = 1; field < 4; field++) {
+                    byteBufType.getMethod("clear").invoke(buffer); variable(buffer, 1);
+                    byteBufType.getMethod("writeFloat", float.class).invoke(buffer, (float) 0x4B5901);
+                    for (int before = 1; before < field; before++) variable(buffer, 0);
+                    variable(buffer, Integer.MAX_VALUE);
+                    expectBudget(reader, cmd, buffer, "customModelData"); probes++;
+                }
+                for (float nonFinite : new float[] {Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY}) {
+                    byteBufType.getMethod("clear").invoke(buffer); variable(buffer, 1);
+                    byteBufType.getMethod("writeFloat", float.class).invoke(buffer, nonFinite);
+                    variable(buffer, 0); variable(buffer, 0); variable(buffer, 0);
+                    expectBudget(reader, cmd, buffer, "customModelData"); probes++;
+                }
+            }
+            if (protocol >= 770) {
+                java.util.Map<Object,Integer> hashes = new java.util.HashMap<>();
+                Class<?> components = type(PROTOCOL + "data.game.item.component.DataComponentTypes");
+                for (String name : List.of("PROFILE", "CUSTOM_NAME", "LORE", "CUSTOM_MODEL_DATA")) hashes.put(components.getField(name).get(null), 0);
+                Object hash = construct(PROTOCOL + "data.game.item.HashedStack", 123, 1, hashes, Set.of());
+                Method write = type(PROTOCOL + "codec.MinecraftTypes").getMethod("writeHashedStack", byteBufType, hash.getClass());
+                Method read = type(SESSION + "BoundedItemTypes").getMethod("readHashedStack", byteBufType);
+                byteBufType.getMethod("clear").invoke(buffer); write.invoke(null, buffer, hash);
+                Object decoded = read.invoke(null, buffer);
+                if ((Integer) byteBufType.getMethod("readableBytes").invoke(buffer) != 0 ||
+                        ((java.util.Map<?,?>) decoded.getClass().getMethod("addedComponents").invoke(decoded)).size() != 4)
+                    throw new IllegalStateException("Artifact did not accept the four-component hash prediction");
+                probes++;
+                Object empty = construct(PROTOCOL + "data.game.item.HashedStack", 123, 1, java.util.Map.of(), Set.of());
+                byteBufType.getMethod("clear").invoke(buffer); write.invoke(null, buffer, empty);
+                int end = (Integer) byteBufType.getMethod("writerIndex").invoke(buffer);
+                byteBufType.getMethod("writerIndex", int.class).invoke(buffer, end - 2);
+                variable(buffer, 5); variable(buffer, 0);
+                expectBudget(read, null, buffer, "hashedComponent"); probes++;
+            }
+            System.out.println("EXPORTED avatar-budget protocol=" + protocol + " probes=" + probes + " source=actual-artifact-component-factories");
+        } finally { byteBufType.getMethod("release").invoke(buffer); }
+    }
+
+    private void variable(Object buffer, int value) throws Exception {
+        if (helper == null) type(PROTOCOL + "codec.MinecraftTypes").getMethod("writeVarInt", byteBufType, int.class).invoke(null, buffer, value);
+        else helper.getClass().getMethod("writeVarInt", byteBufType, int.class).invoke(helper, buffer, value);
+    }
+
+    private static void expectBudget(Method reader, Object receiver, Object buffer, String field) throws Exception {
+        try { reader.invoke(receiver, buffer); }
+        catch (java.lang.reflect.InvocationTargetException failure) {
+            Throwable cause = failure.getCause();
+            if (!(cause instanceof IllegalArgumentException) || cause.getMessage() == null || !cause.getMessage().contains(field))
+                throw new IllegalStateException("Artifact did not enforce expected decode budget for " + field, cause);
+            return;
+        }
+        throw new IllegalStateException("Artifact accepted invalid decode budget for " + field);
     }
 
     private Object model(String text, String color, Boolean bold, Object click) throws Exception {

@@ -30,6 +30,8 @@ dependencies {
     implementation(coordinate) { transitive = false }
     if (protocol >= 776) implementation("org.geysermc.mcprotocollib:text-serializer-nbt:${protocol == 776 ? '0.1.0' : '0.2.1'}") { transitive = false }
     add(codecUpstream.name, coordinate)
+    // Shared runtime already pins 3.1; generation/verification needs its pre-allocation NBT byte budget API too.
+    add(codecUpstream.name, 'org.cloudburstmc:nbt:3.1.0.Final')
     add(codecSources.name, "${coordinate}:sources")
     // Independent full upstream clients are test/tool dependencies, never production dependencies.
     testImplementation project(':limbo-api')
@@ -82,6 +84,8 @@ tasks.named('test') {
 tasks.named('shadowJar') {
     archiveClassifier.set('isolated')
     mergeServiceFiles()
+    // Generated guarded upstream classes precede their dependency originals; never ship an unguarded duplicate.
+    filesMatching('**/*.class') { duplicatesStrategy = DuplicatesStrategy.EXCLUDE }
     filesMatching('META-INF/services/**') { duplicatesStrategy = DuplicatesStrategy.INCLUDE }
     def base = "moe.ryuu.kyokouauth.limbo.engine.p${protocol}"
     relocate 'moe.ryuu.kyokouauth.limbo.session', "${base}.session"

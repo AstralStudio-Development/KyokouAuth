@@ -186,7 +186,7 @@ def audit(path, protocols=PROTOCOLS, max_bytes=HARD_LIMIT, top=12):
                 require(struct.unpack('>H', data[6:8])[0] == major, f'class target must be {major}: {name}')
 
         expect_class(ROOT + 'LimboServer.class', 65)
-        for name in ('LimboPlayer', 'LimboListener', 'LimboLogger', 'LimboSettings', 'LimboEngineFactory', 'EngineContext', 'ForwardingMode', 'protocol/TextComponent'):
+        for name in ('LimboPlayer', 'LimboListener', 'LimboLogger', 'LimboSettings', 'LimboEngineFactory', 'EngineContext', 'ForwardingMode', 'RoleSelectorItem', 'RoleSelectorMenu', 'RoleAvatarIcon', 'protocol/TextComponent'):
             expect_class(ROOT + name + '.class', 61)
         expected_providers = {f'moe.ryuu.kyokouauth.limbo.engine.p{protocol}.session.EngineFactory' for protocol in protocols}
         providers = service(ENGINE_SERVICE)
@@ -194,14 +194,20 @@ def audit(path, protocols=PROTOCOLS, max_bytes=HARD_LIMIT, top=12):
         require(set(providers) == expected_providers, f'engine providers differ: expected={sorted(expected_providers)} actual={providers}')
         actual_protocols = {int(match[1]) for name in names if (match := re.match(re.escape(ROOT) + r'engine/p(\d+)/', name))}
         require(actual_protocols == set(protocols), f'engine namespaces differ: expected={list(protocols)} actual={sorted(actual_protocols)}')
-        for prefix in ('configuration-', 'mcpl-', 'codec-', 'ignored-'):
+        for prefix in ('configuration-', 'mcpl-', 'codec-', 'ignored-', 'role-selector-', 'items-'):
             actual = {int(match[1]) for name in names if (match := re.fullmatch(r'limbo/' + prefix + r'(\d+)\.(?:json|bin|properties)', name))}
             require(actual == set(protocols), f'{prefix} resource protocols differ: {sorted(actual)}')
 
         for protocol in protocols:
             base = ROOT + f'engine/p{protocol}/'
-            for name in ('EngineFactory', 'GeneratedCodec'):
+            for name in ('EngineFactory', 'GeneratedCodec', 'RoleSelectorPackets', 'ItemDecodeBudget',
+                         'BoundedItemCodecHelper' if protocol <= 768 else 'BoundedItemTypes'):
                 expect_class(base + 'session/' + name + '.class', 65)
+            if protocol >= 769:
+                cmd_class = base + 'session/BoundedCustomModelData.class'
+                expect_class(cmd_class, 65)
+                require(b'ItemDecodeBudget' in read(cmd_class) and b'isFinite' in read(cmd_class),
+                        f'avatar CMD preallocation/finite guard missing: {protocol}')
             fixture = f'limbo/configuration-{protocol}'
             try:
                 lines = read(fixture + '.properties').decode('utf-8').splitlines()
@@ -216,6 +222,36 @@ def audit(path, protocols=PROTOCOLS, max_bytes=HARD_LIMIT, top=12):
             except (ValueError, UnicodeDecodeError) as failure:
                 errors.append(f'invalid fixture metadata {protocol}: {failure}')
                 meta = {}
+            try:
+                selector = dict(line.split('=', 1) for line in read(f'limbo/role-selector-{protocol}.properties').decode('utf-8').splitlines()
+                                if line.strip() and not line.lstrip().startswith('#'))
+                require(selector.get('protocol') == str(protocol), f'selector fixture protocol differs: {protocol}')
+                require(selector.get('source') == 'official-server-bootstrap-built-in-registries', f'selector fixture source differs: {protocol}')
+                require(selector.get('server-sha256') == meta.get('server-sha256'), f'selector fixture official server differs: {protocol}')
+                for key in ('server-sha256', 'registry-server-sha256', 'exporter-sha256'):
+                    require(bool(SHA256.fullmatch(selector.get(key, ''))), f'selector fixture invalid {key}: {protocol}')
+                require(int(selector.get('player-head-id', 0)) > 0 and int(selector.get('generic-9x3-id', -1)) >= 0,
+                        f'selector fixture numeric IDs invalid: {protocol}')
+            except (ValueError, UnicodeDecodeError) as failure:
+                errors.append(f'invalid selector fixture metadata {protocol}: {failure}')
+            items = document(f'limbo/items-{protocol}.json')
+            require(items.get('schema') == 1 and items.get('protocol') == protocol and
+                    items.get('source') == 'pinned-official-mcpl-ast-sparse-item-closure', f'selector item source differs: {protocol}')
+            require(items.get('components') == ['CUSTOM_MODEL_DATA', 'CUSTOM_NAME', 'LORE', 'PROFILE'], f'selector component closure differs: {protocol}')
+            component_ids = items.get('componentIds', {})
+            require(set(component_ids) == {'CUSTOM_MODEL_DATA', 'CUSTOM_NAME', 'LORE', 'PROFILE'} and
+                    all(type(value) is int and value >= 0 for value in component_ids.values()) and len(set(component_ids.values())) == 4,
+                    f'selector official component IDs invalid: {protocol}')
+            for key, maximum in {'frameBytes': 65536, 'changedSlots': 64, 'componentCount': 4, 'listItems': 8,
+                                 'stringChars': 8192, 'nbtBytes': 16384, 'nbtDepth': 16}.items():
+                require(type(items.get(key)) is int and 0 < items[key] <= maximum, f'selector decode budget differs: {protocol} {key}')
+            cmd_limits = items.get('cmdListMaxima')
+            require(isinstance(cmd_limits, list) and cmd_limits == [1, 0, 0, 0] and all(type(value) is int for value in cmd_limits),
+                    f'avatar CMD list budget differs: {protocol}')
+            require(items.get('cmdFiniteFloats') is True, f'avatar CMD finite-float guard differs: {protocol}')
+            require(items.get('componentCount') == 4, f'avatar component capacity must be four: {protocol}')
+            require(bool(items.get('sources')) and all(bool(SHA256.fullmatch(value)) for value in items.get('sources', {}).values()),
+                    f'selector item source fingerprints invalid: {protocol}')
             dependency = document(f'limbo/mcpl-{protocol}.json')
             require(dependency.get('protocol') == protocol and dependency.get('licenses') == ['The MIT License'], f'MCPL provenance/license differs: {protocol}')
             artifacts = dependency.get('artifacts', [])
@@ -246,6 +282,18 @@ def audit(path, protocols=PROTOCOLS, max_bytes=HARD_LIMIT, top=12):
                 if item.get('disposition') == 'typed':
                     require(base + 'libs/' + item.get('class', '').replace('.', '/') + '.class' in names,
                             f'typed packet class missing: {protocol} {item.get("class")}')
+            required_inventory = {'ClientboundOpenScreenPacket', 'ClientboundContainerSetContentPacket', 'ClientboundContainerClosePacket',
+                                  'ServerboundContainerClickPacket', 'ServerboundContainerClosePacket'}
+            actual_inventory = {item.get('class', '').rsplit('.', 1)[-1] for item in packets
+                                if item.get('state') == 'GAME' and item.get('disposition') == 'typed'}
+            require(required_inventory <= actual_inventory, f'selector typed inventory codecs missing: {protocol}')
+            click_name = base + 'libs/org/geysermc/mcprotocollib/protocol/packet/ingame/serverbound/inventory/ServerboundContainerClickPacket.class'
+            require(b'ItemDecodeBudget' in read(click_name), f'selector click preallocation guard missing: {protocol}')
+            if protocol <= 768:
+                require(b'BoundedItemCodecHelper' in read(base + 'session/GeneratedCodec.class'),
+                        f'selector bounded legacy factory missing: {protocol}')
+            else:
+                require(b'BoundedItemTypes' in read(click_name), f'selector bounded item reader missing: {protocol}')
             require(document(f'limbo/ignored-{protocol}.json') == [item for item in packets if item.get('disposition') == 'ignored'],
                     f'ignored-packet manifest differs: {protocol}')
             checks.append({'protocol': protocol, 'family': family(protocol), 'fixture': 'hash-verified', 'registries': meta.get('registries'),

@@ -1,8 +1,10 @@
 package moe.ryuu.kyokouauth.bungee
 
 import moe.ryuu.kyokouauth.core.text.RichText
+import moe.ryuu.kyokouauth.proxy.BedrockProof
 import moe.ryuu.kyokouauth.proxy.CommandSource
 import moe.ryuu.kyokouauth.proxy.ConnectionRequestBuilder
+import moe.ryuu.kyokouauth.proxy.GameProfile
 import moe.ryuu.kyokouauth.proxy.Player
 import moe.ryuu.kyokouauth.proxy.ProxyConfiguration
 import moe.ryuu.kyokouauth.proxy.ProxyServer
@@ -29,6 +31,9 @@ internal class BungeePlayer(val pending: PendingConnection, private val platform
     @Volatile private var closed = false
     @Volatile var loggedIn = false
     @Volatile var requestedOnline: Boolean? = null
+    @Volatile private var bedrockProof: BedrockProof? = null
+    @Volatile private var roleProfile: GameProfile? = null
+    val hasRoleProfile: Boolean get() = roleProfile != null
     // Kept until departure or the first real-backend connection, even after atomic redemption.
     @Volatile var engineAttempt: RegisteredServer? = null
     override val isActive get() = !closed && pending.isConnected && (native?.isConnected != false)
@@ -46,11 +51,44 @@ internal class BungeePlayer(val pending: PendingConnection, private val platform
         native = player
     }
 
-    fun markClosed() { closed = true }
+    /** Native profile interpretation only; authorization remains exclusively in LoginGate. */
+    fun rememberBedrock(proof: BedrockProof) {
+        check(proof.isCurrent() && !isOnlineMode && pending.uniqueId == proof.uniqueId && pending.name == proof.username)
+        bedrockProof = proof
+    }
+
+    /** Gate-selected identity is distinct from the unmodified native Floodgate proof. */
+    @Synchronized fun rememberRoleProfile(profile: GameProfile) {
+        check(isActive && native == null && !isOnlineMode && matchesIdentity(profile.id, profile.name))
+        val previous = roleProfile
+        check(previous == null || previous.id == profile.id && previous.name == profile.name) { "Prepared role identity changed" }
+        check(bedrockProof?.isCurrent() != false) { "Role source proof expired" }
+        roleProfile = profile.copy(properties = profile.properties.toList())
+    }
+
+    fun currentRoleProfile(): GameProfile? = roleProfile?.takeIf {
+        isActive && !isOnlineMode && matchesIdentity(it.id, it.name) && bedrockProof?.isCurrent() != false
+    }
+
+    fun currentBedrockProof(): BedrockProof? {
+        val proof = bedrockProof ?: return null
+        val expected = roleProfile
+        return proof.takeIf {
+            isActive && !isOnlineMode && it.isCurrent() &&
+                matchesIdentity(expected?.id ?: it.uniqueId, expected?.name ?: it.username)
+        }
+    }
+
+    private fun matchesIdentity(id: UUID, name: String): Boolean = pending.uniqueId == id && pending.name == name &&
+        (native?.let { it.uniqueId == id && it.name == name } != false)
+
+    fun markClosed() { closed = true; bedrockProof = null; roleProfile = null }
     override fun disconnect(message: RichText.Parsed) {
-        closed = true
+        markClosed()
         (native ?: pending).disconnect(message.toBungee())
     }
+    override fun transferRole(host: String, port: Int, cookie: ByteArray?): CompletableFuture<Unit> =
+        platform.transferRole(this, host, port, cookie)
     override fun hasPermission(permission: String): Boolean = native?.hasPermission(permission) ?: false
     override fun sendMessage(message: RichText.Parsed) { native?.sendMessage(message.toBungee()) }
     override fun createConnectionRequest(target: RegisteredServer): ConnectionRequestBuilder = object : ConnectionRequestBuilder {
@@ -74,7 +112,7 @@ internal class BungeePlayer(val pending: PendingConnection, private val platform
     }
 }
 
-internal class BungeePlatform(val proxy: NativeProxy) : ProxyServer {
+internal class BungeePlatform(val proxy: NativeProxy, private val roleTransfer: BungeeRoleTransfer? = null) : ProxyServer {
     private val players = IdentityHashMap<PendingConnection, BungeePlayer>()
     private val servers = IdentityHashMap<ServerInfo, RegisteredServer>()
     private val nativeServers = IdentityHashMap<RegisteredServer, ServerInfo>()
@@ -82,6 +120,12 @@ internal class BungeePlatform(val proxy: NativeProxy) : ProxyServer {
     private val privateServers = HashMap<String, RegisteredServer>()
     // Keep reserved names after removal: an expired private handle must never become public.
     private val privateServerNames = HashSet<String>()
+
+    fun transferRole(player: BungeePlayer, host: String, port: Int, cookie: ByteArray?): CompletableFuture<Unit> = try {
+        check(find(player.pending) === player && player.isActive && player.loggedIn) { "Role frontend is no longer admitted" }
+        val native = checkNotNull(player.native) { "Role transfer requires a logged-in native player" }
+        checkNotNull(roleTransfer) { "Native role transfer is disabled" }.transfer(native, host, port, cookie)
+    } catch (failure: Exception) { CompletableFuture.failedFuture(failure) }
 
     @Synchronized fun pending(connection: PendingConnection): BungeePlayer = players.getOrPut(connection) { BungeePlayer(connection, this) }
     @Synchronized fun find(connection: PendingConnection): BungeePlayer? = players[connection]

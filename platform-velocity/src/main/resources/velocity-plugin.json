@@ -5,5 +5,6 @@
   "description": "Microsoft-account verification for offline-mode proxies.",
   "url": "https://github.com/ryuu/kyokouauth",
   "authors": ["Ryuu"],
-  "main": "moe.ryuu.kyokouauth.velocity.KyokouAuthVelocity"
+  "main": "moe.ryuu.kyokouauth.velocity.KyokouAuthVelocity",
+  "dependencies": [{ "id": "floodgate", "optional": true }]
 }

@@ -6,10 +6,12 @@ import moe.ryuu.kyokouauth.limbo.LimboLogger
 import moe.ryuu.kyokouauth.limbo.LimboServer
 import moe.ryuu.kyokouauth.limbo.PrivateTicketAuthority
 import moe.ryuu.kyokouauth.proxy.AuthService
+import moe.ryuu.kyokouauth.proxy.GameProfile
 import moe.ryuu.kyokouauth.proxy.KyokouAuthCommand
 import moe.ryuu.kyokouauth.proxy.LoginGate
 import moe.ryuu.kyokouauth.proxy.ProxyConfig
 import moe.ryuu.kyokouauth.proxy.ProxyLog
+import moe.ryuu.kyokouauth.proxy.RoleSkinService
 import net.md_5.bungee.api.event.LoginEvent
 import net.md_5.bungee.api.event.PostLoginEvent
 import net.md_5.bungee.api.event.PreLoginEvent
@@ -31,10 +33,14 @@ class KyokouAuthBungee : Plugin(), Listener {
     private var auth: AuthService? = null
     private var gate: LoginGate? = null
     private var adapter: BungeeLoginGate? = null
+    private var floodgate: BungeeFloodgate? = null
     private var commandGuard: BungeeCommandGuard? = null
     private var authority: PrivateTicketAuthority? = null
     private var limbo: LimboServer? = null
     private var sweep: ScheduledTask? = null
+    private var roleTransfer: BungeeRoleTransfer? = null
+    private var roleSkinSource: BungeeRoleSkins? = null
+    private var roleSkins: RoleSkinService? = null
 
     override fun onEnable() {
         accepting = false
@@ -50,15 +56,34 @@ class KyokouAuthBungee : Plugin(), Listener {
             check(proxy.config.isIpForward) { "KyokouAuth-Bungee requires ip_forward: true" }
             check(proxy.getServerInfo(LoginGate.LIMBO_SERVER_NAME) == null) { "Reserved internal server name is already registered" }
             val config = ProxyConfig.load(dataFolder)
+            val floodgate = BungeeFloodgate(config.bedrockEnabled, { proxy.pluginManager.getPlugin("floodgate") }, config.rolesEnabled)
+                .also { this.floodgate = it }
             val messages = MessageCatalogue(config.locale, File(dataFolder, "messages")).also { it.load() }
-            val profiles = BungeeProfileBridge(javaClass.classLoader)
-            val platform = BungeePlatform(proxy).also { this.platform = it }
+            // No role-specific native signature/field access is initialized by default Java-only installs.
+            val transfer = if (config.rolesEnabled) BungeeRoleTransfer().also { roleTransfer = it } else null
+            val roleBridge = if (config.rolesEnabled) BungeeRoleLoginBridge(javaClass.classLoader) else null
+            val platform = BungeePlatform(proxy, transfer).also { this.platform = it }
+            val profiles = BungeeProfileBridge(javaClass.classLoader, bedrock = { pending ->
+                platform.find(pending)?.currentBedrockProof()
+            }, role = { pending -> platform.find(pending)?.currentRoleProfile() })
             val authority = PrivateTicketAuthority().also { this.authority = it }
-            val auth = AuthService(config, log).also { this.auth = it }
+            val skinSource = if (config.rolesEnabled) BungeeRoleSkins {
+                proxy.pluginManager.getPlugin("SkinsRestorer") ?: proxy.pluginManager.getPlugin("skinsrestorer")
+            }.also { roleSkinSource = it } else null
+            val skins = RoleSkinService { skinSource?.provider() }.also { roleSkins = it }
+            val auth = AuthService(config, log, skins).also { this.auth = it }
             val gate = LoginGate(platform, config, messages, auth, log).also { this.gate = it }
             val adapter = BungeeLoginGate(this, platform, profiles, BungeeTickets(platform, profiles, authority), gate, log,
                 submit = auth::execute, schedule = auth::schedule, accepting = { accepting },
                 intentTimeoutMillis = (config.sessionHandshakeTimeoutSeconds + 5L) * 1000L,
+                bedrock = floodgate::probe,
+                rolesEnabled = config.rolesEnabled, roleTransfer = transfer,
+                prepareRole = roleBridge?.let { bridge -> { player: BungeePlayer, profile: GameProfile ->
+                    val proof = player.currentBedrockProof()
+                    bridge.prepare(player.pending, profile.id, profile.name, proof)
+                    player.rememberRoleProfile(profile)
+                    profiles.prepareRole(player.pending, profile)
+                } },
             ).also { this.adapter = it }
             proxy.pluginManager.registerListener(this, adapter)
             val commands = BungeeCommandGuard(platform, gate, config.blockedCommands.isNotEmpty()).also {
@@ -87,11 +112,11 @@ class KyokouAuthBungee : Plugin(), Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     fun refusePreLogin(event: PreLoginEvent) {
-        if (!accepting) { event.isCancelled = true; event.reason = unavailable().toBungee() }
+        if (!accepting && !event.isCancelled) { event.isCancelled = true; event.reason = unavailable().toBungee() }
     }
     @EventHandler(priority = EventPriority.HIGHEST)
     fun refuseLogin(event: LoginEvent) {
-        if (!accepting) { event.isCancelled = true; event.reason = unavailable().toBungee() }
+        if (!accepting && !event.isCancelled) { event.isCancelled = true; event.reason = unavailable().toBungee() }
     }
     @EventHandler(priority = EventPriority.HIGHEST)
     fun refusePostLogin(event: PostLoginEvent) { if (!accepting) event.player.disconnect(unavailable().toBungee()) }
@@ -113,11 +138,15 @@ class KyokouAuthBungee : Plugin(), Listener {
         }
         release("connection watcher") { sweep?.cancel() }; sweep = null
         release("Bungee admission") { adapter?.close() }; adapter = null
+        release("native role transfer") { roleTransfer?.close() }; roleTransfer = null
+        release("role skin provider generation") { roleSkinSource?.close() }; roleSkinSource = null
+        release("Floodgate proof source") { floodgate?.close() }; floodgate = null
         release("native command boundary") { commandGuard?.close() }; commandGuard = null
         release("shared authentication gate") { gate?.deactivate() }; gate = null
         release("private login engines") { limbo?.close() }; limbo = null
         release("internal server registrations") { platform?.unregisterEngines() }; platform = null
         release("private tickets") { authority?.close() }; authority = null
         release("authentication storage") { auth?.close() }; auth = null
+        release("role skins") { roleSkins?.close() }; roleSkins = null
     }
 }

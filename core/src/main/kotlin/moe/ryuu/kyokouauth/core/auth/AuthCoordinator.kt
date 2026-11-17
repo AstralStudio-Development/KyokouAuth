@@ -33,6 +33,9 @@ class AuthCoordinator(
         /** Straight in. The UUID is final and the session is still trusted. */
         data class Admit(val identity: Identity, val bound: BoundIdentity) : Decision()
 
+        /** Supplied only by a connection-verified proxy adapter; no Java binding/session is implied. */
+        data class VerifiedBedrock(val identity: Identity) : Decision()
+
         /**
          * Enter the world frozen, prove identity, then continue.
          *

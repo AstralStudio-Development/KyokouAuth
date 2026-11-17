@@ -91,11 +91,28 @@ class EngineContractTest {
         PrivateTicketAuthority().use { connection(ForwardingMode.PrivateTicket(it)) }
     }
 
-    private fun connection(mode: ForwardingMode) {
+    @Test fun `role selector uses three rows reopens closes and accepts only one server microsoft option`() =
+        connection(ForwardingMode.VelocityModern(secret), false)
+
+    @Test fun `role selector accepts premium right click without trusting predicted head`() =
+        connection(ForwardingMode.VelocityModern(secret), true)
+
+    private fun connection(mode: ForwardingMode, selectPremium: Boolean? = null) {
         val joined = CountDownLatch(1)
         val left = CountDownLatch(1)
         val chat = CountDownLatch(1)
         val joins = AtomicInteger()
+        val selected = CountDownLatch(1)
+        val selections = AtomicInteger()
+        val generation = UUID.randomUUID()
+        val menu = RoleSelectorMenu(generation, TextComponent("选择角色"),
+            RoleSelectorItem("server-microsoft", UUID(0, 42), "MicrosoftName", "texture-value", "texture-signature",
+                TextComponent("微软角色"), listOf(TextComponent("独立资料"))),
+            RoleSelectorItem("server-premium", UUID(1, 2), "PremiumName", null, null,
+                TextComponent("正版角色"), emptyList()))
+        val selectorStep = AtomicInteger()
+        val fullInventorySyncs = AtomicInteger()
+        val firstWindow = AtomicInteger()
         val failure = AtomicReference<String>()
         val tasks = ScheduledThreadPoolExecutor(1).apply { removeOnCancelPolicy = true }
         val settings = LimboSettings(biomeKey = "minecraft:plains", keepAliveSeconds = 1, keepAliveTimeoutSeconds = 3)
@@ -104,7 +121,15 @@ class EngineContractTest {
                 assertEquals(connectionId, player.connectionId)
                 joins.incrementAndGet()
                 player.sendMessage(TextComponent("Ready"))
+                if (selectPremium != null) player.openRoleSelector(menu)
                 joined.countDown()
+            }
+            override fun onRoleSelect(player: LimboPlayer, generation: UUID, optionId: String) {
+                if (generation != menu.generation || optionId != if (selectPremium == true) "server-premium" else "server-microsoft") {
+                    failure.set("Unexpected server-owned selection callback")
+                }
+                selections.incrementAndGet()
+                selected.countDown()
             }
             override fun onLeave(player: LimboPlayer) { left.countDown() }
         }, LimboLogger { message, error -> if (message.contains("rejected") || error != null) failure.set(message+":"+error) },
@@ -147,6 +172,57 @@ class EngineContractTest {
                                 }
                             }
                             packet is ClientboundSystemChatPacket -> chat.countDown()
+                            selectPremium != null && packet.javaClass.simpleName == "ClientboundOpenScreenPacket" -> {
+                                val type = packet.javaClass.getMethod("getType").invoke(packet) as Enum<*>
+                                assertEquals("GENERIC_9X3", type.name)
+                            }
+                            selectPremium != null && packet.javaClass.simpleName == "ClientboundContainerSetContentPacket" -> {
+                                val window = packet.javaClass.getMethod("getContainerId").invoke(packet) as Int
+                                val state = packet.javaClass.getMethod("getStateId").invoke(packet) as Int
+                                val items = packet.javaClass.getMethod("getItems").invoke(packet) as Array<*>
+                                if (window == 0) {
+                                    fullInventorySyncs.incrementAndGet()
+                                    assertEquals(46, items.size, "Full player inventory includes armor and offhand")
+                                    assertTrue(items.all { it == null })
+                                    assertNull(packet.javaClass.getMethod("getCarriedItem").invoke(packet))
+                                    return
+                                }
+                                assertEquals(63, items.size, "27 menu + 36 authoritative player slots")
+                                assertEquals(listOf(12, 14), items.indices.filter { items[it] != null })
+                                assertNull(packet.javaClass.getMethod("getCarriedItem").invoke(packet))
+                                val slot = if (selectPremium) 14 else 12
+                                when (selectorStep.getAndIncrement()) {
+                                    0 -> {
+                                        firstWindow.set(window)
+                                        session.send(construct("packet.ingame.serverbound.inventory.ServerboundContainerClosePacket", window) as Packet)
+                                        session.send(selectorClick(window, state, slot, "CLICK_ITEM", "RIGHT_CLICK", null))
+                                    }
+                                    1 -> {
+                                        assertNotEquals(firstWindow.get(), window, "Close must allocate a fresh non-reused window")
+                                        assertEquals(0, selections.get())
+                                        session.send(selectorClick(firstWindow.get(), state, slot, "CLICK_ITEM", "LEFT_CLICK", null))
+                                        session.send(selectorClick(window, state + 99, if (slot == 12) 14 else 12, "CLICK_ITEM", "LEFT_CLICK", null))
+                                    }
+                                    2 -> {
+                                        assertEquals(0, selections.get())
+                                        val otherSlot = if (slot == 12) 14 else 12
+                                        session.send(selectorClick(window, state, otherSlot, "SHIFT_CLICK_ITEM", "LEFT_CLICK", null))
+                                        session.send(selectorClick(window, state, otherSlot, "MOVE_TO_HOTBAR_SLOT", "SLOT_1", null))
+                                        session.send(selectorClick(window, state, otherSlot, "MOVE_TO_HOTBAR_SLOT", "OFF_HAND", null))
+                                        session.send(selectorClick(window, state, otherSlot, "SPREAD_ITEM", "LEFT_MOUSE_ADD_SLOT", null))
+                                        session.send(selectorClick(window, state, 13, "CLICK_ITEM", "LEFT_CLICK", null))
+                                    }
+                                    3 -> {
+                                        assertEquals(0, selections.get(), "Rejected prediction burst must be corrected before selection")
+                                        val prediction = if (protocol < 770) items[slot] else {
+                                            val hashed = Class.forName(PREFIX + "data.game.item.HashedStack")
+                                            hashed.constructors.single().newInstance(123, 1, emptyMap<Any, Any>(), emptySet<Any>())
+                                        }
+                                        session.send(selectorClick(window, state, slot, "CLICK_ITEM", "RIGHT_CLICK", prediction))
+                                        session.send(selectorClick(window, state, slot, "CLICK_ITEM", "LEFT_CLICK", prediction))
+                                    }
+                                }
+                            }
                         }
                     } catch (error: Throwable) { failure.set(error.toString()) }
                 }
@@ -156,6 +232,14 @@ class EngineContractTest {
             assertTrue(joined.await(10, TimeUnit.SECONDS), "READY protocol=$protocol failure=${failure.get()}")
             assertTrue(chat.await(3, TimeUnit.SECONDS))
             assertEquals(1, joins.get())
+            if (selectPremium != null) {
+                assertTrue(selected.await(5, TimeUnit.SECONDS), "Selector protocol=$protocol failure=${failure.get()}")
+                assertTrue(selectorStep.get() >= 4, "A close/old-window/wrong-state packet selected before correction")
+                assertTrue(fullInventorySyncs.get() >= 4, "Initial/reopen/rejection-burst corrections must clear armor and offhand too")
+                tasks.submit {}.get(2, TimeUnit.SECONDS)
+                assertEquals(1, selections.get(), "Duplicate/current/old-window clicks must not select twice")
+                assertNull(failure.get())
+            }
             // A scheduled assertion spans more than two heartbeat periods, without injecting any render evidence.
             val alive = tasks.schedule(Callable { client.isConnected }, 2500, TimeUnit.MILLISECONDS)
             assertTrue(alive.get(4, TimeUnit.SECONDS), failure.get())
@@ -208,6 +292,21 @@ class EngineContractTest {
             value == null && !type.isPrimitive || value != null && (primitive[type] ?: type).isInstance(value)
         } }
         return constructor.newInstance(*args)
+    }
+
+    private fun selectorClick(window: Int, state: Int, slot: Int, action: String, button: String, prediction: Any?): Packet {
+        val actionType = Class.forName(PREFIX + "data.game.inventory.ContainerActionType").enumConstants
+            .single { (it as Enum<*>).name == action }
+        val parameterType = when (action) {
+            "SHIFT_CLICK_ITEM" -> "ShiftClickItemAction"
+            "MOVE_TO_HOTBAR_SLOT" -> "MoveToHotbarAction"
+            "SPREAD_ITEM" -> "SpreadItemAction"
+            else -> "ClickItemAction"
+        }
+        val parameter = Class.forName(PREFIX + "data.game.inventory.$parameterType").enumConstants
+            .single { (it as Enum<*>).name == button }
+        return construct("packet.ingame.serverbound.inventory.ServerboundContainerClickPacket", window, state, slot,
+            actionType, parameter, prediction, mapOf(slot to null)) as Packet
     }
 
     private fun payload(): ByteArray {

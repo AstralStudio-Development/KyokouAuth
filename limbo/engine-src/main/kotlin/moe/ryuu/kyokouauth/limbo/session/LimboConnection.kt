@@ -20,6 +20,10 @@ import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.Clientbound
 import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.title.*
 import org.geysermc.mcprotocollib.protocol.MinecraftProtocol
 import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.level.*
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.inventory.ServerboundContainerClickPacket
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.inventory.ServerboundContainerClosePacket
+import org.geysermc.mcprotocollib.protocol.data.game.inventory.ClickItemAction
+import org.geysermc.mcprotocollib.protocol.data.game.inventory.ContainerActionType
 import org.geysermc.mcprotocollib.protocol.packet.login.clientbound.*
 import org.geysermc.mcprotocollib.protocol.packet.login.serverbound.*
 import org.geysermc.mcprotocollib.protocol.packet.status.clientbound.ClientboundStatusResponsePacket
@@ -56,6 +60,15 @@ internal class LimboConnection(
     private var leaveAnnounced = false
     private var joinTimeout: ScheduledFuture<*>? = null
     private var heartbeat: ScheduledFuture<*>? = null
+    private var selector: RoleSelectorMenu? = null
+    private val selectorGenerations = HashSet<UUID>() // At most 127 openings before the connection fails closed.
+    private var selectorWindow = 0
+    private var lastSelectorWindow = 0
+    private var selectorState = 0
+    private var selectorVisible = false
+    private var selectorResyncAt = 0L
+    private var selectorReopen: ScheduledFuture<*>? = null
+    private var selectorResync: ScheduledFuture<*>? = null
     override val name get() = requireNotNull(identity).profile.name!!
     override val uuid get() = requireNotNull(identity).profile.id!!
     override val address get() = requireNotNull(identity).address
@@ -70,6 +83,7 @@ internal class LimboConnection(
     override fun packetReceived(session: Session, packet: Packet) = execute {
         try { receive(packet) }
         catch (failure: Exception) {
+            invalidateRoleSelector(false)
             logger.log("Limbo rejected ${packet.javaClass.simpleName} during ${lifecycle.phase}", null)
             disconnect(TextComponent("Invalid login-screen connection."))
         }
@@ -157,6 +171,8 @@ internal class LimboConnection(
                 is ServerboundChunkBatchReceivedPacket -> lifecycle.acknowledgeBatch(packet.desiredChunksPerTick)
                 is ServerboundAcceptTeleportationPacket -> lifecycle.acknowledgeTeleport(packet.id, teleportId)
                 is LimboPingRequest -> session.send(LimboPongResponse(packet.pingTime))
+                is ServerboundContainerClickPacket -> if (lifecycle.phase == Phase.READY) clickRole(packet)
+                is ServerboundContainerClosePacket -> if (lifecycle.phase == Phase.READY) closeRoleFromClient(packet.containerId)
                 else -> when {
                     ProtocolPackets.hasPlayerLoaded && packet.javaClass.simpleName == "ServerboundPlayerLoadedPacket" -> ready()
                     !ProtocolPackets.hasPlayerLoaded && packet.javaClass.simpleName.startsWith("ServerboundMovePlayer") -> {
@@ -210,6 +226,138 @@ internal class LimboConnection(
     override fun clearTitle() = execute {
         if (lifecycle.phase == Phase.READY) session.send(ClientboundClearTitlesPacket(true))
     }
+    override fun openRoleSelector(menu: RoleSelectorMenu) {
+        require(menu.microsoft.optionId.isNotBlank() && menu.microsoft.optionId.length <= 128)
+        require(menu.premium.optionId.isNotBlank() && menu.premium.optionId.length <= 128)
+        require(menu.microsoft.optionId != menu.premium.optionId)
+        for (item in listOf(menu.microsoft, menu.premium)) {
+            require(item.profileName.matches(Regex("[A-Za-z0-9_]{3,16}")))
+            require((item.textureValue?.length ?: 0) <= 8192 && (item.textureSignature?.length ?: 0) <= 8192)
+            require(item.textureSignature == null || item.textureValue != null)
+            require(item.lore.size <= 8)
+        }
+        val snapshot = menu.copy(microsoft = menu.microsoft.copy(lore = menu.microsoft.lore.toList()),
+            premium = menu.premium.copy(lore = menu.premium.lore.toList()))
+        execute {
+            if (lifecycle.phase != Phase.READY || !session.isConnected) return@execute
+            // A refresh must not make an already queued callback valid under a changed option map.
+            if (!selectorGenerations.add(snapshot.generation)) return@execute
+            try {
+                invalidateRoleSelector(true)
+                selector = snapshot
+                showRoleSelector()
+            } catch (_: Exception) {
+                invalidateRoleSelector(false)
+                logger.log("Limbo role selector could not be opened", null)
+                disconnect(TextComponent("Role selector unavailable. Please reconnect."))
+            }
+        }
+    }
+
+    override fun closeRoleSelector() = execute { invalidateRoleSelector(true) }
+
+    private fun showRoleSelector() {
+        val menu = selector ?: return
+        if (lifecycle.phase != Phase.READY || !session.isConnected) return
+        // 767 sends a signed byte for Click.containerId. Never wrap/reuse an ID on this connection.
+        if (lastSelectorWindow >= 127) {
+            disconnect(TextComponent("Role selector was closed too often. Please reconnect."))
+            return
+        }
+        selectorWindow = ++lastSelectorWindow
+        selectorState = 0
+        selectorVisible = true
+        selectorResyncAt = 0L
+        session.send(RoleSelectorPackets.open(selectorWindow, menu))
+        syncRoleSelector(false)
+        selectorResyncAt = 0L // Allow the first rejected prediction to receive an immediate correction.
+    }
+
+    private fun syncRoleSelector(throttle: Boolean = true) {
+        val menu = selector ?: return
+        if (!selectorVisible || !session.isConnected) return
+        val now = System.nanoTime()
+        if (throttle && now < selectorResyncAt) {
+            if (selectorResync == null) {
+                val window = selectorWindow
+                selectorResync = executor.schedule({
+                    selectorResync = null
+                    if (selector === menu && selectorVisible && selectorWindow == window && lifecycle.phase == Phase.READY) {
+                        try { syncRoleSelector(false) }
+                        catch (_: Exception) {
+                            invalidateRoleSelector(false)
+                            disconnect(TextComponent("Role selector unavailable. Please reconnect."))
+                        }
+                    }
+                }, selectorResyncAt - now, TimeUnit.NANOSECONDS)
+            }
+            return
+        }
+        selectorResync?.cancel(false)
+        selectorResync = null
+        selectorResyncAt = now + TimeUnit.MILLISECONDS.toNanos(100)
+        if (selectorState == 0) selectorState = 1
+        // The immutable inventory has not changed: corrections retain its state ID, never accept client state.
+        // Includes menu, player inventory and cursor; changedSlots/carriedItem are only predictions.
+        session.send(RoleSelectorPackets.playerInventory(selectorState))
+        session.send(RoleSelectorPackets.content(selectorWindow, selectorState, menu))
+    }
+
+    private fun clickRole(packet: ServerboundContainerClickPacket) {
+        val menu = selector ?: return
+        if (!session.isConnected) { invalidateRoleSelector(false); return }
+        if (!selectorVisible) return
+        if (packet.containerId != selectorWindow) { syncRoleSelector(); return }
+        if (packet.stateId != selectorState || packet.action != ContainerActionType.CLICK_ITEM ||
+            packet.param != ClickItemAction.LEFT_CLICK && packet.param != ClickItemAction.RIGHT_CLICK) {
+            syncRoleSelector()
+            return
+        }
+        val option = when (packet.slot) {
+            RoleSelectorPackets.MICROSOFT_SLOT -> menu.microsoft.optionId
+            RoleSelectorPackets.PREMIUM_SLOT -> menu.premium.optionId
+            else -> { syncRoleSelector(); return }
+        }
+        // Invalidate before sends as well as the callback: even a failed serializer cannot leave a selectable menu.
+        val window = selectorWindow
+        val state = selectorState
+        invalidateRoleSelector(false)
+        session.send(RoleSelectorPackets.playerInventory(state))
+        session.send(RoleSelectorPackets.content(window, state, menu))
+        session.send(RoleSelectorPackets.close(window))
+        if (session.isConnected && lifecycle.phase == Phase.READY) listener.onRoleSelect(this, menu.generation, option)
+    }
+
+    private fun closeRoleFromClient(window: Int) {
+        val menu = selector ?: return
+        if (!selectorVisible || window != selectorWindow) return
+        selectorVisible = false
+        if (selectorReopen != null) return
+        selectorReopen = executor.schedule({
+            selectorReopen = null
+            if (selector === menu && lifecycle.phase == Phase.READY && session.isConnected) showRoleSelector()
+        }, 250, TimeUnit.MILLISECONDS)
+    }
+
+    private fun invalidateRoleSelector(sendClose: Boolean) {
+        selectorReopen?.cancel(false)
+        selectorReopen = null
+        selectorResync?.cancel(false)
+        selectorResync = null
+        val window = if (selectorVisible) selectorWindow else null
+        val menu = selector
+        val state = selectorState
+        selectorVisible = false
+        selector = null
+        if (sendClose && session.isConnected) {
+            if (menu != null) session.send(RoleSelectorPackets.playerInventory(state))
+            if (window != null) {
+                if (menu != null) session.send(RoleSelectorPackets.content(window, state, menu))
+                session.send(RoleSelectorPackets.close(window))
+            }
+        }
+    }
+
     override fun disconnect(reason: TextComponent) = execute {
         if (lifecycle.phase != Phase.CLOSED) {
             val component = reason.toLibrary()
@@ -229,6 +377,8 @@ internal class LimboConnection(
         finish()
     }
     private fun finish() {
+        invalidateRoleSelector(false)
+        selectorGenerations.clear()
         lifecycle.close()
         joinTimeout?.cancel(false)
         heartbeat?.cancel(false)

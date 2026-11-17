@@ -47,6 +47,14 @@ interface LimboPlayer {
 
     fun clearTitle()
 
+    /** Opens the connection-local, server-authoritative two-role menu. Unsupported engines fail closed. */
+    fun openRoleSelector(menu: RoleSelectorMenu) {
+        throw UnsupportedOperationException("This Limbo engine does not support role selection")
+    }
+
+    /** Invalidates any current selector without selecting a role. Safe for legacy player fakes. */
+    fun closeRoleSelector() = Unit
+
     /** Kicks the player with [reason]. Does nothing once the connection has already closed. */
     fun disconnect(reason: TextComponent)
 
@@ -72,6 +80,9 @@ interface LimboListener {
      * only here, so a code can never outlive the player it was issued to.
      */
     fun onLeave(player: LimboPlayer)
+
+    /** Only server-owned option IDs from the current menu are delivered, once, on the lifecycle executor. */
+    fun onRoleSelect(player: LimboPlayer, generation: UUID, optionId: String) = Unit
 
     companion object {
         val None: LimboListener = object : LimboListener {

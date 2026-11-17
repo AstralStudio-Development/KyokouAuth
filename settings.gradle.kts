@@ -13,7 +13,7 @@ dependencyResolutionManagement {
     }
 }
 
-include("core", "limbo", "proxy-common", "platform-velocity", "platform-bungee")
+include("core", "limbo", "proxy-common", "platform-velocity", "platform-bungee", "platform-geyser-transfer", "platform-geyser-avatar")
 
 // Stable logical project IDs keep commands/dependencies compatible; all Limbo implementation
 // projects live together physically, without extra empty Gradle aggregator projects.

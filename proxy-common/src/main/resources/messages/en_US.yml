@@ -33,10 +33,33 @@ limbo:
   unsupported-version: "<#FACC15>This login screen supports Minecraft 1.21 through 26.3 (release protocols 767–777)."
   title: "<#22D3EE>Complete Microsoft verification"
   subtitle: "<#D4D4D8>Click the link in chat"
-  command-blocked: "<#FACC15>You cannot leave until verification finishes</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Click the link in chat"
+  command-blocked: "<#FACC15>You cannot leave until verification and role selection finish</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Complete the current verification or selection screen"
+
+bedrock:
+  disabled: "<#FACC15>Bedrock identity admission is not enabled on this proxy. Contact an administrator."
+  unavailable: "<#F87171>The Floodgate identity provider is unavailable; this connection cannot enter a backend."
+  provider-denied: "<#F87171>Geyser/Floodgate did not verify this connection."
+  linked: "<#FACC15>Linked-account role selection is not enabled on this proxy. Contact an administrator."
+  invalid-identity: "<#F87171>The Bedrock identity is invalid or does not match this connection."
+  unsafe-name: "<#FACC15>Bedrock names require an isolated Floodgate prefix and valid format. Contact an administrator."
+  stale: "<#FACC15>The proof for this Bedrock connection is no longer current. Reconnect to try again."
+
+role-selection:
+  title: "<#22D3EE>Choose a role"
+  microsoft: "<#22D3EE>Microsoft role</#22D3EE> <#8B8B94>»</#8B8B94> <#FFFFFF><name>"
+  premium: "<#22D3EE>Java role</#22D3EE> <#8B8B94>»</#8B8B94> <#FFFFFF><name>"
+  enter: "<#D4D4D8>Click to enter the server"
+  avatar-loading: "<#22D3EE>Loading role avatars..."
+  avatar-unavailable: "<#8B8B94>Avatar unavailable"
+  independent: "<#8B8B94>Separate role data; nothing is moved or merged"
+  first-entry: "<#FACC15>First visit"
+  existing: "<#D4D4D8>Existing role"
+  retry: "<#FACC15>Role unavailable</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect and try again"
+  expired: "<#FACC15>Selection timed out</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect"
+  reconnect: "<#FACC15>Reconnection needed</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Continue signing in"
 
 verification:
-  command-blocked: "<#FACC15>Complete verification before using this command</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Click the link in chat"
+  command-blocked: "<#FACC15>Complete verification and role selection before using this command"
   starting: "<#22D3EE>Contacting Microsoft for a sign-in code</#22D3EE><newline><#D4D4D8>Temporary network failures are retried automatically; please wait"
   confirming: "<#22D3EE>Microsoft authorization received; confirming your Xbox identity..."
   start-unavailable: "<#FACC15>Microsoft sign-in is temporarily unreachable</#FACC15><newline><#D4D4D8>Limited automatic retries were exhausted; please try later"

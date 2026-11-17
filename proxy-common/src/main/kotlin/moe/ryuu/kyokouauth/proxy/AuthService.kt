@@ -14,7 +14,8 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Owns blocking authentication work, persistence and only the driver selected by configuration. */
-class AuthService(config: ProxyConfig, private val logger: ProxyLog) : AutoCloseable {
+class AuthService(config: ProxyConfig, private val logger: ProxyLog,
+                  private val roleSkins: RoleSkinService = RoleSkinService()) : AutoCloseable {
     private val drivers = DriverLibrary(config.librariesFolder, config.driverRepository, config.autoDownloadDriver) { logger.info(it) }
     private val database: Database
     private val tasks: AuthTasks
@@ -24,6 +25,17 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog) : AutoClose
     val sessions: SessionRepository
     val limiter: ConnectionLimiter
     val auth: AuthCoordinator
+    private val roleLinks by lazy { moe.ryuu.kyokouauth.core.storage.AccountLinkRepository(database) }
+    private val roleResolver by lazy { moe.ryuu.kyokouauth.core.auth.RoleResolver(identities) }
+    private val roleLinkClient = RoleLinkClient { url ->
+        moe.ryuu.kyokouauth.core.http.Http.get(url, readTimeoutMs = 5_000,
+            route = moe.ryuu.kyokouauth.core.http.Http.Route.DIRECT)
+    }
+    private val javaProfiles = moe.ryuu.kyokouauth.core.auth.OfficialJavaProfileClient()
+    private val roleAvatars = if (config.roleAvatarsEnabled)
+        moe.ryuu.kyokouauth.proxy.avatar.RoleAvatarService(config.roleAvatarBridgePort) else null
+    private val roleAvatarStatus = if (config.roleAvatarsEnabled)
+        moe.ryuu.kyokouauth.proxy.avatar.RoleAvatarStatusClient(config.roleAvatarStatusEndpoint) else null
 
     init {
         var opened: Database? = null
@@ -44,16 +56,77 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog) : AutoClose
             val runner = AuthTasks(logger, config.ioWorkers, config.ioQueueCapacity)
             started = runner
             tasks = runner
+            roleAvatars?.start()
             maintenance = runner.scheduleAtFixedRate(SESSION_SWEEP_MILLIS) {
                 try { runner.execute { sessions.purgeExpired(System.currentTimeMillis()) } }
                 catch (_: RejectedExecutionException) { logger.warn("Session maintenance skipped: authentication workers are busy or closed") }
             }
         } catch (failure: Throwable) {
-            listOfNotNull<AutoCloseable>(started, opened, drivers).forEach { resource ->
+            listOfNotNull<AutoCloseable>(started, roleAvatars, roleSkins, opened, drivers).forEach { resource ->
                 try { resource.close() } catch (closing: Throwable) { failure.addSuppressed(closing) }
             }
             throw failure
         }
+    }
+
+    /** Presentation only. The caller must already hold the current strong subject/role proof. */
+    fun prepareRoleAvatars(xuid: moe.ryuu.kyokouauth.core.identity.Xuid, options: RoleOptions): CompletableFuture<String> {
+        if (closed.get()) return CompletableFuture.failedFuture(IllegalStateException("Avatar presentation is closed"))
+        val service = roleAvatars
+            ?: return CompletableFuture.failedFuture(IllegalStateException("Avatar presentation is not enabled"))
+        val microsoft = options.roles.singleOrNull { it.identity is moe.ryuu.kyokouauth.core.identity.Identity.Microsoft }
+        val premium = options.roles.singleOrNull { it.identity is moe.ryuu.kyokouauth.core.identity.Identity.Premium }
+        if (microsoft == null || premium == null ||
+            (microsoft.identity as moe.ryuu.kyokouauth.core.identity.Identity.Microsoft).xuid != xuid ||
+            premium.identity.uuid != options.linkedJavaUuid) {
+            return CompletableFuture.failedFuture(IllegalArgumentException("Avatar presentation needs two current role options"))
+        }
+        return service.prepare(xuid.value, microsoft.skin?.value, premium.skin?.value).thenApply { it.fingerprint }
+    }
+
+    /** Offered resource content is a visual hint, never an authorization result. */
+    fun roleAvatarOffer(xuid: moe.ryuu.kyokouauth.core.identity.Xuid): moe.ryuu.kyokouauth.proxy.avatar.RoleAvatarOffer? {
+        check(!closed.get()) { "Avatar presentation is closed" }
+        return roleAvatarStatus?.status(xuid.value)
+    }
+
+    /** Call only after this connection has proved its XUID, and only on the bounded IO executor. */
+    fun roleOptions(xuid: moe.ryuu.kyokouauth.core.identity.Xuid, gamertag: String,
+                    fallbackBedrockName: String?): RoleOptions {
+        check(!closed.get()) { "Authentication is unavailable" }
+        val observedAt = System.currentTimeMillis()
+        val rawLink = roleLinkClient.lookup(xuid)
+        if (rawLink is moe.ryuu.kyokouauth.core.auth.AccountLinkResult.Unavailable) {
+            throw IllegalStateException("Current account association is unavailable")
+        }
+        val official = (rawLink as? moe.ryuu.kyokouauth.core.auth.AccountLinkResult.Linked)?.let {
+            javaProfiles.lookup(it.profile.uuid)
+        }
+        val link = if (official == null) rawLink else moe.ryuu.kyokouauth.core.auth.AccountLinkResult.Linked(
+            moe.ryuu.kyokouauth.core.auth.LinkedJavaProfile(official.uuid, official.name))
+        val resolution = roleResolver.resolve(xuid, gamertag, link, fallbackBedrockName)
+        val candidates = (resolution as? moe.ryuu.kyokouauth.core.auth.RoleResolution.Ready)?.roles
+            ?: throw IllegalStateException("Current role records are unavailable or conflicting")
+        val options = candidates.map { candidate ->
+            val identity = candidate.identity
+            if (identity is moe.ryuu.kyokouauth.core.identity.Identity.Microsoft) {
+                // An old XUID reservation must not capture a name later owned by Mojang.
+                if (moe.ryuu.kyokouauth.core.identity.GameName.parse(identity.name.value) != null &&
+                    MojangDirectory.lookup(identity.name.key) !is MojangDirectory.Lookup.Free) {
+                    throw IllegalStateException("Microsoft role name is unavailable; rename or retry is required")
+                }
+                RoleOption(identity, candidate.existing, roleSkins.microsoft(identity.uuid))
+            } else {
+                check(identity is moe.ryuu.kyokouauth.core.identity.Identity.Premium && official != null && official.uuid == identity.uuid)
+                val latest = identity.copy(name = official.name)
+                val texture = official.texture?.let { GameProfile.Property("textures", it.value, it.signature) }
+                RoleOption(latest, candidate.existing, texture)
+            }
+        }
+        if (official == null) roleLinks.revoke(xuid, observedAt)
+        else roleLinks.recordVerified(moe.ryuu.kyokouauth.core.storage.VerifiedAccountLink(
+            xuid, official.uuid, "global-api", "geysermc-v2-global", observedAt))
+        return RoleOptions(options, official?.uuid)
     }
 
     /** Every failure remains exceptional; null may only be the caller's genuine successful result. */
@@ -76,7 +149,7 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog) : AutoClose
         if (!closed.compareAndSet(false, true)) return
         maintenance.cancel(false)
         var failure: Throwable? = null
-        listOf<AutoCloseable>(tasks, database, drivers).forEach { resource ->
+        listOfNotNull<AutoCloseable>(tasks, roleAvatars, roleSkins, database, drivers).forEach { resource ->
             try { resource.close() } catch (closing: Throwable) {
                 if (failure == null) failure = closing else failure.addSuppressed(closing)
             }

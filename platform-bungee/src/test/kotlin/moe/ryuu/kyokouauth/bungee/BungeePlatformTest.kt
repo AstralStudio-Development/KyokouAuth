@@ -5,6 +5,25 @@ import java.net.InetSocketAddress
 import kotlin.test.*
 
 class BungeePlatformTest {
+    @Test fun `role transfer port uses only admitted exact native frontend and does not store FG hint cookies`() {
+        BungeeRoleTransfer().use { transfer ->
+            val platform = BungeePlatform(TestProxy(), transfer)
+            val fixture = PendingFixture()
+            val player = platform.pending(fixture.pending)
+            assertFails { player.transferRole("proxy.invalid", 25577, byteArrayOf(1)).join() }
+            player.bind(fixture.player)
+            player.loggedIn = true
+            player.transferRole("proxy.invalid", 25577, byteArrayOf(1, 2)).join()
+            player.transferRole("proxy.invalid", 25577, null).join()
+            assertEquals(listOf("proxy.invalid" to 25577, "proxy.invalid" to 25577), fixture.transfers)
+            assertEquals(1, fixture.storedCookies.size)
+            assertContentEquals(byteArrayOf(1, 2), fixture.storedCookies.single().second)
+            platform.remove(player)
+            assertFails { player.transferRole("proxy.invalid", 25577, null).join() }
+            assertEquals(2, fixture.transfers.size)
+        }
+    }
+
     @Test fun `private engines never enter public proxy directory but retain exact internal handles`() {
         val proxy = TestProxy()
         val platform = BungeePlatform(proxy)

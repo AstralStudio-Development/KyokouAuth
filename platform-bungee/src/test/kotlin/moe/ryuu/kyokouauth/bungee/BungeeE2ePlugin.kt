@@ -27,15 +27,20 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Test-only alternative bootstrap. Never packaged in the production plugin or enabled by config. */
 class BungeeE2ePlugin : Plugin(), Listener {
     private val scenario = System.getProperty("kyokou.e2e.scenario", "held")
     private val stable = UUID(0L, 2535412345678901L)
     private val trusted = AtomicBoolean(false)
+    private val javaWrites = AtomicInteger()
     private val io = Executors.newFixedThreadPool(2)
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private var accepting = false
+    private val bedrockScenario = scenario.startsWith("bedrock")
+    private var floodgate: BungeeFloodgate? = null
+    private var bedrockProbe: BungeeE2eBedrockProbe? = null
     private lateinit var platform: BungeePlatform
     private lateinit var gate: LoginGate
     private lateinit var adapter: BungeeLoginGate
@@ -51,8 +56,11 @@ class BungeeE2ePlugin : Plugin(), Listener {
             check(proxy.config.isIpForward)
             platform = BungeePlatform(proxy)
             authority = PrivateTicketAuthority()
-            val profiles = BungeeProfileBridge(javaClass.classLoader)
-            val config = ProxyConfig(mapOf("post-login.server" to "backend", "limbo.keep-alive-seconds" to "2",
+            val profiles = BungeeProfileBridge(javaClass.classLoader, bedrock = { pending ->
+                platform.find(pending)?.currentBedrockProof()
+            })
+            val config = ProxyConfig(mapOf("post-login.server" to "backend",
+                "bedrock.enabled" to (bedrockScenario && scenario != "bedrock-disabled").toString(), "limbo.keep-alive-seconds" to "2",
                 "limbo.keep-alive-timeout-seconds" to "10", "limbo.join-timeout-seconds" to "5",
                 "verification.poll-interval-seconds" to "1", "verification.blocked-commands" to
                     if (scenario == "commands") "server\n${BungeeE2eCommandProbe.PROBE}" else "server"), dataFolder)
@@ -60,9 +68,12 @@ class BungeeE2ePlugin : Plugin(), Listener {
             val log = ProxyLog { severity, message, error ->
                 logger.log(if (severity == ProxyLog.Level.INFO) java.util.logging.Level.INFO else java.util.logging.Level.WARNING, message, error)
             }
+            val floodgate = BungeeFloodgate(config.bedrockEnabled, { proxy.pluginManager.getPlugin("floodgate") })
+                .also { this.floodgate = it }
             val services = object : LoginGate.Services {
                 override fun allow(key: String) = true
                 override fun decide(name: GameName, address: String): AuthCoordinator.Decision {
+                    javaOnly("decide")
                     val identity = Identity.Microsoft(name, Xuid(stable.leastSignificantBits), "Controlled profile")
                     val record = BoundIdentity.of(identity, 1L)
                     if (scenario == "trusted" || trusted.get()) return AuthCoordinator.Decision.Admit(identity, record)
@@ -70,17 +81,26 @@ class BungeeE2ePlugin : Plugin(), Listener {
                         if (scenario == "first-bind") AuthCoordinator.Reason.FIRST_BIND else AuthCoordinator.Reason.SESSION_EXPIRED,
                         scenario == "first-bind", if (scenario == "first-bind") null else record)
                 }
-                override fun bindPremium(uuid: UUID, name: GameName): AuthCoordinator.ClaimOutcome = error("No external premium test session")
-                override fun bindMicrosoft(name: GameName, xuid: Xuid, gamertag: String): AuthCoordinator.ClaimOutcome =
-                    AuthCoordinator.ClaimOutcome.Bound(BoundIdentity.of(Identity.Microsoft(name, xuid, gamertag), 1L))
+                override fun bindPremium(uuid: UUID, name: GameName): AuthCoordinator.ClaimOutcome {
+                    javaOnly("bindPremium", write = true)
+                    error("No external premium test session")
+                }
+                override fun bindMicrosoft(name: GameName, xuid: Xuid, gamertag: String): AuthCoordinator.ClaimOutcome {
+                    javaOnly("bindMicrosoft", write = true)
+                    return AuthCoordinator.ClaimOutcome.Bound(BoundIdentity.of(Identity.Microsoft(name, xuid, gamertag), 1L))
+                }
                 override fun grantSession(uuid: UUID, address: String) {
+                    javaOnly("grantSession", write = true)
                     check(uuid == stable); trusted.set(true); logger.info("BUNGEE_E2E_SESSION $uuid")
                 }
                 override fun submit(task: () -> Unit) { io.execute(task) }
                 override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledFuture<*> =
                     scheduler.schedule(task, delayMillis, TimeUnit.MILLISECONDS)
-                override fun begin() = DeviceCodeFlow.Challenge("E2E-CODE", "https://microsoft.com/link",
-                    "https://microsoft.com/link?otc=E2E-CODE", 300, 1, "test-only-no-network")
+                override fun begin(): DeviceCodeFlow.Challenge {
+                    javaOnly("begin")
+                    return DeviceCodeFlow.Challenge("E2E-CODE", "https://microsoft.com/link",
+                        "https://microsoft.com/link?otc=E2E-CODE", 300, 1, "test-only-no-network")
+                }
                 override fun poll(challenge: DeviceCodeFlow.Challenge): DeviceCodeFlow.PollResult =
                     if (scenario in setOf("stable", "first-bind") ||
                         (scenario == "commands" && commandProbe?.mayAuthorize() == true)) DeviceCodeFlow.PollResult.Authorized("synthetic", null, 300)
@@ -89,8 +109,23 @@ class BungeeE2ePlugin : Plugin(), Listener {
             }
             gate = LoginGate(platform, config, messages, services, log)
             adapter = BungeeLoginGate(this, platform, profiles, BungeeTickets(platform, profiles, authority), gate,
-                log, services::submit, services::schedule, { accepting })
+                log, services::submit, services::schedule, { accepting }, bedrock = { player ->
+                    floodgate.probe(player).also { result ->
+                        if (bedrockScenario) {
+                            logger.info("BUNGEE_E2E_BEDROCK_SAMPLE result=${result.javaClass.simpleName}")
+                            val kind = when (result) {
+                                is moe.ryuu.kyokouauth.proxy.BedrockLogin.Rejected -> result.reason.name
+                                is moe.ryuu.kyokouauth.proxy.BedrockLogin.Verified -> "VERIFIED"
+                                moe.ryuu.kyokouauth.proxy.BedrockLogin.Java -> "JAVA"
+                            }
+                            logger.info("BUNGEE_E2E_BEDROCK_PROBE kind=$kind")
+                        }
+                    }
+                })
             proxy.pluginManager.registerListener(this, adapter)
+            if (bedrockScenario) bedrockProbe = BungeeE2eBedrockProbe(this, floodgate, profiles, scenario,
+                authenticated = { native -> gate.isAuthenticated(platform.find(native)) }, javaWrites = javaWrites::get,
+            ).also { proxy.pluginManager.registerListener(this, it) }
             commandGuard = BungeeCommandGuard(platform, gate, config.blockedCommands.isNotEmpty()).also {
                 it.enablePacketFilter(log)
                 proxy.pluginManager.registerListener(this, it)
@@ -154,6 +189,14 @@ class BungeeE2ePlugin : Plugin(), Listener {
         } catch (failure: Exception) { logger.log(java.util.logging.Level.SEVERE, "BUNGEE_E2E_START_FAILED", failure) }
     }
 
+    private fun javaOnly(operation: String, write: Boolean = false) {
+        if (write) javaWrites.incrementAndGet()
+        if (bedrockScenario) {
+            logger.warning("BUNGEE_E2E_BEDROCK_FORBIDDEN operation=$operation")
+            error("Bedrock entered a forbidden Java path")
+        }
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST)
     fun refuse(event: PreLoginEvent) { if (!accepting) { event.isCancelled = true; event.reason = unavailable().toBungee() } }
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -162,6 +205,8 @@ class BungeeE2ePlugin : Plugin(), Listener {
         accepting = false
         commandProbe?.close(); commandProbe = null
         if (::adapter.isInitialized) adapter.close()
+        floodgate?.close(); floodgate = null
+        bedrockProbe?.close(); bedrockProbe = null
         commandGuard?.close(); commandGuard = null
         if (::gate.isInitialized) gate.deactivate()
         limbo?.close()

@@ -47,6 +47,7 @@ public final class ProtocolOracle {
     private final Map<ResourceKey<? extends Registry<?>>, NetworkPayload> tags = new LinkedHashMap<>();
     private final Set<String> seen = new HashSet<>();
     private RegistryAccess access;
+    private com.mojang.authlib.GameProfile nativeProfile;
     private ProtocolInfo<ClientGamePacketListener> play;
     private DimensionType dimension;
     private boolean configurationFinished;
@@ -62,6 +63,8 @@ public final class ProtocolOracle {
     private int cacheRadius;
     private final Set<Long> chunkCoordinates = new HashSet<>();
     private boolean centerSeen;
+    private boolean javaSelectorSeen;
+    private boolean markedSelectorSeen;
     private int lastState;
 
     private record Input(String state, int id, String name, byte[] body) {}
@@ -115,9 +118,11 @@ public final class ProtocolOracle {
                 "ClientboundChunkBatchFinishedPacket", "ClientboundLevelChunkWithLightPacket",
                 "ClientboundPlayerPositionPacket", "ClientboundSystemChatPacket",
                 "ClientboundSetTitleTextPacket", "ClientboundSetSubtitleTextPacket",
-                "ClientboundSetTitlesAnimationPacket")) {
+                "ClientboundSetTitlesAnimationPacket", "ClientboundOpenScreenPacket", "ClientboundContainerSetContentPacket",
+                "ClientboundContainerClosePacket")) {
             if (!seen.contains(type)) fail("coverage", new Violation("missing " + type));
         }
+        if (!javaSelectorSeen || !markedSelectorSeen) fail("avatar-coverage", new Violation("both unmarked Java and exact-marker menus must be decoded"));
         if (batchOpen) fail("chunk-batch", new Violation("batch never finished"));
         if (centerSeen && !chunkCoordinates.contains(chunkKey(centerX, centerZ)))
             fail("chunk-center", new Violation("initial spawn chunk was not successfully decoded"));
@@ -161,6 +166,7 @@ public final class ProtocolOracle {
         if (packet instanceof ClientboundLoginFinishedPacket p) {
             require(p.gameProfile().id().equals(TEST_UUID), "login UUID differs from public fixture identity");
             require(p.gameProfile().name().equals("OraclePlayer"), "login name differs from public fixture identity");
+            nativeProfile = p.gameProfile();
         } else if (packet instanceof ClientboundRegistryDataPacket p) {
             require(!configurationFinished, "registry sent after configuration finish");
             require(entries.putIfAbsent(p.registry(), p.entries()) == null, "registry sent twice");
@@ -216,7 +222,103 @@ public final class ProtocolOracle {
             checkText(p.text(), "Oracle subtitle", "gray", false);
         } else if (packet instanceof ClientboundSetTitlesAnimationPacket p) {
             require(p.getFadeIn() == 10 && p.getStay() == 60 && p.getFadeOut() == 10, "title animation differs from public fixture");
+        } else if (packet instanceof ClientboundOpenScreenPacket) {
+            int window = ((Number) selectorAccessor(packet, "getContainerId", "containerId")).intValue();
+            require(window == 5 || window == 6, "selector window differs");
+            require(selectorAccessor(packet, "getType", "type") == net.minecraft.world.inventory.MenuType.GENERIC_9x3, "selector is not three rows");
+            Component title = (Component) selectorAccessor(packet, "getTitle", "title");
+            require(title.getString().equals("请选择角色") && title.getStyle().getColor() != null &&
+                    title.getStyle().getColor().getValue() == 0x22D3EE, "selector title/brand color differs");
+        } else if (packet instanceof ClientboundContainerSetContentPacket) {
+            int window = ((Number) selectorAccessor(packet, "getContainerId", "containerId")).intValue();
+            require(((Number) selectorAccessor(packet, "getStateId", "stateId")).intValue() == 1, "selector state differs");
+            List<?> items = (List<?>) selectorAccessor(packet, "getItems", "items");
+            require(((net.minecraft.world.item.ItemStack) selectorAccessor(packet, "getCarriedItem", "carriedItem")).isEmpty(), "selector cursor is not empty");
+            if (window == 0) {
+                require(items.size() == net.minecraft.world.inventory.InventoryMenu.SHIELD_SLOT + 1, "full inventory must include crafting, armor and offhand");
+                for (Object item : items) require(((net.minecraft.world.item.ItemStack) item).isEmpty(), "player inventory prediction was not cleared");
+                return;
+            }
+            require(window == 5 || window == 6, "selector content window differs");
+            require(items.size() == 63, "selector must contain 27 menu + 36 authoritative player slots");
+            for (int slot=0; slot<items.size(); slot++) {
+                var stack = (net.minecraft.world.item.ItemStack) items.get(slot);
+                if (slot != 12 && slot != 14) { require(stack.isEmpty(), "selector unexpected occupied slot " + slot); continue; }
+                require(stack.getItem() == net.minecraft.world.item.Items.PLAYER_HEAD && stack.getCount() == 1, "selector item is not official player head");
+                require(stack.has(net.minecraft.core.component.DataComponents.PROFILE), "selector profile missing");
+                Object resolvedProfile = stack.get(net.minecraft.core.component.DataComponents.PROFILE);
+                Object gameProfile = selectorAccessor(resolvedProfile, "partialProfile", "gameProfile");
+                require((slot == 12 ? new UUID(0, 42) : TEST_UUID).equals(selectorAccessor(gameProfile, "id", "getId")),
+                        "selector role UUID differs from public fixture");
+                require((slot == 12 ? "MicrosoftName" : "OraclePlayer").equals(selectorAccessor(gameProfile, "name", "getName")),
+                        "selector role profile name differs from public fixture");
+                require(stack.has(net.minecraft.core.component.DataComponents.LORE), "selector lore missing");
+                Component name = stack.get(net.minecraft.core.component.DataComponents.CUSTOM_NAME);
+                String category = slot == 12 ? "微软角色" : "正版角色";
+                String profileName = slot == 12 ? "MicrosoftName" : "OraclePlayer";
+                require(name != null && name.getString().equals(category + " » " + profileName), "selector role label differs");
+                checkItemRoot(name, 0xFFFFFF, "name");
+                final boolean[] brand = {false};
+                name.visit((style, text) -> {
+                    if (text.equals(category)) {
+                        require(style.getColor() != null && style.getColor().getValue() == 0x22D3EE, "role category must use brand cyan, not success green");
+                        brand[0] = true;
+                    }
+                    return Optional.empty();
+                }, Style.EMPTY);
+                require(brand[0], "selector role brand fragment missing");
+                Object lore = stack.get(net.minecraft.core.component.DataComponents.LORE);
+                List<?> lines = (List<?>) selectorAccessor(lore, "lines", "lines");
+                require(lines.size() == 1 && ((Component) lines.get(0)).getString().equals("点击进入服务器"), "selector lore differs");
+                checkItemRoot((Component) lines.get(0), 0xAAAAAA, "lore");
+                var marker = Optional.ofNullable(stack.getComponentsPatch().get(stack.getPrototype(), net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA));
+                if (window == 5) require(marker == null || marker.isEmpty(), "unmarked Java selector must not carry CMD");
+                else {
+                    require(marker != null && marker.isPresent(), "opt-in avatar marker missing");
+                    checkAvatarMarker(marker.get(), slot == 12 ? 0x4B5901 : 0x4B5902);
+                }
+            }
+            if (window == 5) javaSelectorSeen = true; else markedSelectorSeen = true;
+        } else if (packet instanceof ClientboundContainerClosePacket) {
+            int window = ((Number) selectorAccessor(packet, "getContainerId", "containerId")).intValue();
+            require(window == 5 || window == 6, "selector close window differs");
         }
+    }
+
+    private static void checkItemRoot(Component text, int color, String field) {
+        require(text.getStyle().getColor() != null && text.getStyle().getColor().getValue() == color,
+                "selector " + field + " base color is not explicit");
+        var encoded = ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, text).getOrThrow();
+        require(encoded.isJsonObject() && encoded.getAsJsonObject().has("italic") &&
+                encoded.getAsJsonObject().get("italic").isJsonPrimitive() &&
+                encoded.getAsJsonObject().get("italic").getAsJsonPrimitive().isBoolean() &&
+                !encoded.getAsJsonObject().get("italic").getAsBoolean(), "selector " + field + " must explicitly disable italic");
+    }
+
+    private static void checkAvatarMarker(Object cmd, int expected) {
+        // Fixed official families: 767/768 record value(int), then four-list CustomModelData from 769 onward.
+        Object first = selectorAccessor(cmd, "value", "floats");
+        if (first instanceof Integer value) require(value == expected, "legacy avatar CMD sentinel differs");
+        else {
+            require(first instanceof List<?>, "unknown official CMD shape");
+            List<?> floats = (List<?>) first;
+            require(floats.size() == 1 && floats.get(0) instanceof Float value && Float.isFinite(value) &&
+                    Float.compare(value, (float) expected) == 0, "avatar CMD float must be exactly one private finite sentinel");
+            for (String field : List.of("flags", "strings", "colors")) {
+                Object values = selectorAccessor(cmd, field, field);
+                require(values instanceof List<?> && ((List<?>) values).isEmpty(), "avatar CMD auxiliary list must be empty");
+            }
+        }
+    }
+
+    /** Fixed official getter/record families only; this does not parse or fabricate any packet bytes. */
+    private static Object selectorAccessor(Object value, String getter, String record) {
+        for (String name : List.of(getter, record)) {
+            try { return value.getClass().getMethod(name).invoke(value); }
+            catch (NoSuchMethodException absent) { /* Next pinned official accessor family. */ }
+            catch (ReflectiveOperationException failure) { throw new Violation("Official selector accessor failed: " + name); }
+        }
+        throw new Violation("Official selector accessor missing: " + getter + "/" + record);
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})
@@ -251,6 +353,8 @@ public final class ProtocolOracle {
             validateTagIds(registry, tags.getOrDefault(entry.getKey(), NetworkPayload.EMPTY));
         }
         access = new RegistryAccess.ImmutableRegistryAccess(Stream.concat(statics.registries(), loaded.registries())).freeze();
+        // 26.1+ holder defaults are baked from the official registered initializers only after registry/tag loading.
+        BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(access).forEach(net.minecraft.core.component.DataComponentInitializers.PendingComponents::apply);
         play = GameProtocols.CLIENTBOUND_TEMPLATE.bind(RegistryFriendlyByteBuf.decorator(access));
         dimension = access.lookupOrThrow(Registries.DIMENSION_TYPE).getValue(OVERWORLD);
         require(dimension != null, "network dimension registry has no overworld");
@@ -362,6 +466,7 @@ public final class ProtocolOracle {
     }
 
     private void negativeControls() {
+        nativeItemPositiveControl();
         var holder = access.lookupOrThrow(Registries.DIMENSION_TYPE).get(OVERWORLD).orElseThrow();
         var spawn = new CommonPlayerSpawnInfo(holder, Level.OVERWORLD, 0L, GameType.ADVENTURE,
                 Optional.empty(), false, false, Optional.empty(), 0, 63);
@@ -400,6 +505,29 @@ public final class ProtocolOracle {
             reject("historical-clickEvent-value-semantic-loss", () -> checkChat(decoded));
         } finally { body.release(); }
         log("PASS positive-controls vanilla-generated join/chat and historical negative mutations");
+    }
+
+    private void nativeItemPositiveControl() {
+        // Real defaults are required: an empty stand-in map must not make the oracle appear healthy.
+        var head = new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.PLAYER_HEAD);
+        require(Integer.valueOf(64).equals(head.get(net.minecraft.core.component.DataComponents.MAX_STACK_SIZE)),
+                "native player-head default components were not initialized");
+        require(nativeProfile != null, "native profile control requires the independently validated login profile");
+        head.set(net.minecraft.core.component.DataComponents.PROFILE,
+                net.minecraft.world.item.component.ResolvableProfile.createResolved(nativeProfile));
+        head.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, Component.literal("Native profile control"));
+        RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), access);
+        try {
+            net.minecraft.world.item.ItemStack.OPTIONAL_STREAM_CODEC.encode(buffer, head);
+            var decoded = net.minecraft.world.item.ItemStack.OPTIONAL_STREAM_CODEC.decode(buffer);
+            require(!buffer.isReadable() && decoded.getItem() == net.minecraft.world.item.Items.PLAYER_HEAD && decoded.getCount() == 1,
+                    "native player-head stream codec control failed");
+            Object profile = Objects.requireNonNull(decoded.get(net.minecraft.core.component.DataComponents.PROFILE));
+            Object gameProfile = selectorAccessor(profile, "partialProfile", "gameProfile");
+            require(TEST_UUID.equals(selectorAccessor(gameProfile, "id", "getId")) &&
+                    "OraclePlayer".equals(selectorAccessor(gameProfile, "name", "getName")), "native profile control lost UUID/name");
+            log("PASS native-player-head-profile-control defaults=VANILLA identity=UUID_AND_NAME codec=ROUND_TRIP");
+        } finally { buffer.release(); }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

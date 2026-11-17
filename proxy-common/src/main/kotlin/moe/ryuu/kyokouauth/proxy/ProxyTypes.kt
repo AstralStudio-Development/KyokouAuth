@@ -29,6 +29,8 @@ interface Player : InboundConnection, CommandSource {
     val protocolVersion: Int
     override val locale: String? get() = effectiveLocale.toString()
     fun createConnectionRequest(target: RegisteredServer): ConnectionRequestBuilder
+    fun transferRole(host: String, port: Int, cookie: ByteArray?): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(UnsupportedOperationException("Role transfer is unavailable"))
 }
 
 /** Instances must be stable for the registration lifetime, not re-created for each event. */
@@ -56,7 +58,9 @@ data class GameProfile(val id: UUID, val name: String, val properties: List<Prop
     fun withProperties(properties: List<Property>) = copy(properties = properties)
 }
 
-class PreLoginEvent(val connection: InboundConnection, val username: String, val uniqueId: UUID?) {
+class PreLoginEvent(val connection: InboundConnection, val username: String, val uniqueId: UUID?,
+                    val bedrock: BedrockLogin = BedrockLogin.Java,
+                    val roleCookie: ByteArray? = null) {
     var result = PreLoginComponentResult.allowed()
     data class PreLoginComponentResult(val isAllowed: Boolean, val onlineMode: Boolean?, val reason: RichText.Parsed?) {
         companion object {
@@ -68,7 +72,8 @@ class PreLoginEvent(val connection: InboundConnection, val username: String, val
     }
 }
 
-class GameProfileRequestEvent(val connection: InboundConnection, var gameProfile: GameProfile)
+class GameProfileRequestEvent(val connection: InboundConnection, var gameProfile: GameProfile,
+                              val bedrock: BedrockLogin = BedrockLogin.Java)
 
 class ResultedEvent {
     data class ComponentResult(val isAllowed: Boolean, val reason: RichText.Parsed?) {
@@ -79,7 +84,7 @@ class ResultedEvent {
     }
 }
 
-class LoginEvent(val player: Player) { var result = ResultedEvent.ComponentResult.allowed() }
+class LoginEvent(val player: Player, val bedrock: BedrockLogin = BedrockLogin.Java) { var result = ResultedEvent.ComponentResult.allowed() }
 
 class PlayerChooseInitialServerEvent(val player: Player) {
     var initialServer: RegisteredServer? = null

@@ -11,6 +11,9 @@ dependencies {
 
     // Proxy types stay unrelocated. Limbo's protocol library and serializers are separately isolated.
     compileOnly("com.velocitypowered:velocity-api:4.3.1")
+    // Velocity owns the channel. Only its provided Netty interfaces cross this native adapter.
+    compileOnly("io.netty:netty-transport:4.2.1.Final")
+    testImplementation("io.netty:netty-transport:4.2.1.Final")
 
     // The API is compile-only for the plugin, but the tests compile against the very types they
     // assert on (Adventure components), so it has to be visible there too.

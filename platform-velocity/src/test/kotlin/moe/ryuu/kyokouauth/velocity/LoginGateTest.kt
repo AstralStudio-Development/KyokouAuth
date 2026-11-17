@@ -20,6 +20,10 @@ import com.velocitypowered.api.proxy.Player
 import com.velocitypowered.api.proxy.ProxyServer
 import com.velocitypowered.api.proxy.config.ProxyConfig as VelocityProxyConfig
 import moe.ryuu.kyokouauth.proxy.ProxyConfig
+import moe.ryuu.kyokouauth.proxy.BedrockFailure
+import moe.ryuu.kyokouauth.proxy.BedrockLogin
+import moe.ryuu.kyokouauth.proxy.BedrockProof
+import com.velocitypowered.api.proxy.InboundConnection
 import com.velocitypowered.api.proxy.server.RegisteredServer
 import com.velocitypowered.api.proxy.server.ServerInfo
 import com.velocitypowered.api.util.GameProfile
@@ -95,6 +99,32 @@ class LoginGateTest {
     private val gate = LoginGate(
         proxy, config, MessageCatalogue("en_US", File("unused-test-messages")), services, NOPLogger.NOP_LOGGER, { now },
     ).also { it.activate() }
+
+    @Test
+    fun `Java identity is final before normal skin listeners and their textures survive last validation`() {
+        val client = client()
+        val pre = PreLoginEvent(client.player, name.value, null)
+        gate.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+        val original = GameProfile(UUID.randomUUID(), name.value, listOf(
+            GameProfile.Property("textures", "old-texture", "old-signature"),
+            GameProfile.Property("other-plugin", "keep", "")))
+        val event = GameProfileRequestEvent(client.player, original, false)
+        gate.onPrepareJavaProfile(event)
+        assertEquals(uuid, event.gameProfile.id, "NORMAL skin storage must not see the temporary offline UUID")
+        assertEquals(name.value, event.gameProfile.name)
+        val textures = event.gameProfile.properties.filterNot { it.name == "textures" } +
+            GameProfile.Property("textures", "normal-listener-texture", "normal-listener-signature")
+        event.gameProfile = event.gameProfile.withProperties(textures)
+        gate.onGameProfile(event)
+        assertEquals(uuid, event.gameProfile.id)
+        assertEquals(listOf("normal-listener-texture"), event.gameProfile.properties.filter { it.name == "textures" }.map { it.value })
+        assertEquals(1, event.gameProfile.properties.count { it.name == LoginGate.CONNECTION_PROPERTY })
+        assertEquals("keep", event.gameProfile.properties.single { it.name == "other-plugin" }.value)
+        val login = LoginEvent(client.player, "")
+        gate.onLogin(login)
+        assertTrue(login.result.isAllowed)
+    }
 
     @Test
     fun `native command execution is denied while held and restored after authentication`() {
@@ -679,6 +709,125 @@ class LoginGateTest {
         now += 5_000
         login(client(online = false), allowed = false)
     }
+
+    @Test
+    fun `native Bedrock prelogin profile and login use fresh proofs of the same channel and retain textures`() {
+        val client = client(playerName = ".Bedrock")
+        val source = Any()
+        val seen = mutableListOf<InboundConnection>()
+        val bedrock = bedrockGate { native ->
+            seen += native
+            BedrockLogin.Verified(bedrockProof(source))
+        }
+        val pre = PreLoginEvent(client.player, ".Bedrock", uuid)
+        bedrock.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+        assertTrue(pre.result.isForceOfflineMode)
+        val textures = GameProfile.Property("textures", "bedrock-texture", "bedrock-signature")
+        val profile = GameProfileRequestEvent(client.player, GameProfile(uuid, ".Bedrock", listOf(textures)), false)
+        bedrock.onGameProfile(profile)
+        assertEquals(uuid, profile.gameProfile.id)
+        assertEquals(".Bedrock", profile.gameProfile.name)
+        assertEquals(listOf(textures), profile.gameProfile.properties.filter { it.name == "textures" })
+        val login = LoginEvent(client.player, "")
+        bedrock.onLogin(login)
+        assertTrue(login.result.isAllowed)
+        assertTrue(bedrock.common.isAuthenticated(bedrock.ports.player(client.player)))
+        assertEquals(listOf<InboundConnection>(client.player, client.player, client.player), seen)
+        assertEquals(0, services.beginCalls)
+        assertEquals(0, services.bindCalls)
+        assertEquals(0, services.premiumCalls)
+        assertEquals(0, services.grants)
+        assertTrue(services.work.isEmpty())
+        bedrock.deactivate()
+    }
+
+    @Test
+    fun `native Bedrock final profile UUID and name cannot replace the proven identity`() {
+        for ((id, displayName) in listOf(UUID(0L, 2L) to ".Bedrock", uuid to ".Impostor")) {
+            val client = client(playerName = ".Bedrock")
+            val source = Any()
+            val bedrock = bedrockGate { BedrockLogin.Verified(bedrockProof(source)) }
+            val pre = PreLoginEvent(client.player, ".Bedrock", uuid)
+            bedrock.onPreLogin(pre)
+            assertTrue(pre.result.isAllowed)
+            val profile = GameProfileRequestEvent(client.player, GameProfile(id, displayName, emptyList()), false)
+            bedrock.onGameProfile(profile)
+            val login = LoginEvent(client.player, "")
+            bedrock.onLogin(login)
+            assertFalse(login.result.isAllowed)
+            assertFalse(bedrock.common.isAuthenticated(bedrock.ports.player(client.player)))
+            assertEquals(0, client.requests)
+            bedrock.deactivate()
+        }
+    }
+
+    @Test
+    fun `same XUID on another channel cannot reuse the native prelogin proof`() {
+        val client = client(playerName = ".Bedrock")
+        var source = Any()
+        val bedrock = bedrockGate { BedrockLogin.Verified(bedrockProof(source)) }
+        val pre = PreLoginEvent(client.player, ".Bedrock", uuid)
+        bedrock.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+        source = Any()
+        bedrock.onGameProfile(GameProfileRequestEvent(client.player, GameProfile(uuid, ".Bedrock", emptyList()), false))
+        val login = LoginEvent(client.player, "")
+        bedrock.onLogin(login)
+        assertFalse(login.result.isAllowed)
+        assertFalse(bedrock.common.isAuthenticated(bedrock.ports.player(client.player)))
+        bedrock.deactivate()
+    }
+
+    @Test
+    fun `fresh native login probe rejects a provider that became unavailable after profile`() {
+        val client = client(playerName = ".Bedrock")
+        val source = Any()
+        var available = true
+        var probes = 0
+        val bedrock = bedrockGate {
+            probes++
+            if (available) BedrockLogin.Verified(bedrockProof(source)) else BedrockLogin.Rejected(BedrockFailure.STALE)
+        }
+        val pre = PreLoginEvent(client.player, ".Bedrock", uuid)
+        bedrock.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+        bedrock.onGameProfile(GameProfileRequestEvent(client.player, GameProfile(uuid, ".Bedrock", emptyList()), false))
+        available = false
+        val login = LoginEvent(client.player, "")
+        bedrock.onLogin(login)
+        assertFalse(login.result.isAllowed)
+        assertEquals(3, probes)
+        bedrock.deactivate()
+    }
+
+    @Test
+    fun `native Bedrock never overrides another plugin prelogin or login denial`() {
+        val client = client(playerName = ".Bedrock")
+        val source = Any()
+        val bedrock = bedrockGate { BedrockLogin.Verified(bedrockProof(source)) }
+        val pre = PreLoginEvent(client.player, ".Bedrock", uuid)
+        val preDenial = PreLoginEvent.PreLoginComponentResult.denied(Component.text("Other plugin prelogin denial"))
+        pre.result = preDenial
+        bedrock.onPreLogin(pre)
+        assertSame(preDenial, pre.result)
+        val login = LoginEvent(client.player, "")
+        val loginDenial = com.velocitypowered.api.event.ResultedEvent.ComponentResult.denied(Component.text("Other plugin login denial"))
+        login.result = loginDenial
+        bedrock.onLogin(login)
+        assertSame(loginDenial, login.result)
+        bedrock.deactivate()
+    }
+
+    private fun bedrockGate(probe: (InboundConnection) -> BedrockLogin) = LoginGate(
+        proxy, ProxyConfig(mapOf("bedrock.enabled" to "true"), File("unused-bedrock-config")),
+        MessageCatalogue("en_US", File("unused-test-messages")), services, NOPLogger.NOP_LOGGER, { now },
+        bedrockProbe = probe,
+    ).also { it.activate() }
+
+    private fun bedrockProof(source: Any) = BedrockProof.create(
+        Xuid(1L), uuid, ".Bedrock", "Bedrock", ".", source, { true },
+    )
 
     @Test
     fun `forwarded profile UUID and connection marker belong to the exact prelogin`() {

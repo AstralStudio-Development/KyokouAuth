@@ -33,10 +33,33 @@ limbo:
   unsupported-version: "<#FACC15>验证界面支持 Minecraft 1.21 至 26.3 正式版（协议 767–777）。"
   title: "<#22D3EE>请完成微软验证"
   subtitle: "<#D4D4D8>点击聊天栏中的链接"
-  command-blocked: "<#FACC15>验证完成前不能离开</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>点击聊天栏中的链接完成验证"
+  command-blocked: "<#FACC15>验证与角色选择完成前不能离开</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>请先完成当前验证或选择界面"
+
+bedrock:
+  disabled: "<#FACC15>此代理尚未启用基岩身份接入，请联系管理员。"
+  unavailable: "<#F87171>Floodgate 身份服务不可用，当前连接不能进入后端。"
+  provider-denied: "<#F87171>Geyser/Floodgate 未通过当前连接的验证。"
+  linked: "<#FACC15>此代理尚未启用关联账号的角色选择，请联系管理员。"
+  invalid-identity: "<#F87171>基岩身份资料无效或与当前连接不一致。"
+  unsafe-name: "<#FACC15>基岩名字必须保留与 Java 隔离的 Floodgate 前缀及有效格式，请联系管理员。"
+  stale: "<#FACC15>当前基岩连接的身份凭证已失效，请重新连接。"
+
+role-selection:
+  title: "<#22D3EE>请选择角色"
+  microsoft: "<#22D3EE>微软角色</#22D3EE> <#8B8B94>»</#8B8B94> <#FFFFFF><name>"
+  premium: "<#22D3EE>正版角色</#22D3EE> <#8B8B94>»</#8B8B94> <#FFFFFF><name>"
+  enter: "<#D4D4D8>点击进入服务器"
+  avatar-loading: "<#22D3EE>正在加载角色头像…"
+  avatar-unavailable: "<#8B8B94>头像暂不可用"
+  independent: "<#8B8B94>两套角色资料独立，不迁移或合并"
+  first-entry: "<#FACC15>首次进入"
+  existing: "<#D4D4D8>已有角色"
+  retry: "<#FACC15>角色暂时不可用</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接后再试"
+  expired: "<#FACC15>选择超时</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接"
+  reconnect: "<#FACC15>需要重新连接</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>继续登录"
 
 verification:
-  command-blocked: "<#FACC15>请先完成验证，再使用该命令</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>点击聊天栏中的链接"
+  command-blocked: "<#FACC15>请先完成验证与角色选择，再使用该命令"
   starting: "<#22D3EE>正在连接微软并申请验证码</#22D3EE><newline><#D4D4D8>网络波动时会自动重试，请稍候，不必反复重连"
   confirming: "<#22D3EE>已收到微软授权，正在确认 Xbox 身份…"
   start-unavailable: "<#FACC15>暂时无法连接微软登录服务</#FACC15><newline><#D4D4D8>已进行有限次数重试，请稍后再连接"

@@ -1,5 +1,8 @@
 package moe.ryuu.kyokouauth.velocity
 
+import com.velocitypowered.api.event.PostOrder
+import com.velocitypowered.api.event.Subscribe
+import com.velocitypowered.api.plugin.PluginManager
 import com.velocitypowered.api.event.connection.LoginEvent
 import com.velocitypowered.api.event.connection.PreLoginEvent
 import com.velocitypowered.api.event.player.KickedFromServerEvent
@@ -71,6 +74,43 @@ class KyokouAuthVelocityTest {
     }
 
     @Test
+    fun `enabled Bedrock without a native Floodgate provider fails before storage and keeps the plugin guard closed`() {
+        Files.writeString(directory.resolve("config.yml"), "bedrock:\n  enabled: true\n")
+        var lookups = 0
+        val plugins = stub<PluginManager> { method ->
+            when (method) {
+                "getPlugin" -> { lookups++; Optional.empty<Any>() }
+                else -> error(method)
+            }
+        }
+        val native = stub<ProxyServer> { method ->
+            when (method) {
+                "getPluginManager" -> plugins
+                else -> error("Provider validation must precede storage, limbo and proxy configuration: $method")
+            }
+        }
+        val plugin = KyokouAuthVelocity(native, NOPLogger.NOP_LOGGER, directory)
+        plugin.onProxyInitialize(ProxyInitializeEvent())
+        assertTrue(lookups > 0)
+        assertFalse(Files.exists(directory.resolve("kyokouauth")))
+        val pre = PreLoginEvent(player, ".Bedrock", UUID(0L, 1L))
+        plugin.denyUnavailablePreLogin(pre)
+        assertFalse(pre.result.isAllowed)
+        val login = LoginEvent(player, "")
+        plugin.denyUnavailableLogin(login)
+        assertFalse(login.result.isAllowed)
+    }
+
+    @Test
+    fun `initialization runs after the optional Floodgate initialization listener`() {
+        val listener = KyokouAuthVelocity::class.java.getMethod("onProxyInitialize", ProxyInitializeEvent::class.java)
+        kotlin.test.assertEquals(PostOrder.LAST, listener.getAnnotation(Subscribe::class.java).order)
+        val metadata = requireNotNull(javaClass.getResourceAsStream("/velocity-plugin.json")).bufferedReader().use { it.readText() }
+        assertTrue(metadata.contains("\"id\": \"floodgate\""))
+        assertTrue(metadata.contains("\"optional\": true"))
+    }
+
+    @Test
     fun `initialization is fail closed even before the initialization event runs`() {
         val plugin = KyokouAuthVelocity(proxy, NOPLogger.NOP_LOGGER, directory)
         val pre = PreLoginEvent(player, "Steve", UUID.randomUUID())
@@ -93,6 +133,18 @@ class KyokouAuthVelocityTest {
         assertFailsWith<NoSuchMethodException> { plugin.forwardingSecret(Any()) }
         assertFailsWith<IllegalStateException> { plugin.forwardingSecret(Configuration(Mode.LEGACY, byteArrayOf(1))) }
         assertFailsWith<IllegalStateException> { plugin.forwardingSecret(Configuration(Mode.MODERN, byteArrayOf())) }
+    }
+
+    @Test
+    fun `role resumption refuses a target proxy that disables transferred logins`() {
+        val plugin = KyokouAuthVelocity(proxy, NOPLogger.NOP_LOGGER, directory)
+        assertFailsWith<IllegalStateException> { plugin.requireRoleTransfers(TransferConfiguration(false)) }
+        assertFailsWith<NoSuchMethodException> { plugin.requireRoleTransfers(Any()) }
+        plugin.requireRoleTransfers(TransferConfiguration(true))
+    }
+
+    class TransferConfiguration(private val accepted: Boolean) {
+        fun isAcceptTransfers(): Boolean = accepted
     }
 
     enum class Mode { MODERN, LEGACY }

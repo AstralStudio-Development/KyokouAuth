@@ -35,7 +35,7 @@ internal inline fun <reified T> nativeStub(crossinline call: (String, Array<out 
         }
     } as T
 
-internal class PendingFixture(val name: String = "OracleLocal", val protocol: Int = 777) {
+internal class PendingFixture(var name: String = "OracleLocal", val protocol: Int = 777) {
     var uuid: UUID? = BungeeProfileBridge.offlineId(name)
     var online = false
     var connected = true
@@ -45,6 +45,11 @@ internal class PendingFixture(val name: String = "OracleLocal", val protocol: In
     val messages = mutableListOf<BaseComponent>()
     val connects = mutableListOf<ServerInfo>()
     val setterOrder = mutableListOf<String>()
+    var cookie = java.util.concurrent.CompletableFuture.completedFuture<ByteArray?>(null)
+    var cookieRequests = 0
+    var beforeCookie: (() -> Unit)? = null
+    val storedCookies = mutableListOf<Pair<String, ByteArray>>()
+    val transfers = mutableListOf<Pair<String, Int>>()
     var profile = GameProfile(checkNotNull(uuid), name, listOf(GameProfile.Property("textures", "preserved", "signed")))
     val pending = nativeStub<PendingConnection> { method, args -> when (method) {
         "getName" -> name
@@ -55,6 +60,7 @@ internal class PendingFixture(val name: String = "OracleLocal", val protocol: In
         "isOnlineMode" -> online
         "setOnlineMode" -> { online = args[0] as Boolean; setterOrder += "online:$online"; null }
         "isConnected" -> connected
+        "retrieveCookie" -> { check(args[0] == "kyokouauth:role_transfer"); cookieRequests++; beforeCookie?.invoke(); cookie }
         "disconnect" -> { connected = false; disconnects++; null }
         else -> error("Unexpected PendingConnection.$method")
     } }
@@ -73,6 +79,8 @@ internal class PendingFixture(val name: String = "OracleLocal", val protocol: In
             null
         }
         "disconnect" -> { connected = false; disconnects++; null }
+        "storeCookie" -> { storedCookies += (args[0] as String) to (args[1] as ByteArray); null }
+        "transfer" -> { transfers += (args[0] as String) to (args[1] as Int); null }
         "connect" -> {
             connects += args[0] as ServerInfo
             @Suppress("UNCHECKED_CAST")
@@ -164,6 +172,8 @@ internal class TestServices : LoginGate.Services {
     var decision: AuthCoordinator.Decision = AuthCoordinator.Decision.Verify(stableUuid,
         AuthCoordinator.Reason.SESSION_EXPIRED, false, null)
     var premiumBindings = 0
+    var roles: moe.ryuu.kyokouauth.proxy.RoleOptions? = null
+    var roleCalls = 0
     var authorize = false
     val granted = mutableListOf<UUID>()
     val queue = ArrayDeque<() -> Unit>()
@@ -178,6 +188,10 @@ internal class TestServices : LoginGate.Services {
     override fun bindMicrosoft(name: GameName, xuid: Xuid, gamertag: String): AuthCoordinator.ClaimOutcome =
         AuthCoordinator.ClaimOutcome.Bound(moe.ryuu.kyokouauth.core.storage.BoundIdentity.of(
             moe.ryuu.kyokouauth.core.identity.Identity.Microsoft(name, xuid, gamertag), 1L))
+    override fun roleOptions(xuid: Xuid, gamertag: String, fallbackBedrockName: String?): moe.ryuu.kyokouauth.proxy.RoleOptions {
+        roleCalls++
+        return checkNotNull(roles) { "Role fixture not configured" }
+    }
     override fun grantSession(uuid: UUID, address: String) { granted += uuid }
     override fun submit(task: () -> Unit) { queue += task }
     override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledFuture<*> = TestTask(task).also { tasks += it }

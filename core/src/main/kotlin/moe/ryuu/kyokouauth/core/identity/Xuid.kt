@@ -3,7 +3,7 @@ package moe.ryuu.kyokouauth.core.identity
 /**
  * An Xbox account identifier. 64-bit, assigned by Microsoft, stable across renames.
  *
- * This is the only credential KyokouAuth ever extracts from the Microsoft device code flow.
+ * Obtained from the Microsoft device-code exchange or a current connection-verified Floodgate proof.
  * Tokens are discarded immediately after the XUID is read; nothing token-shaped is persisted.
  */
 @JvmInline

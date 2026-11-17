@@ -2,6 +2,7 @@ package moe.ryuu.kyokouauth.velocity
 
 import com.mojang.brigadier.tree.CommandNode
 import com.velocitypowered.api.event.PostOrder
+import com.velocitypowered.api.event.EventTask
 import com.velocitypowered.api.event.ResultedEvent
 import com.velocitypowered.api.event.Subscribe
 import com.velocitypowered.api.event.connection.DisconnectEvent
@@ -14,7 +15,9 @@ import com.velocitypowered.api.event.player.GameProfileRequestEvent
 import com.velocitypowered.api.event.player.KickedFromServerEvent
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent
 import com.velocitypowered.api.event.player.ServerPreConnectEvent
+import com.velocitypowered.api.proxy.InboundConnection
 import com.velocitypowered.api.proxy.Player
+import moe.ryuu.kyokouauth.proxy.BedrockLogin
 import com.velocitypowered.api.proxy.ProxyServer
 import com.velocitypowered.api.util.GameProfile
 import moe.ryuu.kyokouauth.core.text.MessageCatalogue
@@ -25,6 +28,7 @@ import moe.ryuu.kyokouauth.limbo.LimboListener
 import moe.ryuu.kyokouauth.limbo.LimboPlayer
 import org.slf4j.Logger
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import moe.ryuu.kyokouauth.proxy.LoginGate as SharedGate
 import moe.ryuu.kyokouauth.proxy.PreLoginEvent as PortPreLogin
 import moe.ryuu.kyokouauth.proxy.LoginEvent as PortLogin
@@ -34,32 +38,74 @@ import moe.ryuu.kyokouauth.proxy.GameProfile as PortGameProfile
 /** Only native event/result conversion lives here; both proxies execute the same connection gate. */
 class LoginGate internal constructor(
     private val server: ProxyServer,
-    config: ProxyConfig,
+    private val config: ProxyConfig,
     private val messages: MessageCatalogue,
-    services: SharedGate.Services,
+    private val services: SharedGate.Services,
     logger: Logger,
     clock: () -> Long = System::currentTimeMillis,
+    private val bedrockProbe: (InboundConnection) -> BedrockLogin = { BedrockLogin.Java },
+    private val roleTransfer: VelocityRoleTransfer? = if (config.rolesEnabled) VelocityRoleTransfer(server) else null,
+    private val roleEvents: VelocityRoleEventTasks? = if (config.rolesEnabled)
+        VelocityRoleEventTasks(config.pendingLoginLimit, services::submit) else null,
 ) : LimboListener {
     internal interface Services : SharedGate.Services
-    internal val ports = VelocityPorts(server)
+    internal val ports = VelocityPorts(server, roleTransfer)
     internal val common = SharedGate(ports, config, messages, services, logger.toProxyLog(), clock)
 
-    constructor(server: ProxyServer, config: ProxyConfig, messages: MessageCatalogue, auth: AuthService, logger: Logger) :
-        this(server, config, messages, SharedGate.liveServices(auth), logger)
+    internal constructor(server: ProxyServer, config: ProxyConfig, messages: MessageCatalogue, auth: AuthService,
+                         logger: Logger, bedrockProbe: (InboundConnection) -> BedrockLogin) :
+        this(server, config, messages, SharedGate.liveServices(auth), logger, bedrockProbe = bedrockProbe)
 
     internal fun activate() = common.activate()
-    internal fun deactivate() = common.deactivate()
+    internal fun deactivate() {
+        try { common.deactivate() }
+        finally { try { roleEvents?.close() } finally { roleTransfer?.close() } }
+    }
     fun verifyingCount() = common.verifyingCount()
     fun restartVerification(uuid: UUID) = common.restartVerification(uuid)
     fun restartVerification(player: Player) = common.restartVerification(ports.player(player))
 
     @Subscribe(order = PostOrder.LAST)
-    fun onPreLogin(event: PreLoginEvent) {
-        val allowed = event.result.isAllowed
-        val port = PortPreLogin(ports.inbound(event.connection), event.username, event.uniqueId)
-        if (!allowed) port.result = PortPreLogin.PreLoginComponentResult.denied(messages.parsed("login.internal-error"))
+    fun onPreLogin(event: PreLoginEvent): EventTask? {
+        if (!config.rolesEnabled || !event.result.isAllowed) {
+            applyPreLogin(event, computePreLogin(event, null, bedrockProbe(event.connection)))
+            return null
+        }
+        return checkNotNull(roleEvents).task(event.connection.sessionId,
+            active = { event.connection.isActive },
+            watchClosed = { action -> checkNotNull(roleTransfer).watchClosed(event.connection, action) },
+            source = {
+                val source = bedrockProbe(event.connection)
+                val cookie = if (source === BedrockLogin.Java) checkNotNull(roleTransfer).retrieve(event.connection)
+                    else CompletableFuture.completedFuture<ByteArray?>(null)
+                val input = cookie.thenApply { RolePreLoginInput(source, it) }
+                // Cancelling a derived future alone would leave the native cookie handler pending.
+                input.whenComplete { _, failure -> if (failure != null) cookie.cancel(false) }
+                input
+            },
+            compute = { input -> computePreLogin(event, input.cookie, input.source) },
+            apply = { result -> applyPreLogin(event, result) },
+            refuse = {
+                val reason = messages.parsed("login.internal-error")
+                try { if (event.result.isAllowed) event.result = PreLoginEvent.PreLoginComponentResult.denied(reason.toAdventure()) }
+                finally { ports.inbound(event.connection).disconnect(reason) }
+            },
+        )
+    }
+
+    private data class RolePreLoginInput(val source: BedrockLogin, val cookie: ByteArray?)
+
+    /** Common may perform blocking IO; role-enabled callers execute this only through auth submit. */
+    private fun computePreLogin(event: PreLoginEvent, cookie: ByteArray?, source: BedrockLogin): PortPreLogin {
+        val port = PortPreLogin(ports.inbound(event.connection), event.username, event.uniqueId, source, cookie)
+        if (!event.result.isAllowed) port.result = PortPreLogin.PreLoginComponentResult.denied(messages.parsed("login.internal-error"))
         common.onPreLogin(port)
-        if (!allowed) return
+        return port
+    }
+
+    /** Short native result application only; an existing native refusal can never be reopened. */
+    private fun applyPreLogin(event: PreLoginEvent, port: PortPreLogin) {
+        if (!event.result.isAllowed) return
         event.result = when {
             !port.result.isAllowed -> PreLoginEvent.PreLoginComponentResult.denied(requireNotNull(port.result.reason).toAdventure())
             port.result.onlineMode == true -> PreLoginEvent.PreLoginComponentResult.forceOnlineMode()
@@ -68,24 +114,69 @@ class LoginGate internal constructor(
         }
     }
 
-    @Subscribe(order = PostOrder.LAST)
-    fun onGameProfile(event: GameProfileRequestEvent) {
-        val profile = event.gameProfile
-        val port = PortProfile(ports.inbound(event.connection), PortGameProfile(profile.id, profile.name,
-            profile.properties.map { PortGameProfile.Property(it.name, it.value, it.signature ?: "") }))
-        common.onGameProfile(port)
-        event.gameProfile = profile.withId(port.gameProfile.id).withProperties(port.gameProfile.properties.map {
-            GameProfile.Property(it.name, it.value, it.signature)
-        })
-    }
+    /** After native Floodgate EARLY, but before NORMAL skin storage resolves the selected UUID. */
+        @Subscribe(priority = 2)
+        fun onPrepareJavaProfile(event: GameProfileRequestEvent) {
+            if (config.rolesEnabled) applyProfile(event, preparing = true)
+            else if (bedrockProbe(event.connection) === BedrockLogin.Java) onGameProfile(event)
+        }
 
     @Subscribe(order = PostOrder.LAST)
-    fun onLogin(event: LoginEvent) {
-        val allowed = event.result.isAllowed
-        val port = PortLogin(ports.player(event.player))
-        if (!allowed) port.result = moe.ryuu.kyokouauth.proxy.ResultedEvent.ComponentResult.denied(messages.parsed("login.internal-error"))
+        fun onGameProfile(event: GameProfileRequestEvent) = applyProfile(event, preparing = false)
+
+        private fun applyProfile(event: GameProfileRequestEvent, preparing: Boolean) {
+            val profile = event.gameProfile
+            val original = PortGameProfile(profile.id, profile.name,
+                profile.properties.map { PortGameProfile.Property(it.name, it.value, it.signature ?: "") })
+            val connection = ports.inbound(event.connection)
+            val port = PortProfile(connection, original, bedrockProbe(event.connection))
+            if (preparing) common.onPrepareGameProfile(port) else common.onGameProfile(port)
+            if (port.gameProfile === original) return
+            if (common.requiresRoleProfile(connection) &&
+                (profile.id != port.gameProfile.id || profile.name != port.gameProfile.name)) {
+                try { VelocityRoleLoginKeys.verify(event.connection, port.gameProfile.id) }
+                catch (_: Exception) {
+                    connection.disconnect(messages.parsed("login.internal-error"))
+                    return
+                }
+            }
+            event.gameProfile = GameProfile(port.gameProfile.id, port.gameProfile.name, port.gameProfile.properties.map {
+                GameProfile.Property(it.name, it.value, it.signature)
+            })
+        }
+
+    @Subscribe(order = PostOrder.LAST)
+    fun onLogin(event: LoginEvent): EventTask? {
+        val player = ports.player(event.player)
+        if (!config.rolesEnabled || !event.result.isAllowed || !common.requiresRoleProfile(player)) {
+            applyLogin(event, computeLogin(event, bedrockProbe(event.player)))
+            return null
+        }
+        // Final role admission rechecks current roleOptions/relations over bounded auth IO.
+        return checkNotNull(roleEvents).task(event.player.sessionId,
+            active = { event.player.isActive },
+            watchClosed = { action -> checkNotNull(roleTransfer).watchClosed(event.player, action) },
+            source = { CompletableFuture.completedFuture(bedrockProbe(event.player)) },
+            compute = { source -> computeLogin(event, source) },
+            apply = { result -> applyLogin(event, result) },
+            refuse = {
+                val reason = messages.parsed("login.internal-error")
+                try { if (event.result.isAllowed) event.result = ResultedEvent.ComponentResult.denied(reason.toAdventure()) }
+                finally { player.disconnect(reason) }
+            },
+        )
+    }
+
+    private fun computeLogin(event: LoginEvent, source: BedrockLogin): PortLogin {
+        val port = PortLogin(ports.player(event.player), source)
+        if (!event.result.isAllowed) port.result = moe.ryuu.kyokouauth.proxy.ResultedEvent.ComponentResult.denied(messages.parsed("login.internal-error"))
         common.onLogin(port)
-        if (allowed && !port.result.isAllowed) event.result = ResultedEvent.ComponentResult.denied(requireNotNull(port.result.reason).toAdventure())
+        return port
+    }
+
+    private fun applyLogin(event: LoginEvent, port: PortLogin) {
+        if (event.result.isAllowed && !port.result.isAllowed)
+            event.result = ResultedEvent.ComponentResult.denied(requireNotNull(port.result.reason).toAdventure())
     }
 
     @Subscribe(order = PostOrder.LAST)
@@ -161,12 +252,15 @@ class LoginGate internal constructor(
 
     @Subscribe
     fun onDisconnect(event: DisconnectEvent) {
+        roleEvents?.cancel(event.player.sessionId)
         try { common.onDisconnect(moe.ryuu.kyokouauth.proxy.DisconnectEvent(ports.player(event.player))) }
-        finally { ports.forget(event.player) }
+        finally { roleTransfer?.cancel(event.player); ports.forget(event.player) }
     }
 
     override fun onJoin(player: LimboPlayer) = common.onJoin(player)
     override fun onLeave(player: LimboPlayer) = common.onLeave(player)
+    override fun onRoleSelect(player: LimboPlayer, generation: UUID, optionId: String) =
+        common.onRoleSelect(player, generation, optionId)
 
     companion object {
         const val LIMBO_SERVER_NAME = SharedGate.LIMBO_SERVER_NAME

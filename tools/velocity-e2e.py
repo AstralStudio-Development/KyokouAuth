@@ -30,22 +30,29 @@ def free_port():
         return listener.getsockname()[1]
 
 
-def test_jar(artifact):
+def test_jar(artifact, required_plugins=()):
     classes = ROOT / "platform-velocity/build/classes/kotlin/test/moe/ryuu/kyokouauth/velocity"
     entries = sorted(classes.glob("VelocityE2ePlugin*.class"))
     if not entries:
         raise RuntimeError("Run :platform-velocity:compileTestKotlin first")
     signature = digest(artifact) + ":" + hashlib.sha256(b"".join(path.read_bytes() for path in entries)).hexdigest()
+    signature += ":metadata-v2:" + ",".join(sorted(required_plugins))
     target = BASE / "gate-test.jar"
     if target.is_file():
         with zipfile.ZipFile(target) as previous:
             if previous.comment.decode() == signature:
                 return target
-    metadata = {"id": "kyokou-velocity-e2e", "name": "Kyokou Velocity E2E", "version": "1",
-                "main": "moe.ryuu.kyokouauth.velocity.VelocityE2ePlugin", "authors": []}
     with zipfile.ZipFile(artifact) as source, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as output:
         if any("VelocityE2ePlugin" in name for name in source.namelist()):
             raise RuntimeError("Production artifact contains test bootstrap")
+        # Retain the production descriptor's optional integrations, especially Floodgate's loader
+        # edge. Only the test bootstrap identity and explicitly requested test companions change.
+        metadata = json.loads(source.read("velocity-plugin.json"))
+        metadata.update(id="kyokou-velocity-e2e", name="Kyokou Velocity E2E", version="1",
+                        main="moe.ryuu.kyokouauth.velocity.VelocityE2ePlugin")
+        dependencies = {item["id"]: item for item in metadata.get("dependencies", [])}
+        dependencies.update({name: {"id": name, "optional": False} for name in required_plugins})
+        metadata["dependencies"] = list(dependencies.values())
         for info in source.infolist():
             if info.filename != "velocity-plugin.json":
                 output.writestr(info.filename, source.read(info.filename))

@@ -33,7 +33,9 @@ public final class CodecGenerator {
         "ClientboundSetSubtitleTextPacket", "ClientboundSetTitleTextPacket", "ClientboundClearTitlesPacket",
         "ClientboundDisconnectPacket", "ClientboundKeepAlivePacket", "ClientboundPongResponsePacket",
         "ServerboundKeepAlivePacket", "ServerboundChunkBatchReceivedPacket", "ServerboundAcceptTeleportationPacket",
-        "ServerboundPingRequestPacket", "ServerboundPlayerLoadedPacket");
+        "ServerboundPingRequestPacket", "ServerboundPlayerLoadedPacket",
+        "ClientboundOpenScreenPacket", "ClientboundContainerSetContentPacket", "ClientboundContainerClosePacket",
+        "ServerboundContainerClickPacket", "ServerboundContainerClosePacket");
     private record Parsed(String text, CompilationUnitTree tree, Trees trees) {
         String exact(Tree node) {
             var positions = trees.getSourcePositions();
@@ -234,6 +236,7 @@ public final class CodecGenerator {
     }
 
     private void generate(Path binary, Path sourcesPath) throws Exception {
+        new ItemCodecGenerator(sources, protocol, output).generate();
         String version = (String) call(upstream, "getMinecraftVersion");
         var manifest = new LinkedHashMap<String, Object>();
         manifest.put("schema", 1); manifest.put("protocol", protocol); manifest.put("minecraftVersion", version);
@@ -276,9 +279,12 @@ public final class CodecGenerator {
             java.append("        PacketRegistry ").append(state.toLowerCase(Locale.ROOT)).append(" = codec.getCodec(ProtocolState.").append(state).append(");\n");
             for (Entry entry : entries) if (entry.state.equals(state) && !entry.disposition.equals("rejected")) {
                 boolean ignored = entry.disposition.equals("ignored");
+                String factory = entry.factory;
+                if (protocol <= 768 && entry.type.getSimpleName().equals("ServerboundContainerClickPacket"))
+                    factory = "(input, helper) -> new ServerboundContainerClickPacket(input, BoundedItemCodecHelper.INSTANCE)";
                 java.append("        ").append(state.toLowerCase(Locale.ROOT)).append(".register").append(entry.direction.equals("SERVERBOUND") ? "Serverbound" : "Clientbound")
                     .append("(").append(entry.id).append(", ").append(ignored ? "IgnoredPlayPacket" : entry.type.getSimpleName())
-                    .append(".class, new MinecraftPacketSerializer<>(").append(ignored ? "IgnoredPlayPacket::new" : entry.factory).append("));\n");
+                    .append(".class, new MinecraftPacketSerializer<>(").append(ignored ? "IgnoredPlayPacket::new" : factory).append("));\n");
             }
         }
         java.append("        return codec;\n    }\n}\n");
@@ -328,6 +334,8 @@ public final class CodecGenerator {
         reflective.put("data.game.chunk.ChunkSection", protocol >= 773 ? 4 : 0);
         reflective.put("packet.ingame.clientbound.entity.player.ClientboundPlayerPositionPacket", protocol == 767 ? 7 : 10);
         reflective.put("packet.ingame.clientbound.level.ClientboundLevelChunkWithLightPacket", 6);
+        if (protocol >= 773) reflective.put("data.game.entity.player.ResolvableProfile", 1);
+        if (protocol >= 769) reflective.put("data.game.item.component.CustomModelData", 4);
         // The offline exporter constructs these exact typed data constructors, not arbitrary SDK classes.
         reflective.put("packet.configuration.clientbound.ClientboundUpdateEnabledFeaturesPacket", 1);
         reflective.put("packet.configuration.clientbound.ClientboundSelectKnownPacks", 1);
@@ -369,6 +377,9 @@ public final class CodecGenerator {
             rules.append("-keep,allowoptimization class ").append(OWN).append("Protocol263 { public static *** INSTANCE; }\n");
             rules.append("-keep,allowoptimization class ").append(OWN).append("Login263 { public <init>(").append(LIB).append("protocol.packet.ingame.clientbound.ClientboundLoginPacket); }\n");
         }
+        String componentOwner = LIB + "protocol.data.game.item.component." + (protocol <= 768 ? "DataComponentType" : "DataComponentTypes");
+        rules.append("-keepclassmembers,allowoptimization class ").append(componentOwner).append(" { public static *** PROFILE; public static *** CUSTOM_NAME; public static *** LORE; public static *** CUSTOM_MODEL_DATA; }\n");
+        rules.append("-keep,allowoptimization class ").append(OWN).append("RoleSelectorPackets { public static *** INSTANCE; public *** open(int,moe.ryuu.kyokouauth.limbo.RoleSelectorMenu); public *** content(int,int,moe.ryuu.kyokouauth.limbo.RoleSelectorMenu); public *** close(int); }\n");
         // Typed-packet export is an intentional tool API and must survive member shrinking.
         rules.append("-keep,allowoptimization class ").append(OWN).append("RegistrySnapshot { public static *** Companion; public java.util.List getRegistries(); public *** getTags(); }\n");
         rules.append("-keep,allowoptimization class ").append(OWN).append("RegistrySnapshot$Companion { public *** load(); }\n");
@@ -443,7 +454,13 @@ public final class CodecGenerator {
         Path path = output.resolve(relative); Files.createDirectories(path.getParent()); Files.writeString(path, contents, StandardCharsets.UTF_8);
     }
     private static String generatorSha() throws Exception {
-        try (var stream = CodecGenerator.class.getResourceAsStream("CodecGenerator.class")) { return sha(Objects.requireNonNull(stream).readAllBytes()); }
+        var digest = MessageDigest.getInstance("SHA-256");
+        for (Class<?> type : List.of(CodecGenerator.class, ItemCodecGenerator.class)) {
+            try (var stream = type.getResourceAsStream(type.getSimpleName() + ".class")) {
+                digest.update(Objects.requireNonNull(stream).readAllBytes());
+            }
+        }
+        return HexFormat.of().formatHex(digest.digest());
     }
     private static String sha(byte[] bytes) throws Exception { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
     private static void require(boolean condition, String message) { if (!condition) throw new IllegalStateException(message); }

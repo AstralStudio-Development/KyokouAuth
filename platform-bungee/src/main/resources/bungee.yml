@@ -2,4 +2,5 @@ name: KyokouAuth
 main: moe.ryuu.kyokouauth.bungee.KyokouAuthBungee
 version: '${version}'
 author: Ryuu
+softDepends: [floodgate]
 description: Connection-bound Microsoft and Mojang authentication with private multi-version login engines

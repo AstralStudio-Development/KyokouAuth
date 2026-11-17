@@ -43,6 +43,13 @@ internal class PacketLookup(private val protocol: Int) {
         checkNotNull(values.singleOrNull { (it as Enum<*>).name == constant }) { "Missing unique enum constant" }
     }
 
+    fun <T> staticField(owner: String, name: String, result: Class<T>): T = resolve("field $owner.$name") {
+        fields++
+        val field = type(owner).getField(name)
+        check(java.lang.reflect.Modifier.isStatic(field.modifiers)) { "Expected a static field" }
+        result.cast(checkNotNull(field.get(null)))
+    }
+
     fun singleton(name: String) = resolve("singleton $name.INSTANCE") {
         fields++
         val owner = type(name)

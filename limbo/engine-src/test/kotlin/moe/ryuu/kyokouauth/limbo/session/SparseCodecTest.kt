@@ -82,7 +82,8 @@ class SparseCodecTest {
             ProtocolState.LOGIN to setOf("ServerboundHelloPacket", "ServerboundCustomQueryAnswerPacket", "ServerboundLoginAcknowledgedPacket"),
             ProtocolState.CONFIGURATION to setOf("ServerboundFinishConfigurationPacket", "ServerboundSelectKnownPacks", "ServerboundClientInformationPacket", "ServerboundCustomPayloadPacket", "ServerboundPongPacket"),
             ProtocolState.GAME to buildSet {
-                addAll(setOf("ServerboundKeepAlivePacket", "ServerboundChunkBatchReceivedPacket", "ServerboundAcceptTeleportationPacket", "ServerboundPingRequestPacket"))
+                addAll(setOf("ServerboundKeepAlivePacket", "ServerboundChunkBatchReceivedPacket", "ServerboundAcceptTeleportationPacket", "ServerboundPingRequestPacket",
+                    "ServerboundContainerClickPacket", "ServerboundContainerClosePacket"))
                 if (GeneratedCodec.PROTOCOL >= 769) add("ServerboundPlayerLoadedPacket")
                 else add("ServerboundMovePlayerPosRotPacket")
             },

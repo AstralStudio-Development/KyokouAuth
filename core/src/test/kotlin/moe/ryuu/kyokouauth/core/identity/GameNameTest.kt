@@ -3,6 +3,7 @@ package moe.ryuu.kyokouauth.core.identity
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertFailsWith
 
 /**
  * `parse` is the only way a bindable name comes into existence, and it refuses exactly the shapes
@@ -40,6 +41,13 @@ class GameNameTest {
 
         assertEquals(".Steve", bedrock.value)
         assertEquals(".steve", bedrock.key)
+    }
+
+    @Test
+    fun `bedrock display factory rejects Java names controls whitespace and oversized input`() {
+        for (name in listOf("", "Steve", ".Space User", ".Bad\u0000Name", "." + "x".repeat(32))) {
+            assertFailsWith<IllegalArgumentException> { GameName.forBedrock(name) }
+        }
     }
 
     @Test

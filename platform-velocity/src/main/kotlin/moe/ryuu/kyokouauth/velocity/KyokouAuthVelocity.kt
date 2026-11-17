@@ -44,6 +44,7 @@ class KyokouAuthVelocity @Inject constructor(
     private var limbo: LimboServer? = null
     private var auth: AuthService? = null
     private var gate: LoginGate? = null
+    private var bedrock: VelocityFloodgate? = null
     @Volatile private var accepting = false
 
     // These listeners belong to the plugin instance itself, so even config/database/limbo creation
@@ -78,12 +79,14 @@ class KyokouAuthVelocity @Inject constructor(
 
     private fun unavailable(): Component = Component.text("Authentication is unavailable. Please try again later.")
 
-    @Subscribe
+    @Subscribe(order = PostOrder.LAST)
     fun onProxyInitialize(event: ProxyInitializeEvent) {
         accepting = false
         try {
             val dataFolder = dataDirectory.toFile()
             val config = ProxyConfig.load(dataFolder)
+            if (config.rolesEnabled) requireRoleTransfers(server.configuration)
+            val bedrock = VelocityFloodgate(server, config.bedrockEnabled, config.rolesEnabled).also { this.bedrock = it }
             val messages = MessageCatalogue(config.locale, File(dataFolder, "messages")).also { it.load() }
             val forwardingSecret = forwardingSecret(server.configuration)
             val reservedNames = listOf(LoginGate.LIMBO_SERVER_NAME) + (767..777).map { "${LoginGate.LIMBO_SERVER_NAME}-$it" }
@@ -92,8 +95,16 @@ class KyokouAuthVelocity @Inject constructor(
             if (config.directoryBudget <= 0) {
                 logger.warn("`premium.directory-limit` is 0, so Mojang lookups are not capped locally")
             }
-            val auth = AuthService(config, logger.toProxyLog()).also { this.auth = it }
-            val gate = LoginGate(server, config, messages, auth, logger).also { this.gate = it }
+            val skins = moe.ryuu.kyokouauth.proxy.RoleSkinService {
+                val container = server.pluginManager.getPlugin("skinsrestorer").orElse(null) ?: return@RoleSkinService null
+                val instance = container.instance.orElse(null) ?: return@RoleSkinService null
+                moe.ryuu.kyokouauth.proxy.RoleSkinProvider(instance, instance.javaClass.classLoader) {
+                    val current = server.pluginManager.getPlugin("skinsrestorer").orElse(null)
+                    current === container && current.instance.orElse(null) === instance
+                }
+            }
+            val auth = AuthService(config, logger.toProxyLog(), skins).also { this.auth = it }
+            val gate = LoginGate(server, config, messages, auth, logger, bedrock::probe).also { this.gate = it }
             server.eventManager.register(this, gate)
             val limbo = LimboServer(
                 settings = config.limbo,
@@ -133,6 +144,13 @@ class KyokouAuthVelocity @Inject constructor(
         }
     }
 
+    internal fun requireRoleTransfers(configuration: Any) {
+        val getter = configuration.javaClass.getMethod("isAcceptTransfers")
+        check(getter.returnType == Boolean::class.javaPrimitiveType && getter.invoke(configuration) == true) {
+            "role-selection.enabled requires advanced.accepts-transfers = true in velocity.toml"
+        }
+    }
+
     /** Velocity 4.3.1 exposes these public getters on its actual config, but not on ProxyConfig. */
     internal fun forwardingSecret(configuration: Any): ByteArray {
         val mode = configuration.javaClass.getMethod("getPlayerInfoForwardingMode").invoke(configuration) as? Enum<*>
@@ -149,6 +167,8 @@ class KyokouAuthVelocity @Inject constructor(
 
     private fun closeServices() {
         accepting = false
+        bedrock?.close()
+        bedrock = null
         runCatching { gate?.deactivate() }.onFailure { logger.warn("Could not close login gate", it) }
         // Closing one resource must not prevent the others from being released after partial startup.
         runCatching { limbo?.close() }.onFailure { logger.warn("Could not close login limbo", it) }

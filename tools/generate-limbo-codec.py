@@ -26,7 +26,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     tool_classes = output / 'tool-classes'
     tool_classes.mkdir(exist_ok=True)
-    sources = [root / 'limbo/codec-generator/CodecGenerator.java']
+    sources = [root / 'limbo/codec-generator/CodecGenerator.java', root / 'limbo/codec-generator/ItemCodecGenerator.java']
     subprocess.run([args.javac, '-J-Xmx192m', '-J-XX:ActiveProcessorCount=2', '--release', '21',
                     '-encoding', 'UTF-8', '-d', str(tool_classes), *map(str, sources)], check=True)
     classpath = os.pathsep.join([str(tool_classes), str(args.mcpl_jar.resolve()), args.classpath])

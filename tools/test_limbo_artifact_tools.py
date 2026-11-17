@@ -78,13 +78,26 @@ def synthetic_entries(protocols=PROTOCOLS):
     entries = {PREFIX + 'LimboServer.class': class_header(65), 'yggdrasil_session_pubkey.der': b'\x30\x82\x00\x80' + bytes(128)}
     def add_class(name, major=61):
         entries[name + '.class'] = class_header(major)
-    for name in ('LimboPlayer', 'LimboListener', 'LimboLogger', 'LimboSettings', 'LimboEngineFactory', 'EngineContext', 'ForwardingMode', 'protocol/TextComponent'):
+    for name in ('LimboPlayer', 'LimboListener', 'LimboLogger', 'LimboSettings', 'LimboEngineFactory', 'EngineContext', 'ForwardingMode', 'RoleSelectorItem', 'RoleSelectorMenu', 'RoleAvatarIcon', 'protocol/TextComponent'):
         add_class(PREFIX + name)
     entries[ENGINE_SERVICE] = '\n'.join(f'moe.ryuu.kyokouauth.limbo.engine.p{p}.session.EngineFactory' for p in protocols).encode()
     for protocol in protocols:
         base = PREFIX + f'engine/p{protocol}/'
-        for name in ('EngineFactory', 'GeneratedCodec', 'SparseMinecraftProtocol'):
+        for name in ('EngineFactory', 'GeneratedCodec', 'SparseMinecraftProtocol', 'RoleSelectorPackets', 'ItemDecodeBudget',
+                     'BoundedItemCodecHelper' if protocol <= 768 else 'BoundedItemTypes'):
             add_class(base + 'session/' + name, 65)
+        entries[base + 'session/GeneratedCodec.class'] += b'BoundedItemCodecHelper'
+        if protocol >= 769:
+            entries[base + 'session/BoundedCustomModelData.class'] = class_header(65) + b'ItemDecodeBudget isFinite'
+        selector = {'protocol': str(protocol), 'version': f'synthetic-{protocol}', 'source': 'official-server-bootstrap-built-in-registries',
+                    'server-sha256': '1' * 64, 'registry-server-sha256': '2' * 64, 'exporter-sha256': '3' * 64,
+                    'player-head-id': '1105', 'generic-9x3-id': '2'}
+        entries[f'limbo/role-selector-{protocol}.properties'] = ''.join(f'{k}={v}\n' for k, v in selector.items()).encode()
+        entries[f'limbo/items-{protocol}.json'] = json.dumps({'schema': 1, 'protocol': protocol,
+            'source': 'pinned-official-mcpl-ast-sparse-item-closure', 'components': ['CUSTOM_MODEL_DATA', 'CUSTOM_NAME', 'LORE', 'PROFILE'],
+            'frameBytes': 65536, 'changedSlots': 64, 'componentCount': 4, 'cmdListMaxima': [1, 0, 0, 0], 'cmdFiniteFloats': True, 'listItems': 8, 'stringChars': 8192,
+            'nbtBytes': 16384, 'nbtDepth': 16, 'sources': {'official/ItemTypes.java': '4' * 64},
+            'componentIds': {'CUSTOM_MODEL_DATA': 13, 'CUSTOM_NAME': 5, 'LORE': 7, 'PROFILE': 47}}).encode()
         fixture = f'synthetic-registry-{protocol}'.encode()
         entries[f'limbo/configuration-{protocol}.bin'] = fixture
         meta = {'protocol': str(protocol), 'version': f'synthetic-{protocol}', 'source': 'official-offline-server-empty-known-packs',
@@ -99,6 +112,14 @@ def synthetic_entries(protocols=PROTOCOLS):
                   'disposition': 'ignored', 'terminal': False}
         codec = {'schema': 1, 'protocol': protocol, 'minecraftVersion': f'synthetic-{protocol}', 'binarySha256': '4' * 64,
                  'sourcesSha256': '5' * 64, 'codecSourceSha256': '6' * 64, 'generatorSha256': '7' * 64, 'packets': [packet]}
+        for direction, names in (('CLIENTBOUND', ('ClientboundOpenScreenPacket', 'ClientboundContainerSetContentPacket', 'ClientboundContainerClosePacket')),
+                                 ('SERVERBOUND', ('ServerboundContainerClickPacket', 'ServerboundContainerClosePacket'))):
+            for index, name in enumerate(names, 1):
+                packet_type = f'org.geysermc.mcprotocollib.protocol.packet.ingame.{direction.lower()}.inventory.{name}'
+                codec['packets'].append({'state': 'GAME', 'direction': direction, 'id': index, 'class': packet_type,
+                                         'disposition': 'typed', 'terminal': False})
+                entry_name = base + 'libs/' + packet_type.replace('.', '/') + '.class'
+                entries[entry_name] = class_header(65) + b'ItemDecodeBudget BoundedItemTypes'
         entries[f'limbo/codec-{protocol}.json'] = json.dumps(codec).encode()
         entries[f'limbo/ignored-{protocol}.json'] = json.dumps([packet]).encode()
     for name in ('org/cloudburstmc/nbt/NbtMap', 'com/google/gson/Gson', 'org/slf4j/LoggerFactory', 'it/unimi/dsi/fastutil/ints/Int2ObjectMap'):
@@ -139,6 +160,72 @@ class ArtifactPolicyTests(unittest.TestCase):
     def check_bad(self, entries, message):
         report = AUDIT.audit(self.write_zip(entries))
         self.assertTrue(any(message in error for error in report['errors']), report['errors'])
+
+    def test_selector_fixture_must_match_official_server_and_budget(self):
+        entries = synthetic_entries()
+        key = 'limbo/role-selector-767.properties'
+        entries[key] = entries[key].replace(b'server-sha256=' + b'1' * 64, b'server-sha256=' + b'9' * 64)
+        self.check_bad(entries, 'selector fixture official server differs')
+        entries = synthetic_entries()
+        key = 'limbo/items-770.json'
+        budget = json.loads(entries[key])
+        budget['componentCount'] = 999
+        entries[key] = json.dumps(budget).encode()
+        self.check_bad(entries, 'selector decode budget differs')
+
+    def test_selector_guard_reader_wiring_cannot_be_trimmed_away(self):
+        entries = synthetic_entries()
+        entries[PREFIX + 'engine/p767/session/GeneratedCodec.class'] = class_header(65)
+        self.check_bad(entries, 'selector bounded legacy factory missing')
+        entries = synthetic_entries()
+        click = PREFIX + 'engine/p770/libs/org/geysermc/mcprotocollib/protocol/packet/ingame/serverbound/inventory/ServerboundContainerClickPacket.class'
+        entries[click] = class_header(65) + b'ItemDecodeBudget'
+        self.check_bad(entries, 'selector bounded item reader missing')
+
+    def test_official_oracle_specializations_keep_native_profile_control_and_real_defaults(self):
+        prepare = load_tool('prepare-limbo-oracle')
+        modern_defaults = 'BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(access)'
+        for protocol in PROTOCOLS:
+            with self.subTest(protocol=protocol):
+                source = prepare.source(protocol)
+                self.assertIn('nativeItemPositiveControl();', source)
+                self.assertIn('ItemStack.OPTIONAL_STREAM_CODEC.encode(buffer, head)', source)
+                self.assertIn('native player-head default components were not initialized', source)
+                self.assertIn('native profile control lost UUID/name', source)
+                self.assertEqual(protocol in {775, 776, 777}, modern_defaults in source)
+                modern_patch = 'get(stack.getPrototype(), net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA)'
+                self.assertEqual(protocol in {775, 776, 777}, modern_patch in source)
+                if protocol not in {775, 776, 777}:
+                    self.assertIn('stack.getComponentsPatch().get(net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA)', source)
+                if protocol in {775, 776, 777}:
+                    self.assertLess(source.index('Stream.concat(statics.registries(), loaded.registries())'), source.index(modern_defaults))
+                    self.assertLess(source.index(modern_defaults), source.index('play = GameProtocols.CLIENTBOUND_TEMPLATE'))
+                    self.assertIn('PendingComponents::apply', source)
+                if protocol in {767, 768, 769, 770, 771, 772}:
+                    self.assertIn('new net.minecraft.world.item.component.ResolvableProfile(nativeProfile)', source)
+                    self.assertNotIn('ResolvableProfile.createResolved(nativeProfile)', source)
+                else:
+                    self.assertIn('ResolvableProfile.createResolved(nativeProfile)', source)
+
+    def test_avatar_four_component_closure_accepts_only_bounded_cmd(self):
+        entries = synthetic_entries()
+        entries[PREFIX + 'RoleAvatarIcon.class'] = class_header(61)
+        for protocol in PROTOCOLS:
+            key = f'limbo/items-{protocol}.json'
+            metadata = json.loads(entries[key])
+            metadata.update(components=['CUSTOM_MODEL_DATA', 'CUSTOM_NAME', 'LORE', 'PROFILE'], componentCount=4,
+                            cmdListMaxima=[1, 0, 0, 0], cmdFiniteFloats=True)
+            metadata['componentIds']['CUSTOM_MODEL_DATA'] = 13
+            entries[key] = json.dumps(metadata).encode()
+            if protocol >= 769:
+                entries[PREFIX + f'engine/p{protocol}/session/BoundedCustomModelData.class'] = class_header(65) + b'ItemDecodeBudget isFinite'
+        report = AUDIT.audit(self.write_zip(entries))
+        self.assertEqual([], report['errors'])
+        key = 'limbo/items-769.json'
+        metadata = json.loads(entries[key])
+        metadata['cmdListMaxima'] = [1, 0, 1, 0]
+        entries[key] = json.dumps(metadata).encode()
+        self.check_bad(entries, 'avatar CMD list budget differs')
 
     def test_complete_synthetic_layout_is_read_only(self):
         artifact = self.write_zip(synthetic_entries())

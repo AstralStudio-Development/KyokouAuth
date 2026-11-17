@@ -3,9 +3,10 @@
 # Everything here is read once at startup. A missing key is a default, so an upgrade that adds a
 # setting never leaves the plugin refusing to start; a missing file is written out from the jar.
 #
-# Which kind of account a name belongs to is decided by asking Mojang, not by a setting: a name that
-# Mojang owns can only enter through the official launcher's handshake, and every other name has to
-# prove a Microsoft account before it is bound. There is deliberately no switch to turn that off.
+# Ordinary Java name ownership is decided by Mojang: premium names require the launcher's session
+# handshake; other Java names require Microsoft proof before binding. Optional role selection adds
+# a separate path for a fresh connection-proven XUID plus a currently verified official global link;
+# public profile lookups, stored links and IP sessions never grant that permission.
 
 database:
   # sqlite | h2 | mysql | mariadb | postgresql
@@ -29,6 +30,39 @@ session:
   # Whether a session only counts from the address that earned it. Turn this off when every player
   # shares one address behind NAT or a tunnel, where the check distinguishes nobody.
   bind-address: true
+
+bedrock:
+  # Optional proxy Floodgate 2.2.5 integration. Requires a trusted Geyser auth-type: floodgate chain.
+  # Without role-selection, only unlinked players are admitted with an isolated non-Java prefix.
+  # Linked players additionally require role-selection and verified global linking (not local linking).
+  # Missing/incompatible Floodgate refuses initialization; unbound Bedrock display names/IP sessions
+  # are never persisted as Java bindings. This switch is independent from role-selection.enabled.
+  enabled: false
+
+role-selection:
+  # Opt-in: after fresh XUID proof, offer the independent Microsoft (U) and linked Java (J) roles.
+  # Never merges/migrates their data. Plain Mojang logins and IP sessions do not grant XUID roles.
+  # Requires compatible native pre-login/profile bridges; mismatches fail closed at startup.
+  enabled: false
+  # Time to choose a role (5..600 seconds). Closing the menu does not choose for the player.
+  timeout-seconds: 60
+  # One-use Java handoff / Bedrock choice-hint lifetime (5..120 seconds), not a login/session cache.
+  transfer-ttl-seconds: 30
+  # REQUIRED when enabled: explicit administrator-controlled, client-reachable JAVA proxy host.
+  # No scheme or port in this field; never a backend, private Limbo address or client-supplied host.
+  reconnect-host: ""
+  reconnect-port: 25577
+  # Bedrock native automatic reconnect additionally needs platform-geyser-transfer installed on
+  # Geyser with an explicit Java host:port -> client-reachable Bedrock host:port allowlist.
+  # Without that extension, reconnect manually. A real new connection/loading screen remains.
+  avatars:
+    # Optional Bedrock-only role icons. Requires the separate Geyser Avatar extension and its pack.
+    # This service only prepares pictures; it cannot authenticate or select a role.
+    enabled: false
+    # Snapshot HTTP server binds ONLY literal 127.0.0.1, never the Minecraft/public listener.
+    bridge-port: 24682
+    # Fixed read-only Geyser presentation endpoint; no credentials, query or non-loopback host.
+    status-endpoint: "http://127.0.0.1:24683/v1/packs/status"
 
 verification:
   # Enabled by default: after proving the same Microsoft XUID, move its binding to the new free name.
