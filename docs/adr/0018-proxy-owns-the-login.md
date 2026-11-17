@@ -25,9 +25,11 @@
 - R8仅处理Limbo图的未用成员，名称和类型继承保持；精确保留反射、泛型、sealed文本契约、SPI及DER锚点，core/平台代理代码不重写。正式产物目标10MiB、20MiB硬门槛，默认构建不合格即失败，不能只交未裁剪classes或隐藏到额外下载。
 - 26.3-4 的 previous game mode 仍用旧式 BYTE -1 表示缺省，原版要求 OPTIONAL_VAR_INT 0；`Login263` 保留一处版本固定的兼容修正，并由原版 codec 及缺省语义断言独立校验。
 - 原版 codec 验包、生命周期/隔离测试、真实原版客户端退出加载界面是不同层次的验收，不能用“构建成功”或手写探针发送 ACK 冒充渲染成功。
-- 各 Engine 的 loopback 随机端口作为私有普通后端注册，代理按实际客户端协议选择；未验证连接只能进入自己的 Engine，在首连无 currentServer、大厅失败、切服或自动 failover 时均拒绝进入真实后端。
+- 各 Engine 的 loopback 随机端口只作为平台代理私有连接目标持有：Velocity 用 `createRawRegisteredServer`，Bungee 用未加入公开 servers 表的 `ServerInfo`。不得发布到原生 `/server` 列表、补全或公开服务器发现；不是靠权限过滤来掩盖。共享 Gate 通过 adapter 自有映射按协议选择，并保留 exact 对象、同名冲突和关闭后失效校验。未验证连接只能进入自己的 Engine，在首连无 currentServer、大厅失败、切服或自动 failover 时均拒绝进入真实后端。
 - Velocity 保留 modern HMAC。Bungee 的 legacy 握手 UUID/IP/name 不可信，必须附加当前进程签发、绑定 exact 连接/身份/协议/目标、短 TTL 的一次性票据，由 authority 原子兑换；不在 HMAC 失败后降级。Bungee profile 仅通过启动时核对签名的窄 bridge 补齐，UUID 使用公共 setter；真实后端连接前清除票据。
 - 标题在有效 challenge 返回后仅发一次，stay 对齐剩余验证 deadline；会话结束或重启前清理，不再周期性重发淡入动画。
+- 私有服务器不公开与认证前命令限制是两个边界。`verification.blocked-commands` 默认仅含 `server`，由共享 Gate 按当前 exact 连接的认证状态判断，控制台不限制，认证后不增加或恢复其他插件原先拒绝的权限。Velocity 使用原生执行事件及 mutable available-command tree；legacy TabCompleteEvent 不冒充现代命令树。
+- Bungee 2111 没有公开命令树事件，故采用启动签名校验的窄前端通道适配，仅在原生 GAME 状态用 Bungee 自身 Commands codec/encoder 过滤 typed、wrapper 与原始透传路径；不自写节点字段或协议 ID 表，不修改全局 initializer。现代补全在 TabExecutor 前拦截，事务关联仅保留最多64条ID/布尔，不保留参数；未知现代事务在受限时丢弃，关闭时回收。过滤不改原树、不建永久watch或跨连接树缓存，认证后正常新后端树自然恢复。
 
 ## 直接后果
 
@@ -44,3 +46,54 @@
 - **断开 + 可点击链接，不做大厅。** 实现最省，但玩家必须在断线界面点完链接、再手动重连，且插件无法在成功后自动放行。体验退步到「踢人式验证」。
 - **只在 `PreLoginEvent` 拒/放，不搬后端。** 解决不了 `/server`：验证中的玩家仍会被送到真实后端。
 - **保留 Bukkit 插件、改用 BungeeCord 转发。** 换一种转发模式而已，登录注入与转发模式的冲突依旧。
+
+## 代理基岩接入预研（尚未实现）
+
+本节仅记录接口与接入边界；**当前没有代理基岩认证能力**，未增加依赖、配置开关或放行分支。以下核对采用官方 API 2.2.5-SNAPSHOT 文档及固定源码构建 `2.2.5-20260917.145236-21`，不是宣称兼容所有 Floodgate/代理版本。
+
+### 已证实的接口与信任边界
+
+- 两平台均在 **Velocity / Bungee 本进程**部署对应 Floodgate，Geyser 使用 `auth-type: floodgate`。可信来源是受控 Geyser/Floodgate 链路及 Floodgate 对当前连接的处理结果，不是“装了 Geyser”这个事实；`key.pem` 能使基岩连接绕过 Java 认证，必须保密。后端 Floodgate 的数据转发不是本项目代理认证的替代品。[FG-SETUP]
+- 官方入口是 `FloodgateApi.getInstance()`；`isFloodgatePlayer(UUID)` / `getPlayer(UUID)` 可在 pre-login 调用。身份字段取 `FloodgatePlayer.getXuid()`（Xbox XUID 字符串）、`getCorrectUniqueId()` / `getCorrectUsername()`（实际服务端 UUID/name），并读取 `isLinked()` / `getLinkedPlayer()`；不能把 linked 玩家仍当作 `getJavaUniqueId()` 所表达的未关联 UUID。[FG-API] [FG-PLAYER]
+- **公开 UUID 查询不是 exact-connection 凭证。** 固定源码的 `SimpleFloodgateApi.getPlayer` 会查在线表、linked UUID，甚至查断线后最长 20 秒的 `pendingRemove`。因此 `getPlayer(clientUuid) != null`、`isFloodgatePlayer(clientUuid)` 或 UUID/name 相等均不足以放行当前连接。`isFloodgateId` 仅判 UUID 格式，`createJavaPlayerId`、`getXuidFor(gamertag)` 等也只是转换/公开查询，不是登录证明。[FG-API-JAVADOC] [FG-CORE-SOURCE]
+- 官方两平台代理 listener 的身份来源都是**该原生连接 Channel 上由 Floodgate 写入的 player attribute**；共享握手处理完成数据解密/校验、构造身份后写入。还必须保留该连接的 kick/拒绝结果。客户端自报 UUID、名字、前缀、hostname、legacy forwarding 字段或 IP 只能作查找/一致性校验，不能替代这条来源链。[FG-VELOCITY-SOURCE] [FG-BUNGEE-SOURCE] [FG-CORE-SOURCE]
+
+### 时序：源码事实与待实施工作分开
+
+| 平台 | 固定官方源码中已证实的时序 | 本项目待实施的接线 |
+|---|---|---|
+| Velocity | `VelocityListener.onPreLogin` 在 `EARLY` 读取当前 Channel 的身份/kick，缓存到 `InboundConnection`，并为 Floodgate 连接 force-offline；`onGameProfileRequest` 在 `EARLY` 使用这份连接缓存设置实际 UUID/name，linked 皮肤查询后才 resume。[FG-VELOCITY-SOURCE] | 在现有 `LAST` LoginGate 进行 Java 名字解析/认证决策前，取得同一连接的可信证据；profile 阶段不得把 Floodgate 的最终 UUID 覆盖成 Java provisional UUID；`LoginEvent` 再核对同一连接及最终 profile，初服/切服仍只由共享 Gate 放行。不能从 pre-login 客户端 UUID 推导身份。 |
+| Bungee | `BungeeListener.onPreLogin` 在 `LOWEST` 从当前 Channel 读取身份/kick，设置 offline、最终 UUID/name；`LoginEvent`/`PostLoginEvent` 的 UUID 查询只供后续处理。[FG-BUNGEE-SOURCE] | 现有 `HIGHEST` PreLogin adapter 须在转异步前捕获 connection-bound 证据，并在其 USERNAME intent 内完成一致的认证模式/profile 决策；不能在 Login 时补改 UUID。Login 后仍复核证据，PostLogin/ServerConnect 交共享 Gate；不得以 Floodgate 设置了 offline 为认证通过。 |
+
+**尚缺的关键能力是 connection-bound bridge，而非几个 UUID API 调用。** 公共 `FloodgateApi` 没有接收原生连接/Channel 的认证查询；候选方案是隔离在两个平台 adapter 的窄桥，针对明确版本核对官方实现，从 exact 原生连接读取 Floodgate 身份及失败状态，以该对象的公共接口读取上述字段；若再调用 `getPlayer`，返回对象必须与当前连接属性为同一实例，不能反向用 UUID 查询结果建立连接信任。该私有实现接缝不是稳定官方 API，必须签名/版本自检，任何不匹配拒绝基岩接入；本次没有实现、依赖或保证该桥。已废弃的 `HandshakeData.getChannel()` 虽暴露连接，但握手 callback 也可能在错误路径执行，不能只看 `isFloodgatePlayer()` 就签发认证。[FG-API-JAVADOC] [FG-HANDSHAKE] [FG-CORE-SOURCE]
+
+### 单一 LoginGate 与主体规则
+
+1. 未来只能向现有共享 `LoginGate` 增加显式的可信 Floodgate 身份输入，不另开“基岩直接连接真实后端”的旁路，不模拟设备码回调。输入必须绑定本进程 `sessionId`、原生连接/Channel 对象、提供方生命周期及不可变的 XUID/最终 UUID/name/linked 快照；Login 再核对同一对象仍活跃、证据未替换且无拒绝。异步结果、断线、重连、同名/同 UUID 并发、超时和停用均只能影响原连接，禁止从 UUID/name/IP 缓存继承认证或会话。
+2. 名字与主体必须拆开讨论：当前 `GameName.parse` 只接受 Java 格式，而 Floodgate 可添加前缀并替换空格；不能为所有客户端放宽解析或去掉前缀冒用 Java 名字。现有 `Identity.ofXuid` 使用未 linked Floodgate 相同的 XUID→UUID 布局，这只说明**数值映射可对齐**，不等于命名/绑定/资料可自动合并。Floodgate linked 玩家可能直接使用 Java UUID/name；官方 linking 是另一套账户关联，不能当作本次 Mojang session 验证，也不能自动合并为已有 Java 微软主体。命名、linked、双端数据归属与持久绑定迁移均尚未决定；在策略与验收完成前拒绝这类接入。[FG-FAQ] [FG-PLAYER] [FG-LINKING]
+3. 可信 XUID 只表示基岩来源证明，不代表拥有任意 Java 名字：现有 Mojang 名字优先、该连接必须完成 Mojang session、UUID 一致、冲突拒绝规则不降低。不得用 Floodgate linked 记录、同名/XUID 或 offline 模式覆盖 `MojangSession` 判定。
+4. 缺失/未就绪/不兼容的 Floodgate、缺失 connection-bound 证据、空值/非法 XUID、profile 不一致、校验异常、已有拒绝或 deadline 到期，一律不能获得基岩认证；已按基岩处理的连接直接拒绝，绝不退回未认证 Java/设备码分支。未声明/未证明为基岩的连接仍只走原 Java 规则，失败不会变成离线放行。当前代码本就没有本节所述新入口。
+
+### 实施前必要验收（本次未执行）
+
+- 两平台代理分别覆盖：真实 Geyser+Floodgate 未 linked 登录的 XUID/最终 profile/事件顺序；缺插件、错误 key、失败状态和窄桥版本不符拒绝；保留其他插件已作出的拒绝。
+- Java 攻击连接仿造 XUID UUID、前缀/name/hostname/转发字段时不能取走其他连接身份；覆盖同名/同 UUID 并发、`pendingRemove` 残留、旧异步回调、断线重连/停用，证明认证不跨连接继承。
+- 未 linked/linked、前缀/空格、已有 Java 微软绑定与 Mojang 名字冲突分别有明确预期；未授权连接在初服、`/server`、插件切服及 failover 均不能触达真实后端。兼容性与真实双端验收通过前不得宣布基岩支持。
+
+官方来源：
+
+- [FG-SETUP]：代理部署、`auth-type`、密钥与后端转发边界。
+- [FG-API]、[FG-PLAYER]、[FG-HANDSHAKE]：公开接口、字段及废弃握手接口契约。
+- [FG-CORE-SOURCE]：源码包内 `SimpleFloodgateApi`、`FloodgateHandshakeHandler`、`CommonDataHandler`；[FG-VELOCITY-SOURCE] / [FG-BUNGEE-SOURCE]：对应 `*Listener`、`*ProxyDataHandler`。源码仅在内存读取，未加入工程。
+- [FG-FAQ]、[FG-LINKING]：名字/UUID 格式与官方账户关联语义；不构成本项目自动合并的授权。
+
+[FG-SETUP]: https://geysermc.org/wiki/floodgate/setup/
+[FG-API]: https://geysermc.org/wiki/floodgate/api/
+[FG-API-JAVADOC]: https://repo.opencollab.dev/javadoc/maven-snapshots/org/geysermc/floodgate/api/2.2.5-SNAPSHOT/raw/org/geysermc/floodgate/api/FloodgateApi.html
+[FG-PLAYER]: https://repo.opencollab.dev/javadoc/maven-snapshots/org/geysermc/floodgate/api/2.2.5-SNAPSHOT/raw/org/geysermc/floodgate/api/player/FloodgatePlayer.html
+[FG-HANDSHAKE]: https://repo.opencollab.dev/javadoc/maven-snapshots/org/geysermc/floodgate/api/2.2.5-SNAPSHOT/raw/org/geysermc/floodgate/api/handshake/HandshakeData.html
+[FG-CORE-SOURCE]: https://repo.opencollab.dev/maven-snapshots/org/geysermc/floodgate/core/2.2.5-SNAPSHOT/core-2.2.5-20260917.145236-21-sources.jar
+[FG-VELOCITY-SOURCE]: https://repo.opencollab.dev/maven-snapshots/org/geysermc/floodgate/velocity/2.2.5-SNAPSHOT/velocity-2.2.5-20260917.145236-21-sources.jar
+[FG-BUNGEE-SOURCE]: https://repo.opencollab.dev/maven-snapshots/org/geysermc/floodgate/bungee/2.2.5-SNAPSHOT/bungee-2.2.5-20260917.145236-21-sources.jar
+[FG-FAQ]: https://geysermc.org/wiki/floodgate/faq/
+[FG-LINKING]: https://geysermc.org/wiki/floodgate/linking/

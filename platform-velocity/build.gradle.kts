@@ -49,7 +49,7 @@ tasks.shadowJar {
     exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
 }
 
-val checkArtifactSize by tasks.registering(Exec::class) {
+val checkArtifactSize = tasks.register<Exec>("checkArtifactSize") {
     dependsOn(tasks.shadowJar)
     inputs.file(tasks.shadowJar.flatMap { it.archiveFile })
     inputs.file(rootProject.file("tools/audit-limbo-artifact.py"))

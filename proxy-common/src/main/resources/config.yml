@@ -31,19 +31,29 @@ session:
   bind-address: true
 
 verification:
-  # Opt-in: after proving the same Microsoft XUID, atomically move its binding to the new free name.
+  # Enabled by default: after proving the same Microsoft XUID, move its binding to the new free name.
   # The XUID/UUID stays the same; the old name is released. Premium and occupied names are refused.
   # A provisional connection reconnects once; it then uses the new name and the stable identity.
-  auto-rename: false
+  auto-rename: true
   # How long a player has to finish the Microsoft sign-in before they are disconnected.
   timeout-seconds: 300
-  # How often the server asks Microsoft whether the player has finished.
+  # Minimum polling interval; Microsoft's larger interval/Retry-After is always honored.
   poll-interval-seconds: 5
+  # Command roots unavailable before authentication (execution, command tree and completion).
+  # Add names without arguments. Case, leading / and namespaces are normalized; list aliases too.
+  # [] disables this list only; ["*"] blocks every command. Server-switch isolation always remains.
+  # Changes take effect after restarting the proxy; /ka reload only reloads messages.
+  blocked-commands:
+    - server
 
 safety:
   # How many connection attempts one address may make per minute. 0 disables the cap. Guards the
   # Mojang lookup budget rather than the account.
   connections-per-minute: 10
+  # Pending admission and blocking-work queues are bounded; overflow is refused, never run inline.
+  pending-login-limit: 4096
+  io-workers: 4
+  io-queue-capacity: 256
 
 premium:
   # Local ceiling for uncached name lookups, separate from session handshakes. Upstream limits can

@@ -25,7 +25,9 @@
 
 验证大厅使用各协议固定版本的 MCProtocolLib 提供编解码与网络传输；767～777 的 11 个协议实现分别重定位，但不重复打包整套依赖：Netty 4.2 由所用代理提供，NBT/fastutil 等普通库共享一份，文本库按三种格式族共享。构建期从上游完整注册表生成明确 ID 的稀疏 Codec，再仅对 Limbo 图删除未用成员；不手写报文字段，也不运行时下载协议库。各 Engine 使用自己的官方注册表和私有 loopback 端口，代理按客户端协议选择；无需另装协议转换插件。Velocity 使用 modern forwarding HMAC，Bungee 使用绑定当前连接、协议和目标的短时一次性私有票据，绝不信任客户端自报 UUID。两个平台共享认证与验证会话；验证失败或大厅不可用都不会回退真实后端。
 
-标题在验证码准备好后显示一次、持续至当前验证期限，并在结束或重新申请前清理，不再每三秒重启动画。聊天保留完整可点击链接。
+各 Limbo 端点仅保存在 adapter 的私有连接目录，不加入原生 `/server` 列表、补全或公开服务器发现；仍由共享 Gate 按当前连接与协议选择，不能通过手输内部名称进入。
+
+标题在验证码准备好后显示一次、持续至当前验证期限，并在结束或重新申请前清理，不再每三秒重启动画。聊天保留完整可点击链接。取得微软令牌后立即提示正在确认 Xbox 身份；轮询从响应完成时计算剩余等待，不把本地提示/日志耗时再叠加一次。`slow_down` 每次增加五秒，429/503 的 Retry-After 与微软返回的更长间隔仍优先；不承诺网页完成后零延迟，也不省略必要的 Xbox 两跳。完成令牌尝试时记录仅含阶段耗时和计数的安全诊断日志。
 
 ## 快速开始
 
@@ -64,13 +66,29 @@ ip_forward: true
 
 微软设备码申请对瞬时网络失败最多尝试 3 次，等待期间显示进度；429 遵从 `Retry-After`。日志只记录安全错误类别、HTTP 状态与耗时，不记录验证码或令牌。若部署环境需要 HTTP 出站代理，可在 JVM 启动参数设置 `-Dhttps.proxyHost` / `-Dhttps.proxyPort`，插件默认不强制任何本机代理地址。
 
-### 微软身份自动改名（可选）
+认证 HTTP 响应上限为 **1MiB 原始字节**，覆盖声明长度与 chunked 响应；超限取消订阅，整个响应体仍受超时约束。配置缺键继续使用默认值，但显式错误类型、越界和非有限坐标会拒绝初始化。`safety.pending-login-limit`、`io-workers`、`io-queue-capacity` 默认分别为 4096、4、256；满载或关闭时拒绝新任务，不将阻塞认证工作转移到代理事件线程。`verification.poll-interval-seconds` 是最小轮询间隔，绝不会压低微软返回的 interval 或 Retry-After。JDBC 只准备选中的数据库驱动；关闭按任务、连接池、自有驱动 loader 的顺序回收。
 
-默认关闭；在插件 `config.yml` 开启并重启代理：
+### 认证前禁用命令
+
+在插件 `config.yml` 的 `verification.blocked-commands` 添加命令根（不带参数），重启代理生效。默认仅禁用 `server`；例如同时限制玩家列表和私聊：
 
 ```yaml
 verification:
-  auto-rename: true
+  blocked-commands:
+    - server
+    - glist
+    - msg
+```
+
+限制只作用于当前未认证的玩家：执行会被拒绝，命令树与补全隐藏，认证后随正常后端命令树恢复。控制台不受此列表限制，其他插件已拒绝的操作不会被重新允许。大小写、前导 `/` 和命名空间统一处理；独立别名也应列入配置。`[]` 关闭此列表，`["*"]` 禁用认证前所有命令；无论列表如何配置，未认证切服隔离都不能关闭。`/ka reload` 只重载消息，不重载该列表。
+
+### 微软身份自动改名
+
+**默认开启**，新生成配置及缺失键均采用 `true`；升级不会覆盖管理员显式设置的 `false`。需要关闭时配置并重启代理：
+
+```yaml
+verification:
+  auto-rename: false
 ```
 
 用新离线名字完成同一微软账号的验证后，原绑定会原子迁移到新名字并释放旧名字，XUID/UUID 不变。新名字若属于正版账号、已被其它身份占用或无法确认归属，则拒绝迁移。旧在线连接会被要求使用新名字重连；新名字首次使用临时 UUID 时也需重连一次，随后按原有会话设置进服，不再循环绑定。基于名字而非 UUID 存数据的第三方插件，不在本功能迁移范围内。
@@ -113,7 +131,9 @@ verification:
 ./gradlew build
 ```
 
-产物分别在 `platform-velocity/build/libs/` 与 `platform-bungee/build/libs/`。每个平台包含全部11个协议；当前验收产物 Velocity **9,637,242B（9.19MiB）**、Bungee **9,648,765B（9.20MiB）**，不外置下载协议依赖，也不打包 Mojang 游戏 JAR。模块：
+普通测试仅使用本地受控服务，不申请真实设备码或查询真实 Mojang 档案。确需联网验收时显式运行 `./gradlew -Dkyokou.test.live=true :core:test --tests '*DeviceCodeFlowLiveTest'`；它仍不能替代真实账号完成授权的验收。外部数据库测试需要独立测试库（会清空插件测试表），配置方式见 [ServerDialectTest](core/src/test/kotlin/moe/ryuu/kyokouauth/core/storage/ServerDialectTest.kt)。本轮在全新 loopback 隔离实例验证了 MySQL 8.4.4 与 MariaDB 11.4.4（各两项通过），实例已停止；PostgreSQL 未配置，未声称实测通过。
+
+产物分别在 `platform-velocity/build/libs/` 与 `platform-bungee/build/libs/`。每个平台包含全部11个协议；当前产物 Velocity **9,669,376B（9.22MiB）**、Bungee **9,717,087B（9.27MiB）**，不外置下载协议依赖，也不打包 Mojang 游戏 JAR。模块：
 
 | 模块 | 内容 |
 |---|---|

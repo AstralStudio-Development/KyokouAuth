@@ -72,14 +72,35 @@ class BungeeTicketsTest {
         assertFails { h.redeem(token) }
     }
 
-    @Test fun `closed frontend and replaced registered endpoint invalidate live credential`() {
+    @Test fun `closed frontend and public same-name collision invalidate live private credential`() {
         for (close in listOf(true, false)) {
             val h = Harness()
             h.tickets.prepare(h.player, h.engine)
             val token = h.token()
-            if (close) h.fixture.connected = false else h.native.registered.remove(h.engine.name)
+            if (close) h.fixture.connected = false else {
+                val name = h.engine.name
+                h.native.registered[name] = h.native.constructServerInfo(name, InetSocketAddress("127.0.0.1", 9), "public conflict", false)
+            }
             assertFails { h.redeem(token) }
         }
+    }
+
+    @Test fun `unregister and same-name re-registration cannot revive an issued private ticket`() {
+        val h = Harness()
+        val oldEngine = h.engine
+        val oldNative = assertNotNull(h.platform.nativeServer(oldEngine))
+        h.tickets.prepare(h.player, oldEngine)
+        val token = h.token()
+
+        h.platform.unregisterEngines()
+        assertTrue(h.platform.getServer(oldEngine.name).isEmpty)
+        assertNull(h.platform.nativeServer(oldEngine))
+        assertNull(h.platform.commonServer(oldNative))
+        h.platform.registerEngine(777, InetSocketAddress("127.0.0.1", 29777))
+        assertNotSame(oldEngine, h.engine)
+        assertNotSame(oldNative, h.platform.nativeServer(h.engine))
+        assertFails { h.redeem(token) }
+        assertFails { h.redeem(token) }
     }
 
     @Test fun `old connection revocation cannot revoke a same identity replacement`() {

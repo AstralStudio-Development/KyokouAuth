@@ -31,5 +31,5 @@ tasks.shadowJar {
     dependencies { exclude(dependency("org.jetbrains.kotlin:.*:.*")) }
     exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA", "META-INF/versions/**/module-info.class", "module-info.class")
 }
-val isolated by configurations.creating { isCanBeConsumed = true; isCanBeResolved = false }
+val isolated = configurations.create("isolated") { isCanBeConsumed = true; isCanBeResolved = false }
 artifacts { add(isolated.name, tasks.shadowJar) }

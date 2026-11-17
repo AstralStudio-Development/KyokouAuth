@@ -5,6 +5,11 @@ import moe.ryuu.kyokouauth.core.storage.BoundIdentity
 import moe.ryuu.kyokouauth.core.storage.ClaimResult
 import moe.ryuu.kyokouauth.core.text.MessageCatalogue
 import moe.ryuu.kyokouauth.core.text.RichText
+import java.util.Locale
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * The operator's view of the plugin: what is bound, who is trusted, and how to take it away.
@@ -47,7 +52,7 @@ class KyokouAuthCommand(
             return
         }
 
-        when (args[0].lowercase()) {
+        when (args[0].lowercase(Locale.ROOT)) {
             "whois" -> whois(source, args)
             "session" -> session(source, args)
             "verify" -> verify(source, args)
@@ -69,7 +74,7 @@ class KyokouAuthCommand(
 
         // Only `/kyokouauth verify` names a player; the rest take a name that is not in the proxy's
         // player list by definition (an offline player's binding).
-        return when (args[0].lowercase()) {
+        return when (args[0].lowercase(Locale.ROOT)) {
             "verify" -> server.allPlayers.map { it.username }.filter { it.startsWith(typed, ignoreCase = true) }
             else -> emptyList()
         }
@@ -117,10 +122,10 @@ class KyokouAuthCommand(
             return
         }
 
-        auth.submit { auth.identities.byName(name) }.thenAccept { record ->
+        auth.submit { auth.identities.byName(name) }.answer(source) { record ->
             if (record == null) {
                 tell(source, "command.unknown-name", "name" to name.value)
-                return@thenAccept
+                return@answer
             }
 
             tell(
@@ -148,15 +153,15 @@ class KyokouAuthCommand(
         auth.submit {
             val record = auth.identities.byName(name)
             record to record?.let { auth.sessions.find(it.uuid) }
-        }.thenAccept { (record, session) ->
+        }.answer(source) { (record, session) ->
             if (record == null) {
                 tell(source, "command.unknown-name", "name" to name.value)
-                return@thenAccept
+                return@answer
             }
 
             if (session == null) {
                 tell(source, "command.session-none", "name" to record.name.value)
-                return@thenAccept
+                return@answer
             }
 
             val remainingMinutes = ((session.expiresAt - System.currentTimeMillis()) / 60_000L).coerceAtLeast(0)
@@ -180,7 +185,7 @@ class KyokouAuthCommand(
 
         // Asks Microsoft for a fresh code, so the answer comes from the IO pool like every other
         // network call here.
-        auth.submit { gate.restartVerification(target) }.thenAccept { restarted ->
+        auth.submit { gate.restartVerification(target) }.answer(source) { restarted ->
             if (restarted) {
                 tell(source, "command.verify-resent", "name" to target.username)
             } else {
@@ -201,7 +206,7 @@ class KyokouAuthCommand(
             auth.auth.revokeSession(record.uuid)
             auth.identities.unbind(record.uuid)
             record
-        }.thenAccept { record ->
+        }.answer(source) { record ->
             if (record == null) {
                 tell(source, "command.unknown-name", "name" to name.value)
             } else {
@@ -221,7 +226,7 @@ class KyokouAuthCommand(
             val record = auth.identities.byName(name) ?: return@submit null
             auth.auth.revokeSession(record.uuid)
             record
-        }.thenAccept { record ->
+        }.answer(source) { record ->
             if (record == null) {
                 tell(source, "command.unknown-name", "name" to name.value)
             } else {
@@ -241,10 +246,10 @@ class KyokouAuthCommand(
         auth.submit {
             val record = auth.identities.byName(from) ?: return@submit null
             record to auth.identities.rename(record.uuid, to, System.currentTimeMillis())
-        }.thenAccept { result ->
+        }.answer(source) { result ->
             if (result == null) {
                 tell(source, "command.unknown-name", "name" to from.value)
-                return@thenAccept
+                return@answer
             }
 
             val (record, outcome) = result
@@ -267,6 +272,21 @@ class KyokouAuthCommand(
                 )
 
                 else -> tell(source, "command.internal-error")
+            }
+        }
+    }
+
+    private fun <T> CompletableFuture<T>.answer(source: CommandSource, action: (T) -> Unit) {
+        whenComplete { result, failure ->
+            if (failure != null) {
+                var cause = failure
+                while ((cause is CompletionException || cause is ExecutionException) && cause.cause != null) cause = cause.cause!!
+                tell(source, if (cause is RejectedExecutionException) "command.busy" else "command.internal-error")
+            } else {
+                try { action(result) } catch (unexpected: Exception) {
+                    auth.reportFailure(unexpected)
+                    tell(source, "command.internal-error")
+                }
             }
         }
     }

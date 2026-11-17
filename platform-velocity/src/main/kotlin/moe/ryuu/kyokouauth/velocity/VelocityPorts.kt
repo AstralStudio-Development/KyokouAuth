@@ -5,12 +5,15 @@ import com.velocitypowered.api.proxy.Player
 import com.velocitypowered.api.proxy.ProxyServer
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder
 import com.velocitypowered.api.proxy.server.RegisteredServer
+import com.velocitypowered.api.proxy.server.ServerInfo
+import java.net.InetSocketAddress
 import moe.ryuu.kyokouauth.core.text.RichText
 import moe.ryuu.kyokouauth.proxy.ProxyLog
 import moe.ryuu.kyokouauth.proxy.CommandSource
 import net.kyori.adventure.text.Component
 import org.slf4j.Logger
 import java.util.Locale
+import java.util.Optional
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import moe.ryuu.kyokouauth.proxy.Player as PortPlayer
@@ -22,7 +25,23 @@ import moe.ryuu.kyokouauth.proxy.ConnectionRequestBuilder as PortRequest
 internal class VelocityPorts(private val proxy: ProxyServer) : moe.ryuu.kyokouauth.proxy.ProxyServer {
     private data class ServerBinding(val native: RegisteredServer, val port: PortServer)
     private val servers = ConcurrentHashMap<String, ServerBinding>()
+    private val engines = ConcurrentHashMap<String, ServerBinding>()
+    private val privateNames = ConcurrentHashMap.newKeySet<String>()
     private val players = ConcurrentHashMap<UUID, VelocityPlayer>()
+
+    /** Raw targets are usable by connection requests, but absent from native /server and discovery. */
+    fun registerEngine(protocol: Int, address: InetSocketAddress): PortServer {
+        require(protocol in 767..777)
+        val name = "${LoginGate.LIMBO_SERVER_NAME}-$protocol"
+        privateNames += name
+        check(proxy.getServer(name).isEmpty && !engines.containsKey(name)) { "Reserved internal server '$name' is already in use" }
+        val native = proxy.createRawRegisteredServer(ServerInfo(name, address))
+        val binding = ServerBinding(native, PortServer(name))
+        check(engines.putIfAbsent(name, binding) == null) { "Internal endpoint was already created" }
+        return binding.port
+    }
+
+    fun unregisterEngines() { engines.clear() }
 
     fun player(native: Player): PortPlayer = players.compute(native.sessionId) { _, previous ->
         previous?.takeIf { it.native === native } ?: VelocityPlayer(native)
@@ -47,14 +66,31 @@ internal class VelocityPorts(private val proxy: ProxyServer) : moe.ryuu.kyokouau
             override fun sendMessage(message: RichText.Parsed) { native.sendMessage(message.toAdventure()) }
         }
 
-    fun server(native: RegisteredServer): PortServer = servers.compute(native.serverInfo.name) { _, previous ->
-        previous?.takeIf { it.native === native } ?: ServerBinding(native, PortServer(native.serverInfo.name))
-    }!!.port
+    fun server(native: RegisteredServer): PortServer {
+        engines[native.serverInfo.name]?.takeIf { it.native === native }?.let { return it.port }
+        return servers.compute(native.serverInfo.name) { _, previous ->
+            previous?.takeIf { it.native === native } ?: ServerBinding(native, PortServer(native.serverInfo.name))
+        }!!.port
+    }
 
-    fun unwrap(port: PortServer): RegisteredServer = servers[port.name]?.takeIf { it.port === port }?.native
-        ?: error("Unknown or stale proxy server registration")
+    fun unwrap(port: PortServer): RegisteredServer {
+        if (port.name in privateNames) {
+            val binding = engines[port.name]
+            check(binding != null && binding.port === port && proxy.getServer(port.name).isEmpty) { "Unknown, replaced or stale private endpoint" }
+            return binding.native
+        }
+        return servers[port.name]?.takeIf { it.port === port }?.native
+            ?: error("Unknown or stale proxy server registration")
+    }
 
-    override fun getServer(name: String) = proxy.getServer(name).map { server(it) }
+    override fun getServer(name: String): Optional<PortServer> {
+        if (name in privateNames) {
+            // A retired endpoint cannot be revived by publishing its old object as a public server.
+            val binding = engines[name]
+            return if (binding != null && proxy.getServer(name).isEmpty) Optional.of(binding.port) else Optional.empty()
+        }
+        return proxy.getServer(name).map { server(it) }
+    }
     override fun getPlayer(name: String) = proxy.getPlayer(name).map { player(it) }
     override fun getPlayer(uuid: UUID) = proxy.getPlayer(uuid).map { player(it) }
     override val allPlayers get() = proxy.allPlayers.map { player(it) }

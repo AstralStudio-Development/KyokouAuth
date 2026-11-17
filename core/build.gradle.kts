@@ -27,6 +27,8 @@ tasks.jar {
 }
 
 tasks.test {
+    // Live identity endpoints are never contacted by ordinary builds.
+    systemProperty("kyokou.test.live", providers.systemProperty("kyokou.test.live").getOrElse("false"))
     // Forward DB integration settings to the forked test JVM. Without this, `-Dkyokou.test.*` set on
     // the Gradle command line would be invisible to the tests.
     listOf("postgresql", "mysql", "mariadb", "user", "password").forEach { name ->

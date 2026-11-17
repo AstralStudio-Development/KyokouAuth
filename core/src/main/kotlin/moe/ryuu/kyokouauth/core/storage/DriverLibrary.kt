@@ -1,9 +1,24 @@
 package moe.ryuu.kyokouauth.core.storage
 
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.net.URLClassLoader
+import java.nio.file.FileAlreadyExistsException
+import java.nio.file.Files
+import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import java.util.jar.JarFile
+import java.util.zip.CRC32
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 /**
  * Where the JDBC driver for a dialect comes from, and why it is not in the jar.
@@ -38,140 +53,259 @@ object DriverCatalog {
         Dialect.POSTGRESQL -> Coordinates("org.postgresql", "postgresql", "42.7.4")
     }
 
-    val all: List<Coordinates> get() = Dialect.entries.map(::of)
 }
 
 /**
- * Puts the JDBC drivers in the server's own `libraries/` folder, the same Maven layout Paper uses.
- *
- * ## Why the server's folder and not the plugin's
- *
- * `libraries/` is where every other dependency on this server already lives. A driver sitting there
- * is findable by a human, survives the plugin being replaced, and does not turn the plugin data
- * folder into a cache.
- *
- * ## Why everything is fetched at startup
- *
- * Downloading on first *use* means an operator who switches `database.type` months later waits for a
- * download in the middle of a restart, with no warning. Fetching all five once at startup costs the
- * same total bandwidth in the common case (only the ones missing are fetched) and never surprises
- * anyone later.
- *
- * A jar placed in `libraries/` by hand is indistinguishable from a downloaded one and is preferred:
- * nothing here overwrites an existing file, so an offline server only needs the jars.
+ * Prepares only the selected backend in the server's Maven-layout `libraries/` folder.
+ * Platform drivers and manually installed jars take priority; existing files are never replaced.
+ * The owner must close its database pool before closing this library's own jar loaders.
  */
 class DriverLibrary(
     private val librariesFolder: File,
     private val repository: String,
     private val allowDownload: Boolean,
     private val notice: (String) -> Unit,
-) {
-
-    private val loaders = ConcurrentHashMap<String, ClassLoader>()
+) : AutoCloseable {
+    private val lifecycle = ReentrantReadWriteLock(true)
+    private val loaders = ConcurrentHashMap<Dialect, URLClassLoader>()
+    private var closed = false
 
     class DriverUnavailable(message: String) : Exception(message)
 
-    /**
-     * Makes sure every driver is present, downloading the missing ones.
-     *
-     * Failures are reported but do not throw: a server using SQLite should still start if the
-     * PostgreSQL mirror is unreachable. The error resurfaces if that backend is actually selected.
-     */
-    fun prefetch() {
-        if (!allowDownload) return
+    /** Fail startup immediately when the selected driver cannot be prepared. */
+    fun prepare(dialect: Dialect) {
+        classLoader(dialect)
+    }
 
-        Dialect.entries.forEach { dialect ->
+    /** Null means the platform already provides the driver; that loader is never owned here. */
+    fun classLoader(dialect: Dialect): ClassLoader? = lifecycle.read {
+        check(!closed) { "DriverLibrary is closed" }
+        synchronized(coordinateLocks.getValue(dialect)) {
+            val driverName = Database.driverClass(dialect)
+            try {
+                Class.forName(driverName, false, DriverLibrary::class.java.classLoader)
+                return@read null
+            } catch (_: ClassNotFoundException) {
+                // Only an absent driver justifies downloading one; linkage failures must surface.
+            }
+            loaders[dialect]?.let { return@read it }
+
             val coordinates = DriverCatalog.of(dialect)
-            val target = file(coordinates)
-
-            // Already usable without our help: Paper bundles sqlite and MySQL drivers in its own
-            // libraries folder, and other plugins may shade one. Downloading a second copy would be
-            // 15 MB spent on a jar nothing loads.
-            if (runCatching { Class.forName(Database.driverClass(dialect)) }.isSuccess) {
-                notice("${dialect.displayName} 驱动已由服务端提供，跳过下载")
-                return@forEach
+            val jar = File(librariesFolder, coordinates.repositoryPath).toPath()
+            if (!Files.exists(jar)) {
+                if (!allowDownload) {
+                    throw DriverUnavailable(
+                        "The ${dialect.displayName} driver is missing from $jar and automatic " +
+                            "download is disabled. Place ${jar.fileName} there.",
+                    )
+                }
+                download(dialect, coordinates, jar)
             }
-            if (target.isFile) return@forEach
-
-            runCatching { download(coordinates, target) }
-                .onFailure { notice(it.message ?: "could not fetch $coordinates") }
+            validateJar(jar, driverName)
+            URLClassLoader(arrayOf(jar.toUri().toURL()), DriverLibrary::class.java.classLoader).also {
+                loaders[dialect] = it
+            }
         }
     }
 
-    /**
-     * @return a classloader that sees the driver, or null when it is already on the plugin's own
-     *   classpath - the usual case when Paper's `plugin.yml` `libraries` or the server bundle
-     *   already provides it.
-     */
-    fun classLoader(dialect: Dialect): ClassLoader? {
-        val driverName = Database.driverClass(dialect)
-
-        // Already visible? Paper bundles some drivers and any plugin may have shaded one.
-        if (runCatching { Class.forName(driverName) }.isSuccess) return null
-
-        val coordinates = DriverCatalog.of(dialect)
-        loaders[coordinates.repositoryPath]?.let { return it }
-
-        val jar = file(coordinates)
-        if (!jar.isFile) {
-            if (!allowDownload) {
-                throw DriverUnavailable(
-                    "The ${dialect.displayName} driver is missing from ${jar.absolutePath} and automatic " +
-                        "download is disabled. Place ${jar.name} there.",
-                )
+    override fun close() = lifecycle.write {
+        if (closed) return@write
+        closed = true
+        var failure: Throwable? = null
+        loaders.values.forEach { loader ->
+            try {
+                loader.close()
+            } catch (cleanup: Throwable) {
+                if (failure == null) failure = cleanup else if (cleanup !== failure) failure.addSuppressed(cleanup)
             }
-            download(coordinates, jar)
         }
-
-        val loader = URLClassLoader(arrayOf(jar.toURI().toURL()), DriverLibrary::class.java.classLoader)
-        loaders[coordinates.repositoryPath] = loader
-        return loader
+        loaders.clear()
+        failure?.let { throw it }
+        Unit
     }
 
-    private fun file(coordinates: DriverCatalog.Coordinates): File =
-        File(librariesFolder, coordinates.repositoryPath)
-
-    private fun download(coordinates: DriverCatalog.Coordinates, target: File) {
-        val url = repository.trimEnd('/') + "/" + coordinates.repositoryPath
-        notice("下载 $coordinates <- $url")
-
-        target.parentFile.mkdirs()
-
-        // Written to a temporary name first: a half-written jar left behind by a crash would be
-        // picked up as "already downloaded" on the next start and fail in a way nobody can diagnose.
-        val temporary = File(target.parentFile, target.name + ".part")
+    private fun download(dialect: Dialect, coordinates: DriverCatalog.Coordinates, target: Path) {
+        // Do not log repository URLs or transport exception messages: either can contain credentials.
+        notice("下载 $coordinates")
+        val deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(2)
+        var temporary: Path? = null
+        var primary: Throwable? = null
         try {
-            val connection = URL(url).openConnection()
-            connection.connectTimeout = 15_000
-            connection.readTimeout = 120_000
-            connection.getInputStream().use { input ->
-                temporary.outputStream().use { output -> input.copyTo(output) }
+            Files.createDirectories(target.parent)
+            temporary = Files.createTempFile(target.parent, "${target.fileName}.", ".part")
+            val connection = connection(repositoryUrl(coordinates.repositoryPath), deadline)
+            try {
+                requireSuccess(connection)
+                if (connection.contentLengthLong > MAX_DOWNLOAD_BYTES) {
+                    throw DriverUnavailable("Driver download exceeds the $MAX_DOWNLOAD_BYTES byte limit for $coordinates")
+                }
+                connection.inputStream.use { input ->
+                    Files.newOutputStream(temporary).use { output ->
+                        copyBounded(input, output, MAX_DOWNLOAD_BYTES, deadline)
+                    }
+                }
+            } finally {
+                connection.disconnect()
             }
+            validateJar(temporary, Database.driverClass(dialect), deadline)
+            verifyChecksum(coordinates, temporary, deadline)
+            checkDeadline(deadline)
 
-            // Some mirrors answer 200 with an HTML error page, so the result is checked rather than
-            // trusted.
-            if (temporary.length() < 1024 || !looksLikeJar(temporary)) {
-                throw DriverUnavailable("$url did not return a jar (a mirror serving HTML?)")
+            try {
+                // ATOMIC_MOVE may overwrite an existing target on some providers, even without
+                // REPLACE_EXISTING. A same-directory hard link atomically publishes complete bytes
+                // and fails if an operator installed a jar meanwhile. Never fall back to copying.
+                Files.createLink(target, temporary)
+            } catch (_: FileAlreadyExistsException) {
+                validateJar(target, Database.driverClass(dialect), deadline)
             }
-            if (!temporary.renameTo(target)) {
-                temporary.copyTo(target, overwrite = true)
-                temporary.delete()
+        } catch (failure: Throwable) {
+            val safe = if (failure is Exception && failure !is DriverUnavailable) {
+                DriverUnavailable(
+                    "无法准备 $coordinates 驱动（${failure.javaClass.simpleName}）。" +
+                        "请将 ${target.fileName} 放到 ${target.parent}，或检查 database.driver-repository。",
+                )
+            } else failure
+            primary = safe
+            throw safe
+        } finally {
+            temporary?.let { part ->
+                try {
+                    Files.deleteIfExists(part)
+                } catch (cleanup: Exception) {
+                    if (primary != null) primary.addSuppressed(cleanup)
+                    else throw DriverUnavailable("Cannot remove temporary driver file ${part.fileName}")
+                }
+            }
+        }
+    }
+
+    private fun repositoryUrl(path: String): URL {
+        val base = URI(repository)
+        require(base.scheme.equals("https", true) || base.scheme.equals("http", true)) {
+            "Driver repository must use HTTP or HTTPS"
+        }
+        return URI(base.scheme, base.userInfo, base.host, base.port, base.path.orEmpty().trimEnd('/') + "/" + path, base.query, null).toURL()
+    }
+
+    private fun connection(url: URL, deadline: Long): HttpURLConnection {
+        checkDeadline(deadline)
+        val remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()).coerceIn(1L, SOCKET_TIMEOUT_MS.toLong()).toInt()
+        return (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = remaining
+            readTimeout = remaining
+        }
+    }
+
+    private fun requireSuccess(connection: HttpURLConnection) {
+        val status = connection.responseCode
+        if (status !in 200..299) throw DriverUnavailable("Driver repository returned HTTP $status")
+    }
+
+    /** Mirror sidecars provide integrity, not a substitute for HTTPS or a trusted repository. */
+    private fun verifyChecksum(coordinates: DriverCatalog.Coordinates, jar: Path, deadline: Long) {
+        for ((algorithm, extension, length) in CHECKSUMS) {
+            val connection = connection(repositoryUrl(coordinates.repositoryPath + extension), deadline)
+            val checksum = try {
+                if (connection.responseCode in setOf(404, 410)) continue
+                requireSuccess(connection)
+                val output = ByteArrayOutputStream()
+                connection.inputStream.use { copyBounded(it, output, 512, deadline) }
+                output.toString(Charsets.US_ASCII).trim().takeWhile { !it.isWhitespace() }
+            } finally {
+                connection.disconnect()
+            }
+            if (checksum.length != length || checksum.any { it.digitToIntOrNull(16) == null }) {
+                throw DriverUnavailable("Invalid $algorithm checksum for $coordinates")
+            }
+            val digest = MessageDigest.getInstance(algorithm)
+            Files.newInputStream(jar).use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    checkDeadline(deadline)
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            val actual = digest.digest().joinToString("") { "%02x".format(it) }
+            if (!actual.equals(checksum, true)) throw DriverUnavailable("$algorithm checksum mismatch for $coordinates")
+            return
+        }
+        // Some legitimate Maven mirrors do not publish SHA-256/SHA-512 sidecars. Do not pin an
+        // invented hash or require weaker SHA-1; structure and driver-class validation still apply.
+    }
+
+    private fun validateJar(path: Path, driverName: String, deadline: Long = Long.MAX_VALUE) {
+        try {
+            JarFile(path.toFile(), true).use { jar ->
+                val driver = jar.getJarEntry(driverName.replace('.', '/') + ".class")
+                    ?: throw DriverUnavailable("Driver jar ${path.fileName} does not contain $driverName")
+                if (driver.isDirectory || !jar.getInputStream(driver).use { it.readNBytes(4) }.contentEquals(CLASS_MAGIC)) {
+                    throw DriverUnavailable("Driver jar ${path.fileName} contains an invalid driver class")
+                }
+                val names = HashSet<String>()
+                val entries = jar.entries()
+                val buffer = ByteArray(8192)
+                var expanded = 0L
+                while (entries.hasMoreElements()) {
+                    checkDeadline(deadline)
+                    val entry = entries.nextElement()
+                    if (!names.add(entry.name) || names.size > 50_000) {
+                        throw DriverUnavailable("Driver jar ${path.fileName} has invalid or excessive entries")
+                    }
+                    if (entry.isDirectory) continue
+                    val crc = CRC32()
+                    jar.getInputStream(entry).use { input ->
+                        while (true) {
+                            checkDeadline(deadline)
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            expanded += count
+                            if (expanded > MAX_EXPANDED_BYTES) throw DriverUnavailable("Driver jar exceeds the expanded byte limit")
+                            crc.update(buffer, 0, count)
+                        }
+                    }
+                    if (crc.value != entry.crc) throw DriverUnavailable("Driver jar ${path.fileName} has an invalid CRC")
+                }
             }
         } catch (failure: Exception) {
-            temporary.delete()
-            throw DriverUnavailable(
-                "无法从 $url 下载 ${coordinates.artifact} 驱动（${failure.message}）。" +
-                    "请把 ${target.name} 放到 ${librariesFolder.absolutePath}，" +
-                    "或把 database.driver-repository 换成可访问的镜像。",
-            )
+            if (failure is DriverUnavailable) throw failure
+            throw DriverUnavailable("Invalid driver jar ${path.fileName} (${failure.javaClass.simpleName})")
         }
     }
 
-    /** A jar is a zip; the first two bytes decide it cheaply. */
-    private fun looksLikeJar(file: File): Boolean = runCatching {
-        file.inputStream().use { stream ->
-            val header = ByteArray(2)
-            stream.read(header) == 2 && header[0] == 'P'.code.toByte() && header[1] == 'K'.code.toByte()
+    private fun copyBounded(input: InputStream, output: OutputStream, limit: Long, deadline: Long) {
+        val buffer = ByteArray(8192)
+        var total = 0L
+        while (true) {
+            checkDeadline(deadline)
+            val count = input.read(buffer)
+            if (count < 0) break
+            total += count
+            if (total > limit) throw DriverUnavailable("Driver download exceeds the $limit byte limit")
+            output.write(buffer, 0, count)
         }
-    }.getOrDefault(false)
+        checkDeadline(deadline)
+    }
+
+    private fun checkDeadline(deadline: Long) {
+        if (Thread.currentThread().isInterrupted) throw DriverUnavailable("Driver preparation was interrupted")
+        if (deadline != Long.MAX_VALUE && System.nanoTime() - deadline >= 0) {
+            throw DriverUnavailable("Driver preparation exceeded its two minute deadline")
+        }
+    }
+
+    companion object {
+        // The catalog has one pinned coordinate per dialect; share five locks across library
+        // instances without retaining an unbounded set of server-directory paths.
+        private val coordinateLocks = Dialect.entries.associateWith { Any() }
+
+        // sqlite-jdbc is roughly 13 MiB; leave room without accepting unbounded mirror responses.
+        private const val MAX_DOWNLOAD_BYTES = 32L * 1024L * 1024L
+        private const val MAX_EXPANDED_BYTES = 128L * 1024L * 1024L
+        private const val SOCKET_TIMEOUT_MS = 15_000
+        private val CLASS_MAGIC = byteArrayOf(0xCA.toByte(), 0xFE.toByte(), 0xBA.toByte(), 0xBE.toByte())
+        private val CHECKSUMS = listOf(Triple("SHA-256", ".sha256", 64), Triple("SHA-512", ".sha512", 128))
+    }
 }

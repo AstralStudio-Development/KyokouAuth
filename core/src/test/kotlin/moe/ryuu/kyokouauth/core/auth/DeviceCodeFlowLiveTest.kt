@@ -3,6 +3,7 @@ package moe.ryuu.kyokouauth.core.auth
 import moe.ryuu.kyokouauth.core.http.Http
 import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty
 import java.net.ConnectException
 import java.net.UnknownHostException
 import kotlin.test.assertEquals
@@ -17,8 +18,9 @@ import kotlin.test.assertTrue
  * asks for a code and never completes it - so a wrong request shape fails here rather than on a
  * player's first join.
  *
- * Skipped (not failed) when the machine has no network, so the suite stays usable offline.
+ * Explicit opt-in only: -Dkyokou.test.live=true. Ordinary builds never request real codes or profiles.
  */
+@EnabledIfSystemProperty(named = "kyokou.test.live", matches = "true")
 class DeviceCodeFlowLiveTest {
 
     /**
@@ -46,7 +48,7 @@ class DeviceCodeFlowLiveTest {
         assertTrue(challenge.deviceCode.isNotBlank(), "device code was empty")
         assertTrue(
             challenge.verificationUriComplete.contains(challenge.userCode),
-            "the clickable URL must carry the code, got ${challenge.verificationUriComplete}",
+            "the clickable URL must carry the code (value intentionally not logged)",
         )
         assertTrue(challenge.expiresInSeconds in 60..3600, "unexpected lifetime ${challenge.expiresInSeconds}")
         assertTrue(challenge.intervalSeconds in 1..60, "unexpected poll interval ${challenge.intervalSeconds}")

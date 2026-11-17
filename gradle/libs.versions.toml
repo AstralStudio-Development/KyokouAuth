@@ -10,7 +10,6 @@ mysql = "8.4.0"
 mariadb = "3.3.3"
 postgresql = "42.7.4"
 junit = "5.11.4"
-mcprotocollib = "26.3-4"
 
 [libraries]
 kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
@@ -33,6 +32,3 @@ jdbc-postgresql = { module = "org.postgresql:postgresql", version.ref = "postgre
 
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
 junit-launcher = { module = "org.junit.platform:junit-platform-launcher" }
-
-# Bundled in Limbo's isolated artifact, never on the proxy's unrelocated classpath.
-mcprotocollib = { module = "org.geysermc.mcprotocollib:protocol", version.ref = "mcprotocollib" }

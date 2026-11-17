@@ -36,7 +36,9 @@ limbo:
   command-blocked: "<#FACC15>You cannot leave until verification finishes</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Click the link in chat"
 
 verification:
+  command-blocked: "<#FACC15>Complete verification before using this command</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>Click the link in chat"
   starting: "<#22D3EE>Contacting Microsoft for a sign-in code</#22D3EE><newline><#D4D4D8>Temporary network failures are retried automatically; please wait"
+  confirming: "<#22D3EE>Microsoft authorization received; confirming your Xbox identity..."
   start-unavailable: "<#FACC15>Microsoft sign-in is temporarily unreachable</#FACC15><newline><#D4D4D8>Limited automatic retries were exhausted; please try later"
   start-busy: "<#FACC15>Microsoft sign-in is rate limited</#FACC15><newline><#D4D4D8>Wait before trying again; avoid repeated reconnects"
   prompt: "<#22D3EE>Microsoft verification<newline><click:open_url:'<url>'><#FFFFFF><u><url></u></#FFFFFF></click><newline><#D4D4D8>Or enter <#FFFFFF><code></#FFFFFF> at microsoft.com/link<newline><#8B8B94>Valid for <minutes> minutes"
@@ -51,6 +53,7 @@ verification:
   reconnect: "<#4ADE80>Verified</#4ADE80> <#8B8B94>»</#8B8B94> <#D4D4D8>Reconnect"
 
 command:
+  busy: "<#FACC15>Authentication workers are busy or shutting down; try again later"
   no-permission: "<#F87171>No permission"
   unknown-subcommand: "<#F87171>Unknown subcommand <#FFFFFF><name></#FFFFFF></#F87171><newline><#D4D4D8>Run /kyokouauth for the full list"
   usage-header: "<#8B8B94>[</#8B8B94><#22D3EE>KyokouAuth</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8>commands"

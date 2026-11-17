@@ -7,8 +7,12 @@
 - `core` 保留认证/身份与存储规则；`proxy-common` 共享连接级访问控制、微软验证会话、限流、配置/消息及管理命令。Velocity 与 Bungee 只适配各自事件、profile、组件和后端连接。
 - Limbo 按协议 767～777 支持 1.21～26.3 正式版；固定 MCProtocolLib 的协议实现独立重定位，普通依赖共享，文本只分三族，Netty 4.2 由平台代理提供。稀疏 Codec/ID/原厂 factory 在构建期生成；仅对 Limbo 图删除未用成员，不携带完整 SDK 或运行时下载协议库。`limbo-api` 公共模型不携带库类型；完整平台 JAR 的构建硬上限为20MiB，目标10MiB。
 - Limbo 子模块物理目录均在 `limbo/` 下：`api`、`runtime`、`text/{legacy,json,nbt}`、`protocols/{767..777}`；共享源码仍为 `engine-src`。Gradle逻辑project ID不变，生成路径取项目layout，裁剪协议取生成manifest而非目录名。
-- Velocity 身份使用 modern HMAC 转发；Bungee 使用进程内 authority 原子兑换的短时一次性票据，绑定 exact 连接、身份与目标协议。未认证连接的任何失败/fallback/切服都不能进入真实后端。
-- 验证标题仅在 challenge ready 后显示一次，结束/重启时清理；点击链接仍为完整富文本。后端实际协议兼容与尚未发布的未来版本不在自动兼容承诺内。
+- Velocity 身份使用 modern HMAC 转发；Bungee 使用进程内 authority 原子兑换的短时一次性票据，绑定 exact 连接、身份与目标协议。Limbo 仅由 adapter 私有映射持有（Velocity raw target / Bungee 未公开 ServerInfo），不进入原生服务器列表、补全或公开发现；同名对象不能冒充或替换私有目标。未认证连接的任何失败/fallback/切服都不能进入真实后端。
+- 验证标题仅在 challenge ready 后显示一次，结束/重启时清理；点击链接仍为完整富文本。令牌到达后提示正在确认 Xbox 身份；轮询仍保留完整响应后的上游间隔，只扣除其后的本地处理，slow_down 精确每次加5秒而非额外指数等待，429/503 Retry-After 不能压低。阶段计时只含数字与阶段名，不带身份、验证码、令牌或URL。后端实际协议兼容与尚未发布的未来版本不在自动兼容承诺内。
+- `verification.blocked-commands` 默认 `[server]`，按当前 exact 连接认证状态限制命令执行与客户端命令树/补全；支持自定义根、大小写/斜线/命名空间归一、`[]` 与 `*`，不影响控制台或放松切服隔离。认证后使用正常的新后端命令树恢复，不缓存跨连接授权。`verification.auto-rename` 默认 true，管理员显式 false 保留。
+- 已删除零调用的旧 LoginRegistry/MojangSession/Skin、Velocity 类型别名和九个一次性旧探针；当前 Mojang proof、textures 转发与可维护 e2e/oracle 入口保留。VerificationSession 只管理单次设备码尝试，exact 连接授权仍唯一归 LoginGate。
+- 认证 IO 队列有界（默认4 workers/256 queued），pending 默认上限4096；拒绝、异常、取消与关闭不可伪装成成功null，也不在代理事件线程执行阻塞工作。HTTP按原始字节限1MiB、完整body受超时，错误不带敏感正文；显式非法配置拒绝启动。仅准备所选JDBC驱动，任务→池→自有loader按序回收。
+- 协议热路径按固定签名缓存构造器、方法、enum及数组类型，启动时校验；预热后不再解析。微基准用于验证减少查找/分配，不等同正式服吞吐承诺。真实认证接口测试须显式 -Dkyokou.test.live=true，普通构建不申请设备码。
 
 ## Language
 

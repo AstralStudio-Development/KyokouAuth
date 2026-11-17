@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--jar", type=Path, default=ROOT / "platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar")
     parser.add_argument("--proxy", type=Path, default=ROOT / "run-proxy/velocity.jar")
     parser.add_argument("--jdk", type=Path, default=Path("C:/Program Files/Zulu/zulu-25"))
-    parser.add_argument("--scenario", choices=["held", "server", "tcp-refused", "login-kick", "join-timeout", "production", "unavailable"], default="held")
+    parser.add_argument("--scenario", choices=["held", "server", "commands", "tcp-refused", "login-kick", "join-timeout", "production", "unavailable"], default="held")
     parser.add_argument("--version", default="26.3")
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
@@ -87,7 +87,7 @@ def main():
     spec = importlib.util.spec_from_file_location("bungee_failure_fixture", ROOT / "tools/bungee-e2e.py")
     fixtures = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fixtures)
-    backend = fixtures.Recorder("kick")
+    backend = fixtures.Recorder("stall" if args.scenario == "commands" else "kick")
     engine = fixtures.Recorder("stall" if args.scenario == "join-timeout" else "kick") if args.scenario in {"login-kick", "join-timeout"} else None
     run = BASE / "runtime" / f"{args.scenario}-{args.version}"
     plugins = run / "plugins"
@@ -119,7 +119,7 @@ read-timeout = 10000
         data = plugins / "kyokouauth"
         data.mkdir(exist_ok=True)
         (data / "config.yml").write_text("database:\n  type: intentionally-invalid\n", encoding="utf-8")
-    command = [str(args.jdk / "bin/java.exe"), "-Xms128M", "-Xmx512M", "-XX:ActiveProcessorCount=2",
+    command = [str(args.jdk / "bin/java.exe"), "-Xms64M", "-Xmx128M", "-XX:ActiveProcessorCount=2",
                f"-Djava.io.tmpdir={run / 'tmp'}", "-Dhttps.proxyHost=127.0.0.1", "-Dhttps.proxyPort=7890",
                f"-Dkyokou.e2e.scenario={args.scenario}"]
     if args.scenario == "tcp-refused":
@@ -140,20 +140,31 @@ read-timeout = 10000
                     wait_for(process, console, "VELOCITY_E2E_STARTED")
                 client = [sys.executable, str(ROOT / "tools/limbo-e2e.py"), "--external-proxy", "--version", args.version,
                           "--port", str(port), "--jdk", str(args.jdk), "--name", "VelOracle", "--timeout", str(args.timeout)]
-                if args.scenario in {"tcp-refused", "login-kick", "join-timeout", "unavailable"}:
-                    client += ["--proxy-log", str(console), "--expect-rejection",
-                               "Authentication is unavailable" if args.scenario == "unavailable" else "Login failed"]
+                if args.scenario in {"tcp-refused", "login-kick", "join-timeout", "unavailable", "commands"}:
+                    expected = "COMMAND_GUARD_COMPLETE" if args.scenario == "commands" else (
+                        "Authentication is unavailable" if args.scenario == "unavailable" else "Login failed")
+                    client += ["--proxy-log", str(console), "--expect-rejection", expected]
                 else:
                     client += ["--observer", "--expect-verification", "--hold-seconds", "12", "--proxy-log", str(console),
                                "--ready-marker", "VELOCITY_E2E_READY {name}"]
                 subprocess.run(client, cwd=ROOT, check=True)
                 text = console.read_text(encoding="utf-8", errors="replace")
                 if args.scenario in {"held", "server"}:
+                    if "VELOCITY_E2E_PRIVATE_ENDPOINTS protocols=11 publicRegistry=false" not in text:
+                        raise AssertionError("Private endpoints leaked into native server discovery")
                     if text.count("VELOCITY_E2E_TITLE VelOracle") != 1:
                         raise AssertionError("The actual shared gate must send exactly one title")
-                    if args.scenario == "server" and "VELOCITY_E2E_TARGET_OBSERVED backend" not in text:
-                        raise AssertionError("Native /server did not reach the guarded backend-connect event")
-                if backend.events:
+                    if args.scenario == "server":
+                        if "VELOCITY_E2E_COMMANDS_HELD roots=hidden execute=blocked" not in text:
+                            raise AssertionError("Configured commands were not hidden and denied at the native dispatcher")
+                        if "VELOCITY_E2E_TARGET_OBSERVED backend" in text:
+                            raise AssertionError("Blocked /server executed before the backend-connect guard")
+                if args.scenario == "commands":
+                    for marker in ("VELOCITY_E2E_COMMANDS_HELD roots=hidden execute=blocked",
+                                   "VELOCITY_E2E_COMMANDS_AUTHENTICATED roots=restored execute=allowed"):
+                        if marker not in text:
+                            raise AssertionError("The same native frontend did not pass both command admission phases")
+                elif backend.events:
                     raise AssertionError("Unauthenticated frontend reached the real backend")
                 if engine is not None and len(engine.events) != 1:
                     raise AssertionError("Negative Engine fixture did not receive one login attempt")

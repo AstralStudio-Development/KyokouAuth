@@ -71,7 +71,7 @@ tasks.register("inspectShrinkerTool") {
     }
 }
 
-val shrinkLimbo by tasks.registering(Exec::class) {
+val shrinkLimbo = tasks.register<Exec>("shrinkLimbo") {
     dependsOn(tasks.shadowJar)
     inputs.file(tasks.shadowJar.flatMap { it.archiveFile })
     inputs.files(r8Tool, shrinkerLibraries)

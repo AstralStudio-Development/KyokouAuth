@@ -3,12 +3,14 @@ package moe.ryuu.kyokouauth.velocity
 import com.velocitypowered.api.command.SimpleCommand
 import com.velocitypowered.api.proxy.ProxyServer
 import moe.ryuu.kyokouauth.core.text.MessageCatalogue
+import moe.ryuu.kyokouauth.proxy.AuthService
+import moe.ryuu.kyokouauth.proxy.ProxyConfig
 import moe.ryuu.kyokouauth.proxy.KyokouAuthCommand as SharedCommand
 
 /** Native command wrapper; validation, IO and administrative semantics are shared. */
 class KyokouAuthCommand(
     server: ProxyServer,
-    config: VelocityConfig,
+    config: ProxyConfig,
     messages: MessageCatalogue,
     auth: AuthService,
     private val gate: LoginGate,

@@ -1,168 +1,146 @@
 package moe.ryuu.kyokouauth.proxy
 
 import moe.ryuu.kyokouauth.core.config.YamlDocument
-import moe.ryuu.kyokouauth.core.config.bool
-import moe.ryuu.kyokouauth.core.config.int
-import moe.ryuu.kyokouauth.core.config.long
-import moe.ryuu.kyokouauth.core.config.string
+import moe.ryuu.kyokouauth.core.http.Http
 import moe.ryuu.kyokouauth.core.storage.DatabaseDescriptor
 import moe.ryuu.kyokouauth.core.storage.Dialect
 import moe.ryuu.kyokouauth.limbo.LimboSettings
 import java.io.File
+import java.net.URI
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.Locale
 
-/**
- * Everything an operator can change, read once at startup.
- *
- * A missing key is a default rather than a crash: an upgrade that adds a setting must not leave the
- * plugin refusing to start until someone hand-edits a file. A missing *file* is written out from the
- * jar, so the first start produces something to edit.
- */
-class ProxyConfig(
-    private val values: Map<String, String>,
-    private val dataFolder: File,
-) {
-
+/** Missing keys retain defaults; explicitly malformed settings never silently disable protection. */
+class ProxyConfig(private val values: Map<String, String>, private val dataFolder: File) {
     val database: DatabaseDescriptor = run {
-        val type = values.string("database.type", "sqlite")
-        val dialect = Dialect.of(type)
-            ?: error("Unknown database type '$type'. Valid: ${Dialect.entries.joinToString()}")
-
-        DatabaseDescriptor(
-            dialect = dialect,
-            host = values.string("database.host", "127.0.0.1"),
-            port = values.int("database.port", 0).takeIf { it > 0 } ?: defaultPort(dialect),
-            database = resolvePath(dialect, values.string("database.database", "kyokouauth")),
-            username = values.string("database.username", ""),
-            password = values.string("database.password", ""),
-        )
-    }
-
-    val poolSize: Int = values.int("database.pool-size", 4)
-
-    /** Where a missing JDBC driver is fetched from. Also usable to point at a mirror. */
-    val driverRepository: String = values.string("database.driver-repository", "https://repo1.maven.org/maven2")
-
-    /** When false, a driver must already sit in [librariesFolder]. */
-    val autoDownloadDriver: Boolean = values.bool("database.auto-download-driver", true)
-
-    /**
-     * Where fetched drivers are kept.
-     *
-     * The plugin's own folder, not the proxy's `libraries/`: a proxy has no such folder, and writing
-     * into the proxy's installation directory is not this plugin's business.
-     */
-    val librariesFolder: File = File(dataFolder, "libraries")
-
-    /** How long a verified login stays trusted. `0` disables session reuse. */
-    val sessionHours: Long = values.long("session.hours", 12L)
-
-    /**
-     * Whether a session only counts from the address that earned it.
-     *
-     * On by default: a session that follows the player to a new address is one an attacker can
-     * inherit. Turn it off when every player shares one address behind NAT or a tunnel, where the
-     * check stops distinguishing anyone and only forces repeated verification.
-     */
-    val sessionBindsAddress: Boolean = values.bool("session.bind-address", true)
-
-    /** How long the player has to finish the Microsoft sign-in before the code expires. */
-    val verificationTimeoutSeconds: Int = values.int("verification.timeout-seconds", 300)
-
-    /** How often the server asks Microsoft whether the player has finished. */
-    val pollIntervalSeconds: Long = values.int("verification.poll-interval-seconds", 5).toLong()
-
-    /** Opt-in: a freshly verified XUID may move its one existing name to the requested free name. */
-    val autoRenameMicrosoft: Boolean = values.bool("verification.auto-rename", false)
-
-    /**
-     * How many login attempts one address may make per minute.
-     *
-     * Guards the Mojang lookup budget rather than the account: a client that reconnects in a loop can
-     * spend the whole allowance, and the budget fails closed, which would lock everyone else out.
-     * `0` disables the cap.
-     */
-    val connectionsPerMinute: Int = values.int("safety.connections-per-minute", 10)
-
-    /**
-     * How many Mojang name lookups may be sent per [directoryBudgetWindowMinutes].
-     *
-     * This is a local ceiling, not an upstream allowance: endpoint and shared-address limits may
-     * differ. Cached answers cost nothing, while `0` disables only this local cap.
-     */
-    val directoryBudget: Int = values.int("premium.directory-limit", 600)
-
-    val directoryBudgetWindowMinutes: Int = values.int("premium.directory-limit-window-minutes", 10)
-    /** Isolated name-lookup routing; never changes Velocity's session or Microsoft requests. */
-    val directoryNetwork: moe.ryuu.kyokouauth.core.http.Http.Route =
-        when (values.string("premium.directory-network", "inherit").trim().lowercase(java.util.Locale.ROOT)) {
-            "inherit" -> moe.ryuu.kyokouauth.core.http.Http.Route.INHERIT
-            "direct" -> moe.ryuu.kyokouauth.core.http.Http.Route.DIRECT
-            else -> error("premium.directory-network must be inherit or direct")
+        val dialect = Dialect.of(text("database.type", "sqlite")) ?: invalid("database.type", "a supported database type")
+        val port = integer("database.port", 0, 0..65535).takeUnless { it == 0 } ?: when (dialect) {
+            Dialect.MYSQL, Dialect.MARIADB -> 3306
+            Dialect.POSTGRESQL -> 5432
+            Dialect.H2 -> 9092
+            Dialect.SQLITE -> 0
         }
-
-    /** Local ceilings, not a claim about Mojang's external quota. Zero disables only this ceiling. */
-    val sessionHandshakeLimit: Int = values.int("premium.session-handshakes-per-minute", 60).coerceAtLeast(0)
-    val sessionRetrySeconds: Long = values.long("premium.session-retry-seconds", 5).coerceIn(1, 60)
-    val sessionFailureBackoffSeconds: Long = values.long("premium.session-failure-backoff-seconds", 30).coerceIn(1, 3600)
-    val sessionFailureMaxBackoffSeconds: Long = values.long("premium.session-failure-max-backoff-seconds", 120)
-        .coerceIn(sessionFailureBackoffSeconds, 3600)
-    val sessionHandshakeTimeoutSeconds: Long = values.long("premium.session-timeout-seconds", 30).coerceIn(5, 120)
-
-    val locale: String = values.string("messages.locale", "zh_CN")
-
-    /**
-     * Where a player is sent once they may play. Empty means the proxy's own first choice.
-     *
-     * Read here so an operator can pin a lobby that is not first in `velocity.toml`'s attempt order.
-     */
-    val postLoginServer: String = values.string("post-login.server", "").trim()
-
-    val limbo: LimboSettings = LimboSettings(
-        motd = values.string("limbo.motd", "KyokouAuth"),
-        viewDistance = values.int("limbo.view-distance", 2).coerceIn(2, 8),
-        biomeId = values.int("limbo.biome-id", 41),
-        biomeKey = values.string("limbo.biome", "").trim().takeIf { it.isNotEmpty() },
+        val name = text("database.database", "kyokouauth")
+        requireSetting(name.isNotBlank(), "database.database", "a non-empty database name or path")
+        val path = if (dialect == Dialect.SQLITE && !File(name).isAbsolute) File(dataFolder, name).absolutePath else name
+        DatabaseDescriptor(dialect = dialect, host = text("database.host", "127.0.0.1").also {
+            requireSetting(dialect.embedded || it.isNotBlank(), "database.host", "a non-empty host")
+        }, port = port, database = path, username = text("database.username", ""), password = text("database.password", ""))
+    }
+    val poolSize = integer("database.pool-size", 4, 1..64)
+    val driverRepository = text("database.driver-repository", "https://repo1.maven.org/maven2").also {
+        val uri = runCatching { URI(it) }.getOrNull()
+        requireSetting(uri != null && uri.scheme?.lowercase(Locale.ROOT) in setOf("http", "https") &&
+            !uri.host.isNullOrEmpty() && uri.userInfo == null && uri.query == null && uri.fragment == null,
+            "database.driver-repository", "an HTTP(S) repository URL without credentials, query or fragment")
+    }
+    val autoDownloadDriver = boolean("database.auto-download-driver", true)
+    val librariesFolder = File(dataFolder, "libraries")
+    val sessionHours = long("session.hours", 12L, 0L..876_000L)
+    val sessionBindsAddress = boolean("session.bind-address", true)
+    val verificationTimeoutSeconds = integer("verification.timeout-seconds", 300, 1..Int.MAX_VALUE)
+    val pollIntervalSeconds = long("verification.poll-interval-seconds", 5L, 1L..3600L)
+    val autoRenameMicrosoft = boolean("verification.auto-rename", true)
+    val blockedCommands: Set<String> = run {
+        val key = "verification.blocked-commands"
+        requireSetting(values.keys.none { it.startsWith("$key.") }, key, "a list of command roots")
+        val raw = values[key] ?: return@run setOf("server")
+        val entries = raw.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+        requireSetting(entries.size <= 256, key, "at most 256 command roots")
+        entries.map { entry ->
+            val token = entry.trimStart('/')
+            requireSetting(entry.length <= 128 && entry.none { it.isWhitespace() || it.isISOControl() || it in "{}[]" } &&
+                ('*' !in token || token == "*"), key, "literal command roots without arguments, or *")
+            val root = CommandNames.root(entry)
+            requireSetting(root.isNotEmpty(), key, "non-empty command roots")
+            root
+        }.toSet()
+    }
+    val connectionsPerMinute = integer("safety.connections-per-minute", 10, 0..1_000_000)
+    val pendingLoginLimit = integer("safety.pending-login-limit", 4096, 1..65536)
+    val ioWorkers = integer("safety.io-workers", 4, 1..32)
+    val ioQueueCapacity = integer("safety.io-queue-capacity", 256, 1..8192)
+    val directoryBudget = integer("premium.directory-limit", 600, 0..1_000_000)
+    val directoryBudgetWindowMinutes = integer("premium.directory-limit-window-minutes", 10, 1..1440)
+    val directoryNetwork: Http.Route = when (text("premium.directory-network", "inherit").trim().lowercase(Locale.ROOT)) {
+        "inherit" -> Http.Route.INHERIT
+        "direct" -> Http.Route.DIRECT
+        else -> invalid("premium.directory-network", "inherit or direct")
+    }
+    val sessionHandshakeLimit = integer("premium.session-handshakes-per-minute", 60, 0..1_000_000)
+    val sessionRetrySeconds = long("premium.session-retry-seconds", 5L, 1L..60L)
+    val sessionFailureBackoffSeconds = long("premium.session-failure-backoff-seconds", 30L, 1L..3600L)
+    val sessionFailureMaxBackoffSeconds = long("premium.session-failure-max-backoff-seconds", 120L, sessionFailureBackoffSeconds..3600L)
+    val sessionHandshakeTimeoutSeconds = long("premium.session-timeout-seconds", 30L, 5L..120L)
+    val locale = text("messages.locale", "zh_CN").also {
+        requireSetting(it.matches(Regex("[A-Za-z0-9_-]{1,32}")), "messages.locale", "a locale name without path separators")
+    }
+    val postLoginServer = text("post-login.server", "").trim().also {
+        requireSetting(it.length <= 256 && it.none(Char::isISOControl), "post-login.server", "a valid server name")
+    }
+    val limbo = LimboSettings(
+        motd = text("limbo.motd", "KyokouAuth"),
+        viewDistance = integer("limbo.view-distance", 2, 2..8),
+        biomeId = integer("limbo.biome-id", 41, 0..Int.MAX_VALUE),
+        biomeKey = text("limbo.biome", "").trim().takeIf { it.isNotEmpty() }?.also {
+            requireSetting(it.matches(Regex("[a-z0-9_.-]+:[a-z0-9_/.-]+")), "limbo.biome", "a namespaced resource key")
+        },
         spawn = LimboSettings.Spawn(
-            x = values.string("limbo.spawn.x", "0.5").toDoubleOrNull() ?: 0.5,
-            y = values.string("limbo.spawn.y", "64.0").toDoubleOrNull() ?: 64.0,
-            z = values.string("limbo.spawn.z", "0.5").toDoubleOrNull() ?: 0.5,
-            yaw = values.string("limbo.spawn.yaw", "0.0").toFloatOrNull() ?: 0f,
-            pitch = values.string("limbo.spawn.pitch", "0.0").toFloatOrNull() ?: 0f,
-        ),
-        keepAliveSeconds = values.long("limbo.keep-alive-seconds", 10L).coerceAtLeast(1),
-        keepAliveTimeoutSeconds = values.long("limbo.keep-alive-timeout-seconds", 30L).coerceAtLeast(5),
-        joinTimeoutSeconds = values.long("limbo.join-timeout-seconds", 30L).coerceAtLeast(5),
+            coordinate("limbo.spawn.x", 0.5, -28_999_999.0..28_999_999.0),
+            coordinate("limbo.spawn.y", 64.0, -64.0..319.999999),
+            coordinate("limbo.spawn.z", 0.5, -28_999_999.0..28_999_999.0),
+            coordinate("limbo.spawn.yaw", 0.0, -360_000.0..360_000.0).toFloat(),
+            coordinate("limbo.spawn.pitch", 0.0, -90.0..90.0).toFloat()),
+        keepAliveSeconds = long("limbo.keep-alive-seconds", 10L, 1L..300L),
+        keepAliveTimeoutSeconds = long("limbo.keep-alive-timeout-seconds", 30L, 1L..600L),
+        joinTimeoutSeconds = long("limbo.join-timeout-seconds", 30L, 1L..600L),
     )
 
-    private fun resolvePath(dialect: Dialect, raw: String): String {
-        if (dialect != Dialect.SQLITE) return raw
-        val file = File(raw)
-        return if (file.isAbsolute) file.absolutePath else File(dataFolder, raw).absolutePath
+    private fun text(key: String, default: String) = values[key] ?: default
+    private fun integer(key: String, default: Int, range: IntRange): Int {
+        val raw = values[key] ?: return default
+        val value = raw.trim().toIntOrNull() ?: invalid(key, "an integer in $range")
+        requireSetting(value in range, key, "an integer in $range")
+        return value
     }
-
-    private fun defaultPort(dialect: Dialect): Int = when (dialect) {
-        Dialect.MYSQL, Dialect.MARIADB -> 3306
-        Dialect.POSTGRESQL -> 5432
-        Dialect.H2 -> 9092
-        Dialect.SQLITE -> 0
+    private fun long(key: String, default: Long, range: LongRange): Long {
+        val raw = values[key] ?: return default
+        val value = raw.trim().toLongOrNull() ?: invalid(key, "an integer in $range")
+        requireSetting(value in range, key, "an integer in $range")
+        return value
     }
+    private fun boolean(key: String, default: Boolean): Boolean = when (values[key]?.trim()?.lowercase(Locale.ROOT)) {
+        null -> default
+        "true", "yes", "on" -> true
+        "false", "no", "off" -> false
+        else -> invalid(key, "true or false")
+    }
+    private fun coordinate(key: String, default: Double, range: ClosedFloatingPointRange<Double>): Double {
+        val raw = values[key] ?: return default
+        val value = raw.trim().toDoubleOrNull() ?: invalid(key, "a finite coordinate")
+        requireSetting(value.isFinite() && value in range, key, "a finite coordinate within the supported world")
+        return value
+    }
+    private fun requireSetting(valid: Boolean, key: String, expected: String) { if (!valid) invalid(key, expected) }
+    private fun invalid(key: String, expected: String): Nothing = throw IllegalArgumentException("Invalid configuration '$key': expected $expected")
 
     companion object {
-
-        /** Loads `config.yml`, writing the bundled copy first if there is none. */
         fun load(dataFolder: File): ProxyConfig {
-            dataFolder.mkdirs()
+            check(dataFolder.isDirectory || dataFolder.mkdirs()) { "Cannot create the authentication data directory" }
             val file = File(dataFolder, "config.yml")
-
-            if (!file.isFile) {
-                ProxyConfig::class.java.classLoader.getResourceAsStream("config.yml")?.use { stream ->
-                    runCatching { file.writeBytes(stream.readBytes()) }
-                }
+            if (!file.exists()) {
+                val temporary = Files.createTempFile(dataFolder.toPath(), "config-", ".part")
+                try {
+                    val stream = ProxyConfig::class.java.classLoader.getResourceAsStream("config.yml")
+                        ?: error("Missing bundled authentication configuration")
+                    stream.use { input -> Files.newOutputStream(temporary).use(input::copyTo) }
+                    try { Files.move(temporary, file.toPath(), StandardCopyOption.ATOMIC_MOVE) }
+                    catch (_: AtomicMoveNotSupportedException) { Files.move(temporary, file.toPath()) }
+                } finally { Files.deleteIfExists(temporary) }
             }
-
-            // A file that cannot be parsed is the operator's to fix, and the error names the file:
-            // starting with silent defaults would hide a broken database address behind a kick nobody
-            // can explain.
+            check(file.isFile) { "Authentication configuration must be a regular file" }
             return ProxyConfig(YamlDocument.load(file), dataFolder)
         }
     }

@@ -31,6 +31,7 @@ class KyokouAuthBungee : Plugin(), Listener {
     private var auth: AuthService? = null
     private var gate: LoginGate? = null
     private var adapter: BungeeLoginGate? = null
+    private var commandGuard: BungeeCommandGuard? = null
     private var authority: PrivateTicketAuthority? = null
     private var limbo: LimboServer? = null
     private var sweep: ScheduledTask? = null
@@ -56,10 +57,15 @@ class KyokouAuthBungee : Plugin(), Listener {
             val auth = AuthService(config, log).also { this.auth = it }
             val gate = LoginGate(platform, config, messages, auth, log).also { this.gate = it }
             val adapter = BungeeLoginGate(this, platform, profiles, BungeeTickets(platform, profiles, authority), gate, log,
-                submit = { task -> auth.submit(task) }, schedule = auth::schedule, accepting = { accepting },
+                submit = auth::execute, schedule = auth::schedule, accepting = { accepting },
                 intentTimeoutMillis = (config.sessionHandshakeTimeoutSeconds + 5L) * 1000L,
             ).also { this.adapter = it }
             proxy.pluginManager.registerListener(this, adapter)
+            val commands = BungeeCommandGuard(platform, gate, config.blockedCommands.isNotEmpty()).also {
+                it.enablePacketFilter(log)
+                this.commandGuard = it
+            }
+            proxy.pluginManager.registerListener(this, commands)
             val limbo = LimboServer(settings = config.limbo, listener = gate,
                 logger = LimboLogger { message, failure -> if (failure == null) log.info(message) else log.warn(message, failure) },
                 forwardingMode = ForwardingMode.PrivateTicket(authority),
@@ -107,6 +113,7 @@ class KyokouAuthBungee : Plugin(), Listener {
         }
         release("connection watcher") { sweep?.cancel() }; sweep = null
         release("Bungee admission") { adapter?.close() }; adapter = null
+        release("native command boundary") { commandGuard?.close() }; commandGuard = null
         release("shared authentication gate") { gate?.deactivate() }; gate = null
         release("private login engines") { limbo?.close() }; limbo = null
         release("internal server registrations") { platform?.unregisterEngines() }; platform = null

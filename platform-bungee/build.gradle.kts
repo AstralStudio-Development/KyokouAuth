@@ -17,8 +17,8 @@ repositories {
     }
 }
 
-val bungeeDistribution by configurations.creating { isTransitive = false }
-val extractBungee2111 by tasks.registering(Sync::class) {
+val bungeeDistribution = configurations.create("bungeeDistribution") { isTransitive = false }
+val extractBungee2111 = tasks.register<Sync>("extractBungee2111") {
     from({ bungeeDistribution.map { zipTree(it) } }) {
         include("META-INF/libraries/*.jar")
         eachFile { relativePath = RelativePath(true, name) }
@@ -80,7 +80,7 @@ tasks.shadowJar {
     exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA", "module-info.class")
 }
 
-val checkArtifactSize by tasks.registering(Exec::class) {
+val checkArtifactSize = tasks.register<Exec>("checkArtifactSize") {
     dependsOn(tasks.shadowJar)
     inputs.file(tasks.shadowJar.flatMap { it.archiveFile })
     inputs.file(rootProject.file("tools/audit-limbo-artifact.py"))

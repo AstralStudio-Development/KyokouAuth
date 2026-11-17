@@ -40,6 +40,9 @@ internal class PendingFixture(val name: String = "OracleLocal", val protocol: In
     var online = false
     var connected = true
     var disconnects = 0
+    var failMessages = false
+    var beforeMessage: (() -> Unit)? = null
+    val messages = mutableListOf<BaseComponent>()
     val connects = mutableListOf<ServerInfo>()
     val setterOrder = mutableListOf<String>()
     var profile = GameProfile(checkNotNull(uuid), name, listOf(GameProfile.Property("textures", "preserved", "signed")))
@@ -63,7 +66,12 @@ internal class PendingFixture(val name: String = "OracleLocal", val protocol: In
         "getLocale" -> Locale.SIMPLIFIED_CHINESE
         "getServer" -> null
         "hasPermission" -> true
-        "sendMessage" -> null
+        "sendMessage" -> {
+            beforeMessage?.invoke()
+            check(!failMessages) { "injected message sink failure" }
+            messages += args.filterIsInstance<BaseComponent>()
+            null
+        }
         "disconnect" -> { connected = false; disconnects++; null }
         "connect" -> {
             connects += args[0] as ServerInfo
@@ -173,7 +181,6 @@ internal class TestServices : LoginGate.Services {
     override fun grantSession(uuid: UUID, address: String) { granted += uuid }
     override fun submit(task: () -> Unit) { queue += task }
     override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledFuture<*> = TestTask(task).also { tasks += it }
-    override fun scheduleAtFixedRate(periodMillis: Long, task: () -> Unit) = schedule(periodMillis, task)
     override fun begin() = DeviceCodeFlow.Challenge("TEST-CODE", "https://microsoft.com/link",
         "https://microsoft.com/link?otc=TEST-CODE", 300, 5, "synthetic-never-sent")
     override fun poll(challenge: DeviceCodeFlow.Challenge): DeviceCodeFlow.PollResult =

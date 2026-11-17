@@ -2,8 +2,6 @@ package moe.ryuu.kyokouauth.proxy
 
 import moe.ryuu.kyokouauth.core.auth.AuthCoordinator
 import moe.ryuu.kyokouauth.core.auth.DeviceCodeFlow
-import moe.ryuu.kyokouauth.core.auth.PollBackoff
-import moe.ryuu.kyokouauth.core.auth.XboxAuthException
 import moe.ryuu.kyokouauth.core.auth.XboxLive
 import moe.ryuu.kyokouauth.core.identity.GameName
 import moe.ryuu.kyokouauth.core.identity.Xuid
@@ -14,7 +12,6 @@ import moe.ryuu.kyokouauth.limbo.LimboPlayer
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The login gate: who may enter, who waits, and who is turned away.
@@ -51,7 +48,6 @@ class LoginGate constructor(
         fun grantSession(uuid: UUID, address: String)
         fun submit(task: () -> Unit)
         fun schedule(delayMillis: Long, task: () -> Unit): ScheduledFuture<*>
-        fun scheduleAtFixedRate(periodMillis: Long, task: () -> Unit): ScheduledFuture<*>
         fun begin(): DeviceCodeFlow.Challenge
         fun poll(challenge: DeviceCodeFlow.Challenge): DeviceCodeFlow.PollResult
         fun exchange(accessToken: String): XboxLive.XstsToken
@@ -73,34 +69,9 @@ class LoginGate constructor(
     /** All callbacks retain this exact Player, even if a new connection claims the same UUID. */
     private class Connection(val player: Player, val pending: Pending) {
         @Volatile var access = Access.HELD
-        var verification: Verifying? = null
+        var verification: VerificationSession? = null
         var arrivalTimeout: ScheduledFuture<*>? = null
-    }
-
-    private class Verifying(
-        val player: LimboPlayer,
-        val connection: Connection,
-        val locale: String?,
-    ) {
-        val pending get() = connection.pending
-        @Volatile
-        var finished = false
-
-        @Volatile
-        var intervalMillis: Long = MIN_POLL_MILLIS
-
-        @Volatile
-        var poll: ScheduledFuture<*>? = null
-
-        var timeout: ScheduledFuture<*>? = null
-        var titleShown = false
-
-        /** Restart creates a new Verifying object; stale work can never become current again. */
-        @Volatile
-        var deadlineMillis: Long = Long.MAX_VALUE
-
-        /** One poll at a time: a slow request must not let the next tick start a second. */
-        val busy = AtomicBoolean(false)
+        var arrivalDeadlineMillis = Long.MAX_VALUE
     }
 
     private val premiumHandshakes = PremiumHandshakeGuard(
@@ -113,6 +84,7 @@ class LoginGate constructor(
     )
     private val premiumWatches = mutableMapOf<UUID, ScheduledFuture<*>>()
     private val pending = ConcurrentHashMap<UUID, Pending>()
+    private val pendingLock = Any()
     private val connections = ConcurrentHashMap<UUID, Connection>()
 
     /** Armed only after the listener and the registered limbo are both ready. */
@@ -127,7 +99,7 @@ class LoginGate constructor(
             premiumWatches.clear()
             premiumHandshakes.clear()
         }
-        pending.clear()
+        synchronized(pendingLock) { pending.clear() }
         connections.values.forEach { connection ->
             synchronized(connection) {
                 close(connection)
@@ -144,7 +116,7 @@ class LoginGate constructor(
     // --- who may enter ---------------------------------------------------------------------
 
     fun onPreLogin(event: PreLoginEvent) {
-        pending.remove(event.connection.sessionId)
+        if (pending.remove(event.connection.sessionId) != null) finishPremium(event.connection.sessionId, verified = false)
         if (!ready || !event.connection.isActive) {
             event.result = denied("login.internal-error")
             return
@@ -167,6 +139,10 @@ class LoginGate constructor(
         }
 
         sweepPending()
+        if (synchronized(pendingLock) { pending.size >= config.pendingLoginLimit }) {
+            event.result = denied("login.internal-error")
+            return
+        }
 
         // Deliberately inline. Velocity reads this event's result as soon as the handler returns -
         // `PreLoginEvent` is not an awaiting event - so handing the work to another thread would let
@@ -217,7 +193,17 @@ class LoginGate constructor(
             }
         }
         if (decision !is AuthCoordinator.Decision.Reject) {
-            pending[event.connection.sessionId] = Pending(event.connection, name, address, decision, clock())
+            val stored = synchronized(pendingLock) {
+                if (ready && event.connection.isActive && pending.size < config.pendingLoginLimit) {
+                    pending[event.connection.sessionId] = Pending(event.connection, name, address, decision, clock())
+                    true
+                } else false
+            }
+            if (!stored) {
+                finishPremium(event.connection.sessionId, verified = false)
+                event.result = denied("login.internal-error")
+                return
+            }
         }
         when (decision) {
             is AuthCoordinator.Decision.Admit -> {
@@ -356,7 +342,9 @@ class LoginGate constructor(
             check(connections.putIfAbsent(player.sessionId, connection) == null) { "Duplicate connection session id" }
             if (connection.access == Access.HELD) {
                 synchronized(connection) {
-                    connection.arrivalTimeout = services.schedule(config.limbo.joinTimeoutSeconds * 1000L) {
+                    val arrivalMillis = config.limbo.joinTimeoutSeconds * 1000L
+                    connection.arrivalDeadlineMillis = clock() + arrivalMillis
+                    connection.arrivalTimeout = services.schedule(arrivalMillis) {
                         synchronized(connection) {
                             if (current(connection) && connection.access == Access.HELD && connection.verification == null) {
                                 close(connection)
@@ -373,6 +361,29 @@ class LoginGate constructor(
             logger.error("Could not authorize {}", player.username, failure)
             event.result = ResultedEvent.ComponentResult.denied(component("login.internal-error"))
         }
+    }
+
+    /** Shared by native execution, command-tree and completion adapters; never performs IO. */
+    fun isCommandBlocked(player: Player?, command: String): Boolean {
+        val root = CommandNames.root(command)
+        if (root.isEmpty() || (root !in config.blockedCommands && "*" !in config.blockedCommands)) return false
+        return !isAuthenticated(player)
+    }
+
+    fun isAuthenticated(player: Player?): Boolean {
+        val connection = player?.let(::connectionOf) ?: return false
+        return synchronized(connection) { authenticated(connection) }
+    }
+
+    /** The Boolean is command admission, not an authentication grant. Console is handled by adapters. */
+    fun allowCommand(player: Player, command: String): Boolean {
+        if (!isCommandBlocked(player, command)) return true
+        try {
+            player.sendMessage(component("verification.command-blocked", localeOf(player)))
+        } catch (_: Exception) {
+            logger.warn("Could not deliver blocked-command feedback; command remains denied")
+        }
+        return false
     }
 
     fun onChooseInitialServer(event: PlayerChooseInitialServerEvent) {
@@ -412,9 +423,9 @@ class LoginGate constructor(
 
     fun onDisconnect(event: DisconnectEvent) {
         val player = event.player
-        pending.remove(player.sessionId)
-        finishPremium(player.sessionId, verified = false)
         val connection = connectionOf(player) ?: return
+        pending.remove(player.sessionId, connection.pending)
+        finishPremium(player.sessionId, verified = false)
         synchronized(connection) {
             close(connection)
             connections.remove(player.sessionId, connection)
@@ -437,16 +448,16 @@ class LoginGate constructor(
                 player.disconnect(limboText("login.internal-error"))
                 return
             }
-            val state = Verifying(player, connection, localeOf(connection.player))
+            if (clock() >= connection.arrivalDeadlineMillis) {
+                close(connection)
+                connection.player.disconnect(component("login.internal-error", localeOf(connection.player)))
+                return
+            }
+            val state = verification(connection, player, localeOf(connection.player))
             connection.arrivalTimeout?.cancel(false)
             connection.verification = state
             logger.info("{} ({}) is verifying in the limbo from {}", player.name, player.uuid, player.address)
-            try {
-                armVerification(state)
-                services.submit { startSignIn(state) }
-            } catch (failure: Exception) {
-                fail(state, "verification.start-failed")
-            }
+            state.enqueueStart()
         }
     }
 
@@ -455,7 +466,7 @@ class LoginGate constructor(
         synchronized(connection) {
             val state = connection.verification ?: return
             if (state.player !== player) return
-            finish(state)
+            state.cancel()
             connection.verification = null
             if (connection.access == Access.HELD) {
                 close(connection)
@@ -466,57 +477,17 @@ class LoginGate constructor(
 
     // --- one sign-in ----------------------------------------------------------------------
 
-    /** The deadline is armed before queueing IO, so an exhausted worker pool cannot hold forever. */
-    private fun armVerification(state: Verifying) {
-        val timeoutMillis = config.verificationTimeoutSeconds.coerceAtLeast(1) * 1000L
-        state.deadlineMillis = clock() + timeoutMillis
-        state.timeout = services.schedule(timeoutMillis) { expire(state) }
-    }
-
-    /** Blocking work never holds the connection lock or the scheduler while calling Microsoft. */
-    private fun startSignIn(state: Verifying) {
-        synchronized(state.connection) {
-            if (!active(state)) return
-            state.player.sendMessage(limboText("verification.starting", state.locale))
-        }
-        val startedAt = clock()
-        val challenge = try {
-            services.begin()
-        } catch (failure: DeviceCodeFlow.DeviceCodeException) {
-            logger.warn("Microsoft sign-in initialization for {} failed: code={}, httpStatus={}, elapsedMs={}",
-                state.pending.name, failure.code.name, failure.httpStatus, clock() - startedAt)
-            val message = when (failure.code) {
-                DeviceCodeFlow.FailureCode.TIMEOUT, DeviceCodeFlow.FailureCode.TRANSPORT,
-                DeviceCodeFlow.FailureCode.UPSTREAM_UNAVAILABLE -> "verification.start-unavailable"
-                DeviceCodeFlow.FailureCode.RATE_LIMITED -> "verification.start-busy"
-                else -> "verification.start-failed"
-            }
-            fail(state, message)
-            return
-        } catch (failure: Exception) {
-            logger.warn("Microsoft sign-in initialization for {} failed: type={}", state.pending.name, failure.javaClass.simpleName)
-            fail(state, "verification.start-failed")
-            return
-        }
-        synchronized(state.connection) {
-            if (!active(state)) return
-            if (clock() >= state.deadlineMillis) {
-                expire(state)
-                return
-            }
-            state.intervalMillis = challenge.intervalSeconds.coerceAtLeast(1) * 1000L
-            try {
-                showPrompt(state, challenge)
-                schedulePoll(state, challenge)
-            } catch (failure: Exception) {
-                fail(state, "verification.start-failed")
-            }
-        }
-    }
+    private fun verification(connection: Connection, player: LimboPlayer, locale: String?) = VerificationSession(
+        player, locale, connection, config, messages, services, logger, clock,
+        current = { ready && current(connection) && connection.access == Access.HELD && connection.verification === it },
+        ownsTitle = { connection.verification === it },
+        failed = { state, key, placeholders -> fail(connection, state, key, *placeholders) },
+        verified = { state, xsts -> complete(connection, state, xsts) },
+    )
 
     /** How many sign-ins are in flight, for `/kyokouauth status`. */
     fun verifyingCount(): Int = connections.values.count { connection ->
-        synchronized(connection) { connection.verification?.let(::active) == true }
+        synchronized(connection) { connection.verification?.active() == true }
     }
 
     /**
@@ -534,164 +505,51 @@ class LoginGate constructor(
         val connection = connectionOf(player) ?: return false
         val replacement = synchronized(connection) {
             val state = connection.verification ?: return false
-            if (!active(state)) return false
-            finish(state)
-            Verifying(state.player, connection, state.locale).also {
+            if (!state.beforeDeadline()) return false
+            state.cancel()
+            verification(connection, state.player, state.locale).also {
                 connection.verification = it
                 try {
-                    armVerification(it)
+                    it.arm()
                 } catch (failure: Exception) {
-                    fail(it, "verification.start-failed")
+                    fail(connection, it, "verification.start-failed")
                     return false
                 }
             }
         }
-        startSignIn(replacement)
+        replacement.start()
         return true
     }
 
-    private fun showPrompt(state: Verifying, challenge: DeviceCodeFlow.Challenge) {
-        if (!active(state)) return
-        val minutes = (config.verificationTimeoutSeconds / 60).coerceAtLeast(1)
-        val remainingMillis = (state.deadlineMillis - clock()).coerceAtLeast(0L)
-        val stayTicks = (remainingMillis / 50L + if (remainingMillis % 50L == 0L) 0L else 1L)
-            .coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
-
-        // Show the ready challenge once; re-sending would restart its fade animation.
-        state.titleShown = true
-        state.player.showTitle(
-            title = limboText("limbo.title", state.locale),
-            subtitle = limboText("limbo.subtitle", state.locale),
-            stay = stayTicks,
-        )
-
-        state.player.sendMessage(
-            limboText(
-                "verification.prompt",
-                state.locale,
-                "url" to challenge.verificationUriComplete,
-                "code" to challenge.userCode,
-                "minutes" to minutes.toString(),
-            ),
-        )
-    }
-
-    private fun schedulePoll(state: Verifying, challenge: DeviceCodeFlow.Challenge) = synchronized(state.connection) {
-        if (!active(state)) return@synchronized
-        try {
-            state.poll = services.schedule(state.intervalMillis) {
-                try {
-                    services.submit { poll(state, challenge) }
-                } catch (failure: Exception) {
-                    fail(state, "verification.retry")
-                }
-            }
-        } catch (failure: Exception) {
-            fail(state, "verification.retry")
-        }
-    }
-
-    private fun poll(state: Verifying, challenge: DeviceCodeFlow.Challenge) {
-        synchronized(state.connection) { if (!active(state)) return }
-
-        // A slow request must not let the next tick start a second poll: two answers would bind the
-        // same account twice.
-        if (!state.busy.compareAndSet(false, true)) {
-            schedulePoll(state, challenge)
-            return
-        }
-
-        try {
-            val result = try {
-                services.poll(challenge)
-            } catch (failure: DeviceCodeFlow.DeviceCodeException) {
-                if (failure.code == DeviceCodeFlow.FailureCode.RATE_LIMITED) {
-                    state.intervalMillis = maxOf(state.intervalMillis, failure.retryAfterMillis ?: 60_000L)
-                }
-                logger.warn("Microsoft sign-in poll for {} failed: code={}, httpStatus={}", state.pending.name, failure.code.name, failure.httpStatus)
-                schedulePoll(state, challenge)
-                return
-            } catch (failure: Exception) {
-                logger.warn("Microsoft sign-in poll for {} failed: type={}", state.pending.name, failure.javaClass.simpleName)
-                schedulePoll(state, challenge)
-                return
-            }
-
-            synchronized(state.connection) {
-                if (!active(state)) return
-                if (clock() >= state.deadlineMillis) {
-                    expire(state)
-                    return
-                }
-            }
-            when (result) {
-                is DeviceCodeFlow.PollResult.Pending -> schedulePoll(state, challenge)
-
-                is DeviceCodeFlow.PollResult.SlowDown -> {
-                    // Microsoft asked for a slower cadence; ignoring it escalates the throttle and can
-                    // end with the client id blocked, which would break sign-in for everyone.
-                    state.intervalMillis = PollBackoff.next(state.intervalMillis)
-                    schedulePoll(state, challenge)
-                }
-
-                is DeviceCodeFlow.PollResult.Expired -> expire(state)
-                is DeviceCodeFlow.PollResult.Declined -> decline(state)
-                is DeviceCodeFlow.PollResult.Authorized -> complete(state, result.accessToken)
-            }
-        } finally {
-            state.busy.set(false)
-        }
-    }
-
-    private fun complete(state: Verifying, accessToken: String) {
-        synchronized(state.connection) { if (!active(state)) return }
-        val xsts = try {
-            services.exchange(accessToken)
-        } catch (failure: XboxAuthException) {
-            fail(state, "verification.xbox-failed", "reason" to failure.message)
-            return
-        } catch (failure: Exception) {
-            logger.warn("Xbox token exchange failed for {}", state.pending.name)
-            fail(state, "verification.retry")
-            return
-        }
-
-        synchronized(state.connection) {
-            if (!active(state)) return
-            if (clock() >= state.deadlineMillis) {
-                expire(state)
-                return
-            }
-        }
+    /** Account binding and final authorization belong to the gate, never to the device-code module. */
+    private fun complete(connection: Connection, state: VerificationSession, xsts: XboxLive.XstsToken) {
+        synchronized(connection) { if (!state.beforeDeadline()) return }
         // Binding may re-check the name directory; leave and timeout must remain able to invalidate
         // the connection while that request is in flight. Only the final session grant is serialized.
         val outcome = try {
-            services.bindMicrosoft(state.pending.name, Xuid(xsts.xuid), xsts.gamertag)
+            services.bindMicrosoft(connection.pending.name, Xuid(xsts.xuid), xsts.gamertag)
         } catch (failure: Exception) {
-            logger.error("Could not bind the identity of {}", state.pending.name, failure)
-            fail(state, "login.internal-error")
+            logger.error("Could not bind the identity of {}", connection.pending.name, failure)
+            fail(connection, state, "login.internal-error")
             return
         }
-        synchronized(state.connection) {
-            if (!active(state)) return
+        synchronized(connection) {
+            if (!state.beforeDeadline()) return
             try {
                 when (outcome) {
                     is AuthCoordinator.ClaimOutcome.Bound -> {
                         val previousName = outcome.previousName
-                        if (!active(state)) return
-                        if (clock() >= state.deadlineMillis) {
-                            expire(state)
+                        if (!state.active()) return
+                        if (!state.beforeDeadline()) return
+                        if (!connection.pending.provisional && outcome.record.uuid != connection.player.uniqueId) {
+                            fail(connection, state, "login.internal-error")
                             return
                         }
-                        if (!state.pending.provisional && outcome.record.uuid != state.connection.player.uniqueId) {
-                            fail(state, "login.internal-error")
-                            return
-                        }
-                        services.grantSession(outcome.record.uuid, state.pending.address)
+                        services.grantSession(outcome.record.uuid, connection.pending.address)
                         if (previousName != null) {
                             // A prior online session must not keep presenting the superseded name.
                             server.getPlayer(outcome.record.uuid).ifPresent { previous ->
-                                if (previous !== state.connection.player) {
+                                if (previous !== connection.player) {
                                     connectionOf(previous)?.let { old -> synchronized(old) { close(old) } }
                                     previous.disconnect(component("login.name-changed", localeOf(previous), "name" to outcome.record.name.value))
                                 }
@@ -699,71 +557,50 @@ class LoginGate constructor(
                             logger.info("Verified Microsoft identity renamed {} to {} ({})", previousName.value,
                                 outcome.record.name.value, outcome.record.uuid)
                         }
-                        if (!active(state)) return
-                        if (clock() >= state.deadlineMillis) {
-                            expire(state)
-                            return
-                        }
-                        if (state.pending.provisional) {
+                        if (!state.active()) return
+                        if (!state.beforeDeadline()) return
+                        if (connection.pending.provisional) {
                             // Persist the real identity, but never authorize a placeholder connection.
                             if (previousName != null) {
-                                fail(state, "verification.renamed-reconnect", "from" to previousName.value,
+                                fail(connection, state, "verification.renamed-reconnect", "from" to previousName.value,
                                     "name" to outcome.record.name.value)
                             } else {
-                                fail(state, "verification.reconnect")
+                                fail(connection, state, "verification.reconnect")
                             }
                             return
                         }
-                        finish(state)
-                        state.connection.access = Access.AUTHENTICATED
+                        state.cancel()
+                        connection.access = Access.AUTHENTICATED
                         state.player.sendMessage(
                             limboText("verification.success", state.locale, "name" to outcome.record.name.value),
                         )
-                        release(state.connection)
+                        release(connection)
                     }
                     is AuthCoordinator.ClaimOutcome.Refused ->
-                        fail(state, keyFor(outcome.reason), "reason" to outcome.detail,
+                        fail(connection, state, keyFor(outcome.reason), "reason" to outcome.detail,
                             "name" to outcome.existingName?.value.orEmpty())
                 }
             } catch (failure: Exception) {
-                logger.error("Could not complete verification for {}", state.pending.name, failure)
-                close(state.connection)
-                state.connection.player.disconnect(component("login.internal-error", state.locale))
+                logger.error("Could not complete verification for {}", connection.pending.name, failure)
+                close(connection)
+                connection.player.disconnect(component("login.internal-error", state.locale))
             }
         }
     }
 
-    private fun expire(state: Verifying) = fail(state, "verification.expired")
-
-    private fun decline(state: Verifying) = fail(state, "verification.declined")
-
-    private fun fail(state: Verifying, key: String, vararg placeholders: Pair<String, String>) {
-        synchronized(state.connection) {
-            if (!active(state)) return
-            close(state.connection)
-            // Disconnect the frontend itself: closing only the backend invites Velocity failover.
-            state.connection.player.disconnect(component(key, state.locale, *placeholders))
-        }
-    }
-
-    private fun finish(state: Verifying) {
-        if (state.finished) return
-        state.finished = true
-        state.poll?.cancel(false)
-        state.timeout?.cancel(false)
-        if (state.titleShown && state.connection.verification === state) {
-            try {
-                state.player.clearTitle()
-            } catch (failure: Exception) {
-                logger.warn("Could not clear verification title for {}: type={}", state.pending.name, failure.javaClass.simpleName)
-            }
+    private fun fail(connection: Connection, state: VerificationSession, key: String, vararg placeholders: Pair<String, String>) {
+        synchronized(connection) {
+            if (!state.active()) return
+            close(connection)
+            // Disconnect the frontend itself: closing only the backend invites proxy failover.
+            connection.player.disconnect(component(key, state.locale, *placeholders))
         }
     }
 
     private fun close(connection: Connection) = synchronized(connection) {
         connection.access = Access.CLOSED
         connection.arrivalTimeout?.cancel(false)
-        connection.verification?.let(::finish)
+        connection.verification?.cancel()
     }
 
     // --- moving a verified player on ------------------------------------------------------
@@ -855,11 +692,6 @@ class LoginGate constructor(
     private fun authenticated(connection: Connection): Boolean =
         ready && current(connection) && connection.access == Access.AUTHENTICATED
 
-    /** Call under the connection lock; every async boundary must check before using a result. */
-    private fun active(state: Verifying): Boolean =
-        ready && current(state.connection) && state.connection.access == Access.HELD &&
-            state.connection.verification === state && !state.finished
-
     private fun addressOf(connection: InboundConnection): String =
         connection.remoteAddress.address?.hostAddress ?: connection.remoteAddress.hostString
 
@@ -868,7 +700,11 @@ class LoginGate constructor(
 
     /** Old and disconnected decisions cannot be transferred to a later login. */
     private fun sweepPending() {
-        pending.entries.removeIf { !it.value.connection.isActive || expired(it.value) }
+        val abandoned = synchronized(pendingLock) {
+            pending.entries.filter { !it.value.connection.isActive || expired(it.value) }
+                .filter { pending.remove(it.key, it.value) }.map { it.key }
+        }
+        abandoned.forEach { finishPremium(it, verified = false) }
     }
 
     private fun keyFor(reason: AuthCoordinator.RejectReason): String = when (reason) {
@@ -923,10 +759,8 @@ class LoginGate constructor(
             override fun bindMicrosoft(name: GameName, xuid: Xuid, gamertag: String) =
                 auth.auth.bindMicrosoft(name, xuid, gamertag)
             override fun grantSession(uuid: UUID, address: String) { auth.auth.grantSession(uuid, address) }
-            override fun submit(task: () -> Unit) { auth.submit(task) }
+            override fun submit(task: () -> Unit) { auth.execute(task) }
             override fun schedule(delayMillis: Long, task: () -> Unit) = auth.schedule(delayMillis, task)
-            override fun scheduleAtFixedRate(periodMillis: Long, task: () -> Unit) =
-                auth.scheduleAtFixedRate(periodMillis, task)
             override fun begin() = DeviceCodeFlow.begin()
             override fun poll(challenge: DeviceCodeFlow.Challenge) = DeviceCodeFlow.poll(challenge)
             override fun exchange(accessToken: String) = XboxLive.exchange(accessToken, XboxLive.RELYING_PARTY_PROFILE)
@@ -939,10 +773,6 @@ class LoginGate constructor(
 
         /** How long a decision waits for the player it was made for. */
         private const val PENDING_LIFETIME_MILLIS = 5 * 60 * 1000L
-
-        /** A player with no session waits this long before their first poll, before Microsoft has
-         *  said anything about the cadence. */
-        private const val MIN_POLL_MILLIS = 5_000L
 
         /** At most one "lookups are being withheld" warning a minute. */
         private const val THROTTLE_WARNING_MILLIS = 60_000L

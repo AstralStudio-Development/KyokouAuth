@@ -152,8 +152,11 @@ def main():
     run = root / ".narrafork/multiversion/e2e-clients" / (args.version + "-" + str(args.port))
     run.mkdir(parents=True, exist_ok=True)
     options = run / "options.txt"
-    if not options.exists():
-        options.write_text("onboardAccessibility:false\nskipMultiplayerWarning:true\n", encoding="utf-8")
+    settings = options.read_text(encoding="utf-8") if options.exists() else "onboardAccessibility:false\nskipMultiplayerWarning:true\n"
+    # Keep the isolated client rendered while the operator uses their own game or editor. Losing
+    # focus must not open its pause menu and invalidate the unchanged screen=null/12-second check.
+    settings = "\n".join(line for line in settings.splitlines() if not line.startswith("pauseOnLostFocus:"))
+    options.write_text(settings + "\npauseOnLostFocus:false\n", encoding="utf-8")
     subprocess.run([sys.executable, str(root / "tools/prepare-limbo-client.py"), "--version", args.version,
                     "--minecraft", str(args.minecraft)], check=True)
     launch = json.loads((root / ".narrafork/multiversion/clients" / args.version / "launch.json").read_text(encoding="utf-8"))

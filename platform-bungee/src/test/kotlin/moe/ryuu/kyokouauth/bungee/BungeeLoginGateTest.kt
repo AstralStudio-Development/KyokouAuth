@@ -83,6 +83,8 @@ class BungeeLoginGateTest {
             h.adapter.onPostLogin(post)
             assertSame(bridge, h.platform.find(fixture.player))
             assertEquals("kyokouauth-limbo-$protocol", post.target.name)
+            assertNull(h.proxy.getServerInfo(post.target.name))
+            assertSame(h.platform.getServer(post.target.name).orElseThrow(), h.platform.commonServer(post.target))
             assertEquals(0, h.gate.verifyingCount(), "Native post-login/TCP completion is not Limbo READY")
         }
     }
@@ -102,18 +104,22 @@ class BungeeLoginGateTest {
         }
     }
 
-    @Test fun `wrong engine and replacement object cannot impersonate registered engine`() {
-        for (replace in listOf(false, true)) {
+    @Test fun `wrong private engine forged object and public same-name conflict fail closed`() {
+        for (attempt in listOf("wrong protocol", "forged object", "public conflict")) {
             val h = Harness()
             val fixture = PendingFixture()
             h.login(fixture)
-            val name = if (replace) "kyokouauth-limbo-777" else "kyokouauth-limbo-767"
-            val target = if (!replace) h.proxy.registered.getValue(name) else
-                h.proxy.constructServerInfo(name, InetSocketAddress("127.0.0.1", 9), "replacement", true)
+            val name = if (attempt == "wrong protocol") "kyokouauth-limbo-767" else "kyokouauth-limbo-777"
+            val privateTarget = assertNotNull(h.platform.nativeServer(h.platform.getServer(name).orElseThrow()))
+            val target = if (attempt == "forged object")
+                h.proxy.constructServerInfo(name, InetSocketAddress("127.0.0.1", 9), "forged", true) else privateTarget
+            if (attempt == "public conflict") {
+                h.proxy.registered[name] = h.proxy.constructServerInfo(name, InetSocketAddress("127.0.0.1", 9), "public conflict", false)
+            }
             val event = ServerConnectEvent(fixture.player, target, ServerConnectEvent.Reason.PLUGIN)
             h.adapter.onServerConnect(event)
-            assertTrue(event.isCancelled)
-            assertFalse(fixture.connected)
+            assertTrue(event.isCancelled, attempt)
+            assertFalse(fixture.connected, attempt)
         }
     }
 
@@ -207,7 +213,7 @@ class BungeeLoginGateTest {
         h.services.authorize = true
         h.login(fixture)
         val frontend = h.platform.find(fixture.player)!!
-        val engine = h.proxy.registered.getValue("kyokouauth-limbo-777")
+        val engine = assertNotNull(h.platform.nativeServer(h.platform.getServer("kyokouauth-limbo-777").orElseThrow()))
         val connect = ServerConnectEvent(fixture.player, engine, ServerConnectEvent.Reason.JOIN_PROXY)
         h.adapter.onServerConnect(connect)
         assertFalse(connect.isCancelled)

@@ -4,10 +4,6 @@ import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import java.sql.Connection
 import java.sql.SQLException
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import java.util.concurrent.ThreadFactory
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Owns the pool and the schema. Every repository goes through [withConnection]; nothing else in the
@@ -65,18 +61,26 @@ class Database(
         }
         dataSource = HikariDataSource(config)
 
-        if (descriptor.dialect == Dialect.SQLITE) {
-            dataSource.connection.use { connection ->
-                connection.createStatement().use { statement ->
-                    statement.execute("PRAGMA journal_mode=WAL")
-                    statement.execute("PRAGMA synchronous=NORMAL")
-                    statement.execute("PRAGMA foreign_keys=ON")
-                    statement.execute("PRAGMA busy_timeout=5000")
+        try {
+            if (descriptor.dialect == Dialect.SQLITE) {
+                dataSource.connection.use { connection ->
+                    connection.createStatement().use { statement ->
+                        statement.execute("PRAGMA journal_mode=WAL")
+                        statement.execute("PRAGMA synchronous=NORMAL")
+                        statement.execute("PRAGMA foreign_keys=ON")
+                        statement.execute("PRAGMA busy_timeout=5000")
+                    }
                 }
             }
+            migrate()
+        } catch (failure: Throwable) {
+            try {
+                dataSource.close()
+            } catch (cleanup: Throwable) {
+                if (cleanup !== failure) failure.addSuppressed(cleanup)
+            }
+            throw failure
         }
-
-        migrate()
     }
 
     private fun instantiateDriver(): java.sql.Driver {
@@ -97,9 +101,7 @@ class Database(
                 val current = currentVersion(connection)
                 if (migration.version <= current) continue
 
-                val autoCommit = connection.autoCommit
-                connection.autoCommit = false
-                try {
+                inTransaction(connection) {
                     migration.statements(descriptor.dialect).forEach { sql ->
                         connection.createStatement().use { it.execute(sql) }
                     }
@@ -120,14 +122,8 @@ class Database(
                             statement.executeUpdate()
                         }
                     }
-                    connection.commit()
-                    onMigrated(migration.version)
-                } catch (failure: SQLException) {
-                    connection.rollback()
-                    throw failure
-                } finally {
-                    connection.autoCommit = autoCommit
                 }
+                onMigrated(migration.version)
             }
         }
     }
@@ -140,8 +136,16 @@ class Database(
                 if (rows.next()) rows.getString(1).toIntOrNull() ?: 0 else 0
             }
         }
-    } catch (_: SQLException) {
-        // The meta table does not exist yet, which means this is a first run.
+    } catch (failure: SQLException) {
+        // Permission, syntax, connection and corruption failures must not trigger fresh migrations.
+        val missingTable = when (descriptor.dialect) {
+            Dialect.H2 -> failure.sqlState == "42S02" && failure.errorCode in setOf(42102, 42104)
+            Dialect.MYSQL, Dialect.MARIADB -> failure.sqlState == "42S02" && failure.errorCode == 1146
+            Dialect.POSTGRESQL -> failure.sqlState == "42P01"
+            Dialect.SQLITE -> failure.errorCode == 1 && SQLITE_MISSING_TABLE.find(failure.message.orEmpty())
+                ?.groupValues?.get(1) in setOf(Schema.META, "main.${Schema.META}")
+        }
+        if (!missingTable) throw failure
         0
     }
 
@@ -149,17 +153,32 @@ class Database(
         dataSource.connection.use(block)
 
     fun <T> transaction(block: (Connection) -> T): T = withConnection { connection ->
+        inTransaction(connection, block)
+    }
+
+    private fun <T> inTransaction(connection: Connection, block: (Connection) -> T): T {
         val autoCommit = connection.autoCommit
-        connection.autoCommit = false
+        var primary: Throwable? = null
         try {
+            connection.autoCommit = false
             val result = block(connection)
             connection.commit()
-            result
+            return result
         } catch (failure: Throwable) {
-            connection.rollback()
+            primary = failure
+            try {
+                connection.rollback()
+            } catch (cleanup: Throwable) {
+                if (cleanup !== failure) failure.addSuppressed(cleanup)
+            }
             throw failure
         } finally {
-            connection.autoCommit = autoCommit
+            try {
+                connection.autoCommit = autoCommit
+            } catch (cleanup: Throwable) {
+                if (primary == null) throw cleanup
+                if (cleanup !== primary) primary.addSuppressed(cleanup)
+            }
         }
     }
 
@@ -168,6 +187,8 @@ class Database(
     }
 
     companion object {
+        private val SQLITE_MISSING_TABLE = Regex("no such table:\\s*([A-Za-z_][A-Za-z0-9_.]*)", RegexOption.IGNORE_CASE)
+
         fun driverClass(dialect: Dialect): String = when (dialect) {
             Dialect.SQLITE -> "org.sqlite.JDBC"
             Dialect.H2 -> "org.h2.Driver"
@@ -176,18 +197,5 @@ class Database(
             Dialect.POSTGRESQL -> "org.postgresql.Driver"
         }
 
-        /**
-         * JDBC calls are blocking. Running them on the main server thread is the single easiest way
-         * to turn a login plugin into a lag source, so every repository hop is dispatched here.
-         */
-        fun ioExecutor(threads: Int = 4): ExecutorService {
-            val counter = AtomicInteger()
-            val factory = ThreadFactory { runnable ->
-                Thread(runnable, "KyokouAuth-IO-${counter.incrementAndGet()}").apply {
-                    isDaemon = true
-                }
-            }
-            return Executors.newFixedThreadPool(threads, factory)
-        }
     }
 }

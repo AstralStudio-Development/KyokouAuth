@@ -1,8 +1,16 @@
 package moe.ryuu.kyokouauth.velocity
 
+import com.velocitypowered.api.command.CommandManager
+import com.velocitypowered.api.proxy.ConsoleCommandSource
+import com.velocitypowered.api.command.CommandMeta
 import com.velocitypowered.api.event.connection.DisconnectEvent
 import com.velocitypowered.api.event.connection.LoginEvent
 import com.velocitypowered.api.event.connection.PreLoginEvent
+import com.velocitypowered.api.event.command.CommandExecuteEvent
+import com.velocitypowered.api.event.command.PlayerAvailableCommandsEvent
+import com.velocitypowered.api.event.player.TabCompleteEvent
+import com.mojang.brigadier.builder.LiteralArgumentBuilder
+import com.mojang.brigadier.tree.RootCommandNode
 import com.velocitypowered.api.event.player.GameProfileRequestEvent
 import com.velocitypowered.api.event.player.KickedFromServerEvent
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent
@@ -10,7 +18,8 @@ import com.velocitypowered.api.event.player.ServerPreConnectEvent
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder
 import com.velocitypowered.api.proxy.Player
 import com.velocitypowered.api.proxy.ProxyServer
-import com.velocitypowered.api.proxy.config.ProxyConfig
+import com.velocitypowered.api.proxy.config.ProxyConfig as VelocityProxyConfig
+import moe.ryuu.kyokouauth.proxy.ProxyConfig
 import com.velocitypowered.api.proxy.server.RegisteredServer
 import com.velocitypowered.api.proxy.server.ServerInfo
 import com.velocitypowered.api.util.GameProfile
@@ -50,11 +59,20 @@ class LoginGateTest {
     private val backend = registered("lobby", 25566)
     private val limbo = registered(LoginGate.LIMBO_SERVER_NAME, 25567)
     private val players = mutableListOf<Client>()
-    private val config = VelocityConfig(emptyMap(), File("unused-test-config"))
+    private val config = ProxyConfig(mapOf("verification.poll-interval-seconds" to "1"), File("unused-test-config"))
     private var now = 1_000_000L
     private var limboRegistered = true
     private val versionedLimbos = mutableMapOf<Int, RegisteredServer>()
-    private val proxyConfig = stub<ProxyConfig> { method, _ ->
+    private val aliases = mutableMapOf<String, Set<String>>()
+    private val commandManager = stub<CommandManager> { method, args ->
+        when (method) {
+            "getCommandMeta" -> aliases[args[0]]?.let { names ->
+                stub<CommandMeta> { meta, _ -> if (meta == "getAliases") names else error(meta) }
+            }
+            else -> error(method)
+        }
+    }
+    private val proxyConfig = stub<VelocityProxyConfig> { method, _ ->
         when (method) {
             "getAttemptConnectionOrder" -> listOf("lobby")
             else -> error(method)
@@ -69,6 +87,7 @@ class LoginGateTest {
             })
             "getPlayer" -> Optional.ofNullable(players.lastOrNull { it.active && it.player.uniqueId == args[0] }?.player)
             "getConfiguration" -> proxyConfig
+            "getCommandManager" -> commandManager
             else -> error(method)
         }
     }
@@ -76,6 +95,99 @@ class LoginGateTest {
     private val gate = LoginGate(
         proxy, config, MessageCatalogue("en_US", File("unused-test-messages")), services, NOPLogger.NOP_LOGGER, { now },
     ).also { it.activate() }
+
+    @Test
+    fun `native command execution is denied while held and restored after authentication`() {
+        val client = client()
+        login(client)
+        for (command in listOf("server lobby", "SERVER lobby", "velocity:server lobby")) {
+            val event = CommandExecuteEvent(client.player, command)
+            gate.onCommand(event)
+            assertFalse(event.result.isAllowed, command)
+            assertFalse(event.result.isForwardToServer, command)
+        }
+        val allowed = CommandExecuteEvent(client.player, "help")
+        gate.onCommand(allowed)
+        assertTrue(allowed.result.isAllowed)
+        services.pollResult = DeviceCodeFlow.PollResult.Authorized("test-token", null, 300)
+        gate.onJoin(client.limbo)
+        services.runWork()
+        services.advanceBy(1_000L)
+        val restored = CommandExecuteEvent(client.player, "server lobby")
+        gate.onCommand(restored)
+        assertTrue(restored.result.isAllowed)
+    }
+
+    @Test
+    fun `native aliases rewritten commands and forced backend forwarding cannot bypass a configured root`() {
+        val client = client()
+        login(client)
+        aliases["srv"] = setOf("server", "srv")
+        val alias = CommandExecuteEvent(client.player, "srv lobby")
+        gate.onCommand(alias)
+        assertFalse(alias.result.isAllowed)
+        val rewritten = CommandExecuteEvent(client.player, "help")
+        rewritten.result = CommandExecuteEvent.CommandResult.command("server lobby")
+        gate.onCommand(rewritten)
+        assertFalse(rewritten.result.isAllowed)
+        val forward = CommandExecuteEvent(client.player, "server lobby")
+        forward.result = CommandExecuteEvent.CommandResult.forwardToServer()
+        gate.onCommand(forward)
+        assertFalse(forward.result.isAllowed)
+        assertFalse(forward.result.isForwardToServer)
+    }
+
+    @Test
+    fun `native console and an existing plugin denial are never overridden`() {
+        val console = stub<ConsoleCommandSource> { method, _ -> error(method) }
+        val administrative = CommandExecuteEvent(console, "server lobby")
+        gate.onCommand(administrative)
+        assertTrue(administrative.result.isAllowed)
+        val client = client()
+        services.decision = AuthCoordinator.Decision.Admit(record.toIdentity(), record)
+        login(client)
+        val denied = CommandExecuteEvent(client.player, "server lobby")
+        denied.result = CommandExecuteEvent.CommandResult.denied()
+        gate.onCommand(denied)
+        assertFalse(denied.result.isAllowed)
+    }
+
+    @Test
+    fun `native command tree hides configured roots aliases and redirects only while held`() {
+        val client = client()
+        login(client)
+        aliases["srv"] = setOf("server", "srv")
+        fun tree() = RootCommandNode<Any>().apply {
+            val server = LiteralArgumentBuilder.literal<Any>("server").build()
+            addChild(server)
+            addChild(LiteralArgumentBuilder.literal<Any>("velocity:server").build())
+            addChild(LiteralArgumentBuilder.literal<Any>("srv").build())
+            addChild(LiteralArgumentBuilder.literal<Any>("shortcut").redirect(server).build())
+            addChild(LiteralArgumentBuilder.literal<Any>("help").build())
+        }
+        val held = tree()
+        gate.onAvailableCommands(PlayerAvailableCommandsEvent(client.player, held))
+        assertEquals(listOf("help"), held.children.map { it.name })
+        services.pollResult = DeviceCodeFlow.PollResult.Authorized("test-token", null, 300)
+        gate.onJoin(client.limbo)
+        services.runWork()
+        services.advanceBy(1_000L)
+        val authenticated = tree()
+        gate.onAvailableCommands(PlayerAvailableCommandsEvent(client.player, authenticated))
+        assertEquals(5, authenticated.children.size)
+    }
+
+    @Test
+    fun `native legacy completion removes blocked roots and arguments without hiding allowed suggestions`() {
+        val client = client()
+        login(client)
+        val roots = TabCompleteEvent(client.player, "/", mutableListOf("/server", "/help", "/velocity:server"))
+        gate.onTabComplete(roots)
+        assertEquals(listOf("/help"), roots.suggestions)
+        val arguments = TabCompleteEvent(client.player, "/server ", mutableListOf("lobby", "login"))
+        gate.onTabComplete(arguments)
+        assertTrue(arguments.suggestions.isEmpty())
+    }
 
     @Test
     fun `ready verification title stays visible without restarting at three second boundaries`() {
@@ -151,7 +263,7 @@ class LoginGateTest {
     @Test
     fun `very long verification deadlines clamp title ticks without integer overflow`() {
         val longGate = LoginGate(proxy,
-            VelocityConfig(mapOf("verification.timeout-seconds" to Int.MAX_VALUE.toString()), File("unused-test-config")),
+            ProxyConfig(mapOf("verification.timeout-seconds" to Int.MAX_VALUE.toString()), File("unused-test-config")),
             MessageCatalogue("en_US", File("unused-test-messages")), services, NOPLogger.NOP_LOGGER, { now },
         ).also { it.activate() }
         val client = client()
@@ -999,8 +1111,6 @@ class LoginGateTest {
         override fun grantSession(uuid: UUID, address: String) { grants++ }
         override fun submit(task: () -> Unit) { work.addLast(task) }
         override fun schedule(delayMillis: Long, task: () -> Unit) = Timer(delayMillis, now, task).also { timers += it }
-        override fun scheduleAtFixedRate(periodMillis: Long, task: () -> Unit) =
-            Timer(periodMillis, now, task, repeating = true).also { timers += it }
         override fun begin(): DeviceCodeFlow.Challenge {
             beginCalls++
             beginFailure?.let { throw it }

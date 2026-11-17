@@ -39,6 +39,8 @@ class BungeeE2ePlugin : Plugin(), Listener {
     private lateinit var platform: BungeePlatform
     private lateinit var gate: LoginGate
     private lateinit var adapter: BungeeLoginGate
+    private var commandGuard: BungeeCommandGuard? = null
+    private var commandProbe: BungeeE2eCommandProbe? = null
     private lateinit var authority: PrivateTicketAuthority
     private var limbo: LimboServer? = null
     private val handles = IdentityHashMap<LimboPlayer, LimboPlayer>()
@@ -52,7 +54,8 @@ class BungeeE2ePlugin : Plugin(), Listener {
             val profiles = BungeeProfileBridge(javaClass.classLoader)
             val config = ProxyConfig(mapOf("post-login.server" to "backend", "limbo.keep-alive-seconds" to "2",
                 "limbo.keep-alive-timeout-seconds" to "10", "limbo.join-timeout-seconds" to "5",
-                "verification.poll-interval-seconds" to "1"), dataFolder)
+                "verification.poll-interval-seconds" to "1", "verification.blocked-commands" to
+                    if (scenario == "commands") "server\n${BungeeE2eCommandProbe.PROBE}" else "server"), dataFolder)
             val messages = MessageCatalogue("en_US", File(dataFolder, "messages")).also { it.load() }
             val log = ProxyLog { severity, message, error ->
                 logger.log(if (severity == ProxyLog.Level.INFO) java.util.logging.Level.INFO else java.util.logging.Level.WARNING, message, error)
@@ -76,12 +79,11 @@ class BungeeE2ePlugin : Plugin(), Listener {
                 override fun submit(task: () -> Unit) { io.execute(task) }
                 override fun schedule(delayMillis: Long, task: () -> Unit): ScheduledFuture<*> =
                     scheduler.schedule(task, delayMillis, TimeUnit.MILLISECONDS)
-                override fun scheduleAtFixedRate(periodMillis: Long, task: () -> Unit): ScheduledFuture<*> =
-                    scheduler.scheduleAtFixedRate(task, periodMillis, periodMillis, TimeUnit.MILLISECONDS)
                 override fun begin() = DeviceCodeFlow.Challenge("E2E-CODE", "https://microsoft.com/link",
                     "https://microsoft.com/link?otc=E2E-CODE", 300, 1, "test-only-no-network")
                 override fun poll(challenge: DeviceCodeFlow.Challenge): DeviceCodeFlow.PollResult =
-                    if (scenario in setOf("stable", "first-bind")) DeviceCodeFlow.PollResult.Authorized("synthetic", null, 300)
+                    if (scenario in setOf("stable", "first-bind") ||
+                        (scenario == "commands" && commandProbe?.mayAuthorize() == true)) DeviceCodeFlow.PollResult.Authorized("synthetic", null, 300)
                     else DeviceCodeFlow.PollResult.Pending
                 override fun exchange(accessToken: String) = XboxLive.XstsToken("synthetic", stable.leastSignificantBits, "Controlled profile", "synthetic")
             }
@@ -89,6 +91,11 @@ class BungeeE2ePlugin : Plugin(), Listener {
             adapter = BungeeLoginGate(this, platform, profiles, BungeeTickets(platform, profiles, authority), gate,
                 log, services::submit, services::schedule, { accepting })
             proxy.pluginManager.registerListener(this, adapter)
+            commandGuard = BungeeCommandGuard(platform, gate, config.blockedCommands.isNotEmpty()).also {
+                it.enablePacketFilter(log)
+                proxy.pluginManager.registerListener(this, it)
+            }
+            if (scenario == "commands") commandProbe = BungeeE2eCommandProbe(this, platform, gate, scheduler)
             val listener = object : LimboListener {
                 override fun onJoin(player: LimboPlayer) {
                     val recording = object : LimboPlayer by player {
@@ -101,11 +108,19 @@ class BungeeE2ePlugin : Plugin(), Listener {
                     synchronized(handles) { handles[player] = recording }
                     gate.onJoin(recording)
                     logger.info("BUNGEE_E2E_READY ${player.name} ${player.uuid}")
+                    if (scenario == "commands") {
+                        val frontend = platform.connections().single { it.sessionId == player.connectionId && it.isActive }
+                        commandProbe?.ready(frontend)
+                    }
                     if (scenario == "server") scheduler.schedule({
-                        val frontend = checkNotNull(proxy.getPlayer(player.uuid))
+                        val frontend = checkNotNull(platform.connections().single { it.sessionId == player.connectionId && it.isActive }.native)
                         frontend.setPermission("bungeecord.command.server", true)
                         logger.info("BUNGEE_E2E_UNAUTHORIZED_SERVER_ATTEMPT ${player.name}")
-                        check(proxy.pluginManager.dispatchCommand(frontend, "server backend")) { "Native /server command unavailable" }
+                        val attempt = proxy.pluginManager.callEvent(net.md_5.bungee.api.event.ChatEvent(frontend, frontend.server, "/server backend"))
+                        if (!attempt.isCancelled) proxy.pluginManager.dispatchCommand(frontend, "server backend")
+                        check(attempt.isCancelled) { "Native command entry was not denied" }
+                        logger.info("BUNGEE_E2E_COMMAND_ENTRY_BLOCKED server=true")
+                        frontend.disconnect(unavailable().toBungee())
                     }, 1, TimeUnit.SECONDS)
                 }
                 override fun onLeave(player: LimboPlayer) {
@@ -120,6 +135,18 @@ class BungeeE2ePlugin : Plugin(), Listener {
             limbo!!.startAll().forEach { (protocol, address) ->
                 platform.registerEngine(protocol, if (protocol == 777 && overridePort != null) InetSocketAddress("127.0.0.1", overridePort) else address)
             }
+            for (protocol in 767..777) {
+                val name = "kyokouauth-limbo-$protocol"
+                val common = platform.getServer(name).orElseThrow()
+                val native = checkNotNull(platform.nativeServer(common))
+                check(proxy.getServerInfo(name) == null && proxy.servers.keys.none { it.equals(name, ignoreCase = true) }) {
+                    "Private engine leaked into the public server directory: $name"
+                }
+                check(proxy.servers.values.none { it === native } && platform.commonServer(native) === common) {
+                    "Private engine identity or directory isolation changed: $name"
+                }
+            }
+            logger.info("BUNGEE_E2E_PRIVATE_DIRECTORY public=0 internal=11")
             scheduler.scheduleAtFixedRate({ adapter.sweepClosed() }, 1, 1, TimeUnit.SECONDS)
             gate.activate()
             accepting = true
@@ -133,7 +160,9 @@ class BungeeE2ePlugin : Plugin(), Listener {
     fun refuse(event: ServerConnectEvent) { if (!accepting) { event.isCancelled = true; event.player.disconnect(unavailable().toBungee()) } }
     override fun onDisable() {
         accepting = false
+        commandProbe?.close(); commandProbe = null
         if (::adapter.isInitialized) adapter.close()
+        commandGuard?.close(); commandGuard = null
         if (::gate.isInitialized) gate.deactivate()
         limbo?.close()
         if (::platform.isInitialized) platform.unregisterEngines()

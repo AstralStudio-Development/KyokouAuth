@@ -256,7 +256,7 @@ def inspect_artifact(artifact):
         names = archive.namelist()
         if "bungee.yml" not in names or "${version}" in archive.read("bungee.yml").decode():
             raise RuntimeError("Missing/unexpanded Bungee plugin descriptor")
-        if any(name.startswith("net/md_5/") or "/BungeeE2ePlugin" in name for name in names):
+        if any(name.startswith("net/md_5/") or "/BungeeE2e" in name for name in names):
             raise RuntimeError("Native proxy or test-only bootstrap leaked into the production artifact")
         service = "META-INF/services/moe.ryuu.kyokouauth.limbo.LimboEngineFactory"
         if names.count(service) != 1:
@@ -284,6 +284,7 @@ def setup_runtime(args, backend_port):
     plugins = run / "plugins"
     plugins.mkdir(parents=True, exist_ok=True)
     (run / "matrix-result.json").unlink(missing_ok=True)
+    (run / "command-results.json").unlink(missing_ok=True)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     artifact = ROOT / f"platform-bungee/build/libs/KyokouAuth-Bungee-{version}.jar"
     if not artifact.is_file():
@@ -293,7 +294,7 @@ def setup_runtime(args, backend_port):
     target = plugins / "KyokouAuth.jar"
     if args.command == "network":
         classes = ROOT / "platform-bungee/build/classes/kotlin/test/moe/ryuu/kyokouauth/bungee"
-        fixture_classes = list(classes.glob("BungeeE2ePlugin*.class"))
+        fixture_classes = list(classes.glob("BungeeE2e*.class"))
         if not fixture_classes:
             raise RuntimeError("Build :platform-bungee:testClasses first")
         with zipfile.ZipFile(artifact) as source, zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as output:
@@ -341,7 +342,7 @@ servers:
 def runtime(args, backend_port, engine_port=None):
     jar, run = setup_runtime(args, backend_port)
     (run / "tmp").mkdir(exist_ok=True)
-    command = [str(args.jdk / "bin/java.exe"), "-Xms96M", "-Xmx512M", "-XX:ActiveProcessorCount=2", "-Djava.io.tmpdir=" + str(run / "tmp"),
+    command = [str(args.jdk / "bin/java.exe"), "-Xms64M", "-Xmx128M", "-XX:ActiveProcessorCount=2", "-Djava.io.tmpdir=" + str(run / "tmp"),
                "-Dhttp.proxyHost=127.0.0.1", "-Dhttp.proxyPort=7890", "-Dhttps.proxyHost=127.0.0.1", "-Dhttps.proxyPort=7890",
                "-Dkyokou.e2e.scenario=" + args.scenario]
     if engine_port is not None:
@@ -407,7 +408,7 @@ def vanilla(args, run, backend, reconnect=False):
     folder = BASE / "client" / args.scenario / ("reconnect" if reconnect else "first")
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "tmp").mkdir(exist_ok=True)
-    (folder / "options.txt").write_text("onboardAccessibility:false\nskipMultiplayerWarning:true\n", encoding="utf-8")
+    (folder / "options.txt").write_text("onboardAccessibility:false\nskipMultiplayerWarning:true\npauseOnLostFocus:false\n", encoding="utf-8")
     features = {"is_quick_play_multiplayer": True, "has_custom_resolution": True}
     jars = []
     for library in metadata["libraries"]:
@@ -449,7 +450,19 @@ def vanilla(args, run, backend, reconnect=False):
                 with logpath.open("r", encoding="utf-8", errors="replace") as source:
                     source.seek(offset)
                     text = source.read()
-                if args.scenario in ("stable", "first-bind", "trusted") or reconnect:
+                if args.scenario == "commands":
+                    if "BUNGEE_E2E_COMMANDS_FAIL" in text or re.search(r"OracleLocal.*(?:disconnected with|UpstreamBridge has disconnected)", text):
+                        raise RuntimeError("Actual native command/tree probe failed or its frontend disconnected")
+                    if "BUNGEE_E2E_COMMANDS_PASS" in text:
+                        for stage in ("held", "authenticated"):
+                            for route in ("typed", "raw"):
+                                if f"BUNGEE_E2E_COMMAND_TREE stage={stage} route={route}" not in text:
+                                    raise RuntimeError("Missing final-encoded native command tree probe result")
+                        if ready_at is None:
+                            ready_at = time.monotonic()
+                        if time.monotonic() - ready_at >= 2:
+                            return
+                elif args.scenario in ("stable", "first-bind", "trusted") or reconnect:
                     if args.scenario == "first-bind" and not reconnect:
                         if "BUNGEE_E2E_SESSION" in text and "BUNGEE_E2E_LEFT OracleLocal" in text:
                             return
@@ -459,7 +472,7 @@ def vanilla(args, run, backend, reconnect=False):
                     if ready_at is None:
                         ready_at = time.monotonic()
                     if "BUNGEE_E2E_LEFT OracleLocal" in text:
-                        if args.scenario == "server" and "BUNGEE_E2E_UNAUTHORIZED_SERVER_ATTEMPT" in text:
+                        if args.scenario == "server" and "BUNGEE_E2E_COMMAND_ENTRY_BLOCKED server=true" in text:
                             return
                         raise RuntimeError("Original client left after READY")
                     if args.scenario != "server" and time.monotonic() - ready_at >= 12:
@@ -483,7 +496,7 @@ def vanilla(args, run, backend, reconnect=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["prepare", "startup", "network"])
-    parser.add_argument("--scenario", default="production", choices=["production", "unavailable", "held", "trusted", "first-bind", "stable", "server", "tcp-refused", "login-kick", "join-timeout"])
+    parser.add_argument("--scenario", default="production", choices=["production", "unavailable", "held", "trusted", "first-bind", "stable", "server", "commands", "tcp-refused", "login-kick", "join-timeout"])
     parser.add_argument("--port", type=int, default=25679)
     parser.add_argument("--jdk", type=Path, default=Path("C:/Program Files/Zulu/zulu-25"))
     parser.add_argument("--minecraft", type=Path, default=Path(os.environ.get("APPDATA", ".")) / ".minecraft")
@@ -497,13 +510,15 @@ def main():
         prepare(); print("PASS fixed Bungee 2111 / 55e1b0b and pinned API prepared"); return
     if args.command == "network" and args.scenario in ("production", "unavailable"):
         parser.error("network requires an injected-Services scenario")
+    if args.scenario == "commands" and not args.client:
+        parser.error("commands requires the original client via --client")
     if args.observer and (not args.client or args.scenario != "held"):
         parser.error("--observer requires --client --scenario held")
     if args.version != "26.3" and not args.observer:
         parser.error("the representative old-client matrix requires --observer")
     if args.paper and (not args.client or args.scenario not in ("stable", "first-bind", "trusted")):
         parser.error("--paper requires --client and a stable/first-bind/trusted identity scenario")
-    backend = PaperBackend(args) if args.paper else Recorder()
+    backend = PaperBackend(args) if args.paper else Recorder("stall" if args.scenario == "commands" else "kick")
     engine = Recorder("stall" if args.scenario == "join-timeout" else "kick") if args.scenario in ("login-kick", "join-timeout") else None
     try:
         override = 9 if args.scenario == "tcp-refused" else engine.port if engine else None
@@ -538,7 +553,7 @@ def main():
                     parser.error("this scenario requires --client; synthetic packets cannot prove Limbo READY")
                 probe(args.port, timeout=14)
                 result = "synthetic native event/forwarding " + args.scenario
-            if args.scenario in ("trusted", "stable", "first-bind"):
+            if args.scenario in ("trusted", "stable", "first-bind", "commands"):
                 deadline = time.monotonic() + 8
                 while not backend.events and time.monotonic() < deadline:
                     time.sleep(0.1)
@@ -552,6 +567,13 @@ def main():
             elif backend.events:
                 raise RuntimeError("Unauthenticated frontend reached the real backend")
             (run / "backend-events.json").write_text(json.dumps(backend.events, indent=2), encoding="utf-8")
+            if args.scenario == "commands":
+                source = json.loads((run / "source-artifact.json").read_text(encoding="utf-8"))
+                (run / "command-results.json").write_text(json.dumps({"source_artifact_sha256": source["sha256"],
+                    "physical_frontend_unchanged": True, "held_execution_count": 0, "authenticated_execution_count": 1,
+                    "held_typed_and_raw_tree_hidden": True, "authenticated_new_typed_and_raw_tree_restored": True,
+                    "visibility_observed_after_native_encoder": True, "native_event_bus_and_dispatcher": True,
+                    "native_backend_forwarding": backend.events}, indent=2), encoding="utf-8")
             if args.observer:
                 source = json.loads((run / "source-artifact.json").read_text(encoding="utf-8"))
                 (run / "matrix-result.json").write_text(json.dumps({"version": args.version,
@@ -560,7 +582,7 @@ def main():
                     "connected_after_ready_seconds": 12, "complete_test_url_received": True,
                     "title_count": 1, "backend_handshakes": 0}, indent=2), encoding="utf-8")
             detail = ("real Paper UUID confirmed via native console; properties not inspected" if args.paper else
-                      "forwarded UUID and private-ticket removal confirmed" if args.scenario in ("trusted", "stable", "first-bind") else
+                      "forwarded UUID and private-ticket removal confirmed" if args.scenario in ("trusted", "stable", "first-bind", "commands") else
                       "recording backend received zero frontend handshakes")
             print("PASS " + result + "; " + detail)
     finally:

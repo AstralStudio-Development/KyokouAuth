@@ -1,11 +1,15 @@
 package moe.ryuu.kyokouauth.velocity
 
+import com.mojang.brigadier.tree.CommandNode
 import com.velocitypowered.api.event.PostOrder
 import com.velocitypowered.api.event.ResultedEvent
 import com.velocitypowered.api.event.Subscribe
 import com.velocitypowered.api.event.connection.DisconnectEvent
 import com.velocitypowered.api.event.connection.LoginEvent
 import com.velocitypowered.api.event.connection.PreLoginEvent
+import com.velocitypowered.api.event.command.CommandExecuteEvent
+import com.velocitypowered.api.event.command.PlayerAvailableCommandsEvent
+import com.velocitypowered.api.event.player.TabCompleteEvent
 import com.velocitypowered.api.event.player.GameProfileRequestEvent
 import com.velocitypowered.api.event.player.KickedFromServerEvent
 import com.velocitypowered.api.event.player.PlayerChooseInitialServerEvent
@@ -14,6 +18,9 @@ import com.velocitypowered.api.proxy.Player
 import com.velocitypowered.api.proxy.ProxyServer
 import com.velocitypowered.api.util.GameProfile
 import moe.ryuu.kyokouauth.core.text.MessageCatalogue
+import moe.ryuu.kyokouauth.proxy.AuthService
+import moe.ryuu.kyokouauth.proxy.CommandNames
+import moe.ryuu.kyokouauth.proxy.ProxyConfig
 import moe.ryuu.kyokouauth.limbo.LimboListener
 import moe.ryuu.kyokouauth.limbo.LimboPlayer
 import org.slf4j.Logger
@@ -26,8 +33,8 @@ import moe.ryuu.kyokouauth.proxy.GameProfile as PortGameProfile
 
 /** Only native event/result conversion lives here; both proxies execute the same connection gate. */
 class LoginGate internal constructor(
-    server: ProxyServer,
-    config: VelocityConfig,
+    private val server: ProxyServer,
+    config: ProxyConfig,
     private val messages: MessageCatalogue,
     services: SharedGate.Services,
     logger: Logger,
@@ -37,7 +44,7 @@ class LoginGate internal constructor(
     internal val ports = VelocityPorts(server)
     internal val common = SharedGate(ports, config, messages, services, logger.toProxyLog(), clock)
 
-    constructor(server: ProxyServer, config: VelocityConfig, messages: MessageCatalogue, auth: AuthService, logger: Logger) :
+    constructor(server: ProxyServer, config: ProxyConfig, messages: MessageCatalogue, auth: AuthService, logger: Logger) :
         this(server, config, messages, SharedGate.liveServices(auth), logger)
 
     internal fun activate() = common.activate()
@@ -79,6 +86,54 @@ class LoginGate internal constructor(
         if (!allowed) port.result = moe.ryuu.kyokouauth.proxy.ResultedEvent.ComponentResult.denied(messages.parsed("login.internal-error"))
         common.onLogin(port)
         if (allowed && !port.result.isAllowed) event.result = ResultedEvent.ComponentResult.denied(requireNotNull(port.result.reason).toAdventure())
+    }
+
+    @Subscribe(order = PostOrder.LAST)
+    fun onCommand(event: CommandExecuteEvent) {
+        val player = event.commandSource as? Player ?: return
+        if (!event.result.isAllowed && !event.result.isForwardToServer) return
+        val port = ports.player(player)
+        if (common.isAuthenticated(port)) return
+        val commands = listOf(event.command, event.result.command.orElse(event.command))
+        val denied = commands.firstNotNullOfOrNull { blockedCommand(port, it) } ?: return
+        event.result = CommandExecuteEvent.CommandResult.denied()
+        common.allowCommand(port, denied) // Feedback is best-effort; it can never reopen the event.
+    }
+
+    @Subscribe(order = PostOrder.LAST)
+    fun onAvailableCommands(event: PlayerAvailableCommandsEvent) {
+        val player = ports.player(event.player)
+        if (common.isAuthenticated(player)) return
+        event.rootNode.children.filter { node ->
+            val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<CommandNode<*>, Boolean>())
+            var current: CommandNode<*>? = node
+            var blocked = false
+            while (current != null && seen.add(current)) {
+                if (blockedCommand(player, current.name) != null) { blocked = true; break }
+                current = current.redirect
+            }
+            blocked
+        }.map { it.name }.forEach(event.rootNode::removeChildByName)
+    }
+
+    @Subscribe(order = PostOrder.LAST)
+    fun onTabComplete(event: TabCompleteEvent) {
+        val player = ports.player(event.player)
+        if (common.isAuthenticated(player)) return
+        val partial = event.partialMessage.trimStart()
+        if (!partial.startsWith('/')) return
+        if (blockedCommand(player, partial) != null) {
+            event.suggestions.clear()
+        } else if (partial.none(Char::isWhitespace)) {
+            event.suggestions.removeIf { blockedCommand(player, it) != null }
+        }
+    }
+
+    private fun blockedCommand(player: moe.ryuu.kyokouauth.proxy.Player, command: String): String? {
+        if (common.isCommandBlocked(player, command)) return command
+        val root = CommandNames.root(command)
+        if (root.isEmpty()) return null
+        return server.commandManager.getCommandMeta(root)?.aliases?.firstOrNull { common.isCommandBlocked(player, it) }
     }
 
     @Subscribe(order = PostOrder.LAST)

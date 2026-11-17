@@ -14,16 +14,18 @@ import java.nio.charset.StandardCharsets
  * `login.premium-name`). Flattening once at load time keeps every later read a map access, which
  * matters because messages are resolved on the thread that delivers them.
  *
- * Only scalars are expected as leaves. A list becomes its items joined with newlines, which is what a
- * message file wants and what a configuration value would never legitimately be.
+ * Leaves are scalars or lists. Lists become newline-separated values for multi-line messages and
+ * command-root settings; the consumer validates the meaning of each resulting value.
  */
 object YamlDocument {
 
-    fun load(file: File): Map<String, String> = flatten(Yaml().load<Any?>(file.reader(StandardCharsets.UTF_8)))
+    fun load(file: File): Map<String, String> =
+        file.reader(StandardCharsets.UTF_8).use { flatten(Yaml().load<Any?>(it)) }
 
     fun load(bytes: ByteArray): Map<String, String> =
-        flatten(Yaml().load<Any?>(InputStreamReader(bytes.inputStream(), StandardCharsets.UTF_8)))
+        InputStreamReader(bytes.inputStream(), StandardCharsets.UTF_8).use { flatten(Yaml().load<Any?>(it)) }
 
+    // SnakeYaml reads ahead but does not close this reader; the supplied stream stays caller-owned.
     fun load(stream: InputStream): Map<String, String> =
         flatten(Yaml().load<Any?>(InputStreamReader(stream, StandardCharsets.UTF_8)))
 
@@ -47,18 +49,3 @@ object YamlDocument {
         }
     }
 }
-
-/**
- * Reads one value with a default, so a missing key is a default rather than a crash.
- *
- * A configuration file that has not caught up with a release must not stop the plugin from starting:
- * the alternative is that an upgrade refuses to boot until an operator hand-edits YAML.
- */
-fun Map<String, String>.string(key: String, default: String): String = this[key] ?: default
-
-fun Map<String, String>.int(key: String, default: Int): Int = this[key]?.trim()?.toIntOrNull() ?: default
-
-fun Map<String, String>.long(key: String, default: Long): Long = this[key]?.trim()?.toLongOrNull() ?: default
-
-fun Map<String, String>.bool(key: String, default: Boolean): Boolean =
-    this[key]?.trim()?.lowercase()?.let { it == "true" || it == "yes" || it == "on" } ?: default

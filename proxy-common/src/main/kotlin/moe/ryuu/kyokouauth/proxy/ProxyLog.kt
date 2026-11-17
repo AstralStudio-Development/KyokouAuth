@@ -12,7 +12,11 @@ fun interface ProxyLog {
         val failure = args.lastOrNull() as? Throwable
         val values = if (failure == null) args.asList() else args.dropLast(1)
         var index = 0
-        val message = Regex("\\{\\}").replace(template) { if (index < values.size) values[index++].toString() else "{}" }
+        val message = PLACEHOLDER.replace(template) { if (index < values.size) values[index++].toString() else "{}" }
         log(level, message, failure)
+    }
+
+    companion object {
+        private val PLACEHOLDER = Regex("\\{\\}")
     }
 }

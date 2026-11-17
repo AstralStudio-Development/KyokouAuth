@@ -79,6 +79,9 @@ internal class BungeePlatform(val proxy: NativeProxy) : ProxyServer {
     private val servers = IdentityHashMap<ServerInfo, RegisteredServer>()
     private val nativeServers = IdentityHashMap<RegisteredServer, ServerInfo>()
     private val internalServers = IdentityHashMap<RegisteredServer, Int>()
+    private val privateServers = HashMap<String, RegisteredServer>()
+    // Keep reserved names after removal: an expired private handle must never become public.
+    private val privateServerNames = HashSet<String>()
 
     @Synchronized fun pending(connection: PendingConnection): BungeePlayer = players.getOrPut(connection) { BungeePlayer(connection, this) }
     @Synchronized fun find(connection: PendingConnection): BungeePlayer? = players[connection]
@@ -87,29 +90,56 @@ internal class BungeePlatform(val proxy: NativeProxy) : ProxyServer {
     @Synchronized fun remove(player: BungeePlayer) { if (players[player.pending] === player) players.remove(player.pending) }
 
     @Synchronized fun commonServer(info: ServerInfo): RegisteredServer? {
+        val key = serverKey(info.name)
+        if (key in privateServerNames) {
+            val common = privateServers[key] ?: return null
+            return common.takeIf { nativeServer(it) === info }
+        }
         if (proxy.servers[info.name] !== info) return null
         return servers.getOrPut(info) { RegisteredServer(info.name).also { nativeServers[it] = info } }
     }
-    @Synchronized fun nativeServer(server: RegisteredServer): ServerInfo? = nativeServers[server]?.takeIf { proxy.servers[it.name] === it }
+    @Synchronized fun nativeServer(server: RegisteredServer): ServerInfo? {
+        val native = nativeServers[server] ?: return null
+        val key = serverKey(native.name)
+        return if (key in privateServerNames) native.takeIf {
+            privateServers[key] === server && servers[it] === server &&
+                internalServers.containsKey(server) && !hasPublicServer(it.name)
+        } else native.takeIf { proxy.servers[it.name] === it }
+    }
     @Synchronized fun registerEngine(protocol: Int, address: InetSocketAddress) {
+        require(protocol in 767..777) { "Unsupported private engine protocol" }
         val name = "kyokouauth-limbo-$protocol"
-        check(proxy.getServerInfo(name) == null) { "Reserved internal server '$name' is already registered" }
+        val key = serverKey(name)
+        privateServerNames += key
+        check(key !in privateServers) { "Private engine '$name' is already registered" }
+        check(!hasPublicServer(name)) { "Reserved internal server '$name' is publicly registered" }
         val info = proxy.constructServerInfo(name, address, "KyokouAuth private verification engine", true)
-        check(proxy.servers.putIfAbsent(name, info) == null) { "Internal registration raced another plugin" }
-        val common = checkNotNull(commonServer(info))
+        check(!hasPublicServer(name)) { "Private engine construction raced a public registration" }
+        val common = RegisteredServer(name)
+        servers[info] = common
+        nativeServers[common] = info
         internalServers[common] = protocol
+        privateServers[key] = common
     }
     @Synchronized fun engineProtocol(server: RegisteredServer): Int? = internalServers[server]
     @Synchronized fun unregisterEngines() {
         internalServers.keys.toList().forEach { common ->
-            nativeServers.remove(common)?.let { native ->
-                proxy.servers.remove(native.name, native)
-                servers.remove(native)
-            }
+            nativeServers.remove(common)?.let(servers::remove)
+            privateServers.remove(serverKey(common.name), common)
         }
         internalServers.clear()
     }
-    override fun getServer(name: String): Optional<RegisteredServer> = Optional.ofNullable(proxy.getServerInfo(name)?.let(::commonServer))
+    @Synchronized override fun getServer(name: String): Optional<RegisteredServer> {
+        val key = serverKey(name)
+        if (key in privateServerNames) {
+            return Optional.ofNullable(privateServers[key]?.takeIf { nativeServer(it) != null })
+        }
+        return Optional.ofNullable(proxy.getServerInfo(name)?.let(::commonServer))
+    }
+
+    private fun serverKey(name: String): String = name.lowercase(Locale.ROOT)
+    private fun hasPublicServer(name: String): Boolean = proxy.getServerInfo(name) != null ||
+        proxy.servers.any { (key, server) -> key.equals(name, ignoreCase = true) || server.name.equals(name, ignoreCase = true) }
     override fun getPlayer(name: String): Optional<Player> = Optional.ofNullable(proxy.getPlayer(name)?.let(::find))
     override fun getPlayer(uuid: UUID): Optional<Player> = Optional.ofNullable(proxy.getPlayer(uuid)?.let(::find))
     override val allPlayers: Collection<Player> get() = connections().filter { it.native != null && it.isActive }

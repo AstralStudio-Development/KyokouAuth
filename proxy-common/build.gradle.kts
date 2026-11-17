@@ -9,4 +9,5 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.launcher)
+    testRuntimeOnly(libs.jdbc.h2)
 }

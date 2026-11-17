@@ -13,8 +13,9 @@ import com.velocitypowered.api.event.proxy.ProxyInitializeEvent
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent
 import com.velocitypowered.api.plugin.annotation.DataDirectory
 import com.velocitypowered.api.proxy.ProxyServer
-import com.velocitypowered.api.proxy.server.ServerInfo
 import moe.ryuu.kyokouauth.core.text.MessageCatalogue
+import moe.ryuu.kyokouauth.proxy.AuthService
+import moe.ryuu.kyokouauth.proxy.ProxyConfig
 import moe.ryuu.kyokouauth.limbo.LimboLogger
 import moe.ryuu.kyokouauth.limbo.LimboServer
 import net.kyori.adventure.text.Component
@@ -31,7 +32,7 @@ import java.nio.file.Path
  * refuse - a `/server` command.
  *
  * The virtual server is a real Minecraft server on loopback, built by the `limbo` module and
- * registered with the proxy like any other backend. That is what keeps this class small: the proxy
+ * connected through private raw targets, never published in the proxy's server registry. The proxy
  * needs no knowledge of packets, and the limbo needs no knowledge of proxies.
  */
 class KyokouAuthVelocity @Inject constructor(
@@ -43,7 +44,6 @@ class KyokouAuthVelocity @Inject constructor(
     private var limbo: LimboServer? = null
     private var auth: AuthService? = null
     private var gate: LoginGate? = null
-    private val limboInfos = mutableListOf<ServerInfo>()
     @Volatile private var accepting = false
 
     // These listeners belong to the plugin instance itself, so even config/database/limbo creation
@@ -83,7 +83,7 @@ class KyokouAuthVelocity @Inject constructor(
         accepting = false
         try {
             val dataFolder = dataDirectory.toFile()
-            val config = VelocityConfig.load(dataFolder)
+            val config = ProxyConfig.load(dataFolder)
             val messages = MessageCatalogue(config.locale, File(dataFolder, "messages")).also { it.load() }
             val forwardingSecret = forwardingSecret(server.configuration)
             val reservedNames = listOf(LoginGate.LIMBO_SERVER_NAME) + (767..777).map { "${LoginGate.LIMBO_SERVER_NAME}-$it" }
@@ -104,11 +104,7 @@ class KyokouAuthVelocity @Inject constructor(
                 forwardingSecret = forwardingSecret,
             ).also { this.limbo = it }
             val addresses = limbo.startAll()
-            addresses.forEach { (protocol, address) ->
-                val info = ServerInfo("${LoginGate.LIMBO_SERVER_NAME}-$protocol", address)
-                server.registerServer(info)
-                limboInfos += info
-            }
+            addresses.forEach { (protocol, address) -> gate.ports.registerEngine(protocol, address) }
 
             val command = KyokouAuthCommand(
                 server = server,
@@ -157,10 +153,7 @@ class KyokouAuthVelocity @Inject constructor(
         // Closing one resource must not prevent the others from being released after partial startup.
         runCatching { limbo?.close() }.onFailure { logger.warn("Could not close login limbo", it) }
         limbo = null
-        limboInfos.forEach { info ->
-            runCatching { server.unregisterServer(info) }.onFailure { logger.warn("Could not unregister login limbo", it) }
-        }
-        limboInfos.clear()
+        gate?.ports?.unregisterEngines()
         runCatching { auth?.close() }.onFailure { logger.warn("Could not close authentication storage", it) }
         auth = null
     }

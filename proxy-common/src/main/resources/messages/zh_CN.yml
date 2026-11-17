@@ -36,7 +36,9 @@ limbo:
   command-blocked: "<#FACC15>验证完成前不能离开</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>点击聊天栏中的链接完成验证"
 
 verification:
+  command-blocked: "<#FACC15>请先完成验证，再使用该命令</#FACC15> <#8B8B94>»</#8B8B94> <#D4D4D8>点击聊天栏中的链接"
   starting: "<#22D3EE>正在连接微软并申请验证码</#22D3EE><newline><#D4D4D8>网络波动时会自动重试，请稍候，不必反复重连"
+  confirming: "<#22D3EE>已收到微软授权，正在确认 Xbox 身份…"
   start-unavailable: "<#FACC15>暂时无法连接微软登录服务</#FACC15><newline><#D4D4D8>已进行有限次数重试，请稍后再连接"
   start-busy: "<#FACC15>微软登录服务正在限流</#FACC15><newline><#D4D4D8>请稍后再试，不要连续重连"
   prompt: "<#22D3EE>微软账户验证<newline><click:open_url:'<url>'><#FFFFFF><u><url></u></#FFFFFF></click><newline><#D4D4D8>或到 microsoft.com/link 输入 <#FFFFFF><code><newline><#8B8B94><minutes> 分钟内有效"
@@ -51,6 +53,7 @@ verification:
   reconnect: "<#4ADE80>验证成功</#4ADE80> <#8B8B94>»</#8B8B94> <#D4D4D8>重新连接"
 
 command:
+  busy: "<#FACC15>认证任务繁忙或服务正在关闭，请稍后重试"
   no-permission: "<#F87171>没有权限"
   unknown-subcommand: "<#F87171>未知子命令 <#FFFFFF><name></#FFFFFF></#F87171><newline><#D4D4D8>输入 /kyokouauth 查看全部"
   usage-header: "<#8B8B94>[</#8B8B94><#22D3EE>KyokouAuth</#22D3EE><#8B8B94>]</#8B8B94> <#D4D4D8>命令"
