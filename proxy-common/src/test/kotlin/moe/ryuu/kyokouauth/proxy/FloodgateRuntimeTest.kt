@@ -87,6 +87,50 @@ class FloodgateRuntimeTest {
         assertFalse(first.matches(second))
     }
 
+    @Test fun `role skin guard cancels Floodgate SkinApplyEvent while active and unsubscribes on close`() {
+        val h = Fixture(allowLinked = true) { id -> id == UUID(0L, 123L) }
+        val guarded = FakeSkinApplyEvent(h.player)
+        h.api.bus.fire(guarded)
+        assertTrue(guarded.cancelled)
+        assertEquals(FakePostOrder.LAST, h.api.bus.lastOrder)
+        val otherPlayer = FakePlayer().apply { correctUniqueId = UUID(0L, 999L) }
+        val unguarded = FakeSkinApplyEvent(otherPlayer)
+        h.api.bus.fire(unguarded)
+        assertFalse(unguarded.cancelled)
+        h.runtime.close()
+        val afterClose = FakeSkinApplyEvent(h.player)
+        h.api.bus.fire(afterClose)
+        assertFalse(afterClose.cancelled)
+        assertTrue(h.api.bus.unsubscribed)
+    }
+
+    class FakeLinkedPlayer(val javaUniqueId: UUID, val javaUsername: String, val bedrockId: UUID)
+
+    enum class FakePostOrder { FIRST, EARLY, NORMAL, LATE, LAST }
+    interface FakeSubscriber
+    class FakeSkinApplyEvent(private val p: FakePlayer) {
+        var cancelled = false
+        fun player(): FakePlayer = p
+    }
+    class FakeEventBus {
+        var lastOrder: FakePostOrder? = null
+        var unsubscribed = false
+        private var handler: java.util.function.Consumer<Any>? = null
+        private val token = object : FakeSubscriber {}
+        fun subscribe(type: Class<*>, consumer: java.util.function.Consumer<Any>, order: FakePostOrder): FakeSubscriber {
+            assertEquals(FakeSkinApplyEvent::class.java, type)
+            lastOrder = order
+            handler = consumer
+            return token
+        }
+        fun unsubscribe(sub: FakeSubscriber) {
+            assertSame(token, sub)
+            unsubscribed = true
+            handler = null
+        }
+        fun fire(event: Any) { handler?.accept(event) }
+    }
+
     class FakePlayer {
         var xuid = "123"
         var correctUniqueId = UUID(0L, 123L)
@@ -100,8 +144,10 @@ class FloodgateRuntimeTest {
     open class FakeApi {
         var prefix = "."
         val players = mutableMapOf<UUID, FakePlayer>()
+        val bus = FakeEventBus()
         fun getPlayerPrefix() = prefix
         fun getPlayer(uuid: UUID): FakePlayer? = players[uuid]
+        fun getEventBus(): FakeEventBus = bus
         companion object {
             var live: FakeApi? = null
             @JvmStatic fun getInstance(): FakeApi? = live
@@ -114,11 +160,16 @@ class FloodgateRuntimeTest {
             "org.geysermc.floodgate.api.FloodgateApi" -> FakeApi::class.java
             "org.geysermc.floodgate.api.ProxyFloodgateApi" -> FakeProxyApi::class.java
             "org.geysermc.floodgate.api.player.FloodgatePlayer" -> FakePlayer::class.java
+            "org.geysermc.floodgate.util.LinkedPlayer" -> FakeLinkedPlayer::class.java
+            "org.geysermc.floodgate.api.event.skin.SkinApplyEvent" -> FakeSkinApplyEvent::class.java
+            "org.geysermc.event.PostOrder" -> FakePostOrder::class.java
+            "org.geysermc.event.subscribe.Subscriber" -> FakeSubscriber::class.java
             else -> super.loadClass(name)
         }
     }
 
-    private class Fixture(version: String = "2.2.5-SNAPSHOT (b141-81b65cc)") {
+    private class Fixture(version: String = "2.2.5-SNAPSHOT (b141-81b65cc)", allowLinked: Boolean = false,
+                          guardRoleSkin: (UUID) -> Boolean = { false }) {
         var plugin = Any()
         var active = true
         val api = FakeProxyApi()
@@ -130,7 +181,7 @@ class FloodgateRuntimeTest {
         init {
             FakeApi.live = api
             api.players[player.correctUniqueId] = player
-            runtime = FloodgateRuntime(true) { FloodgateProvider(plugin, version, loader) { true } }
+            runtime = FloodgateRuntime(true, allowLinked, guardRoleSkin) { FloodgateProvider(plugin, version, loader) { true } }
         }
     }
 }

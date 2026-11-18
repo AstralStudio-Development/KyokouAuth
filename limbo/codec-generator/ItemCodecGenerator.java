@@ -13,7 +13,7 @@ import java.util.jar.JarFile;
 final class ItemCodecGenerator {
     private static final String ROOT = "org.geysermc.mcprotocollib.protocol.";
     private static final String OWN = "moe.ryuu.kyokouauth.limbo.session.";
-    private static final Set<String> COMPONENTS = Set.of("PROFILE", "CUSTOM_NAME", "LORE", "CUSTOM_MODEL_DATA");
+    private static final Set<String> COMPONENTS = Set.of("PROFILE", "CUSTOM_NAME", "LORE");
     private final JarFile jar;
     private final int protocol;
     private final Path output;
@@ -34,16 +34,15 @@ final class ItemCodecGenerator {
         click();
         if (protocol <= 768) legacyHelper();
         else boundedTypes();
-        if (protocol >= 769) boundedCustomModelData();
         write(OWN + "ItemDecodeBudget", "package " + OWN.substring(0, OWN.length()-1) + ";\n" +
             "import io.netty.buffer.ByteBuf;\n" +
             "/** Receive-only budgets: checked before variable allocations in the fixed original codec closure. */\n" +
             "public final class ItemDecodeBudget {\n" +
-            " public static final int FRAME_BYTES=65536, CHANGED_SLOTS=64, COMPONENTS=4, LIST_ITEMS=8, STRING_CHARS=8192, NBT_BYTES=16384, NBT_DEPTH=16;\n" +
+            " public static final int FRAME_BYTES=65536, CHANGED_SLOTS=64, COMPONENTS=3, LIST_ITEMS=8, STRING_CHARS=8192, NBT_BYTES=16384, NBT_DEPTH=16;\n" +
             " public static int limit(int value,int maximum,String field) { if(value<0 || value>maximum) throw new IllegalArgumentException(\"Role selector decode budget: \"+field); return value; }\n" +
             " public static void frame(ByteBuf in) { limit(in.readableBytes(),FRAME_BYTES,\"frame\"); }\n" +
             " private ItemDecodeBudget() {}\n}\n");
-        StringBuilder metadata = new StringBuilder("{\"schema\":1,\"protocol\":" + protocol + ",\"source\":\"pinned-official-mcpl-ast-sparse-item-closure\",\"components\":[\"CUSTOM_MODEL_DATA\",\"CUSTOM_NAME\",\"LORE\",\"PROFILE\"],\"frameBytes\":65536,\"changedSlots\":64,\"componentCount\":4,\"cmdListMaxima\":[1,0,0,0],\"cmdFiniteFloats\":true,\"listItems\":8,\"stringChars\":8192,\"nbtBytes\":16384,\"nbtDepth\":16,\"sources\":{");
+        StringBuilder metadata = new StringBuilder("{\"schema\":1,\"protocol\":" + protocol + ",\"source\":\"pinned-official-mcpl-ast-sparse-item-closure\",\"components\":[\"CUSTOM_NAME\",\"LORE\",\"PROFILE\"],\"frameBytes\":65536,\"changedSlots\":64,\"componentCount\":3,\"listItems\":8,\"stringChars\":8192,\"nbtBytes\":16384,\"nbtDepth\":16,\"sources\":{");
         boolean first = true;
         for (var item : evidence.entrySet()) {
             if (!first) metadata.append(','); first = false;
@@ -132,7 +131,7 @@ final class ItemCodecGenerator {
             }
             String declaration = parsed.text.substring(parsed.start(field), parsed.start(field.getInitializer()));
             // Preserve the public symbol as a null tombstone for binary references in unused upstream methods.
-            // Every original ordinal is consumed, so the four retained factories keep their official numeric IDs.
+            // Every original ordinal is consumed, so the three retained factories keep their official numeric IDs.
             replacements.add(new Replacement(parsed.start(field), parsed.end(field), declaration + "null; static { VALUES.add(null); }"));
         }
         require(found.equals(COMPONENTS) && registrationCount > 40, "Unexpected official component registration layout");
@@ -149,9 +148,6 @@ final class ItemCodecGenerator {
             result = replace(result, "int size = MinecraftTypes.readVarInt(input);", "int size = MinecraftTypes.readVarInt(input); ItemDecodeBudget.limit(size, 8, \"lore\");");
             result = result.replace("MinecraftTypes::readComponent", OWN + "BoundedItemTypes::readComponent")
                 .replace("ItemTypes::readResolvableProfile", OWN + "BoundedItemTypes::readResolvableProfile");
-        }
-        if (protocol >= 769) {
-            result = replace(result, "ItemTypes::readCustomModelData", OWN + "BoundedCustomModelData::readCustomModelData");
         }
         write(name, result);
     }
@@ -214,38 +210,6 @@ final class ItemCodecGenerator {
         write(OWN + "BoundedItemTypes", "package " + OWN.substring(0,OWN.length()-1) + ";\n" + imports(original, items) +
             "import " + ROOT + "codec.NbtComponentSerializer;\n" +
             "public final class BoundedItemTypes {\n" + selected + "}\n");
-    }
-    private void boundedCustomModelData() throws Exception {
-        var types = source(ROOT + "codec.MinecraftTypes");
-        var items = source(ROOT + "data.game.item.component.ItemTypes");
-        var listMethods = new ArrayList<MethodTree>();
-        for (Tree member : types.type().getMembers()) if (member instanceof MethodTree method &&
-                method.getName().contentEquals("readList") && method.getBody() != null &&
-                types.exact(method.getBody()).contains("int size = MinecraftTypes.readVarInt(buf);")) listMethods.add(method);
-        require(listMethods.size() == 1, "Ambiguous official list implementation for CMD budget");
-        MethodTree list = listMethods.get(0);
-        require(list.getParameters().size() == 2 || list.getParameters().size() == 3, "Unexpected official list signature");
-        String original = types.exact(list);
-        int bodyStart = types.start(list.getBody()) - types.start(list);
-        String header = replace(original.substring(0, bodyStart), " readList(", " readCmdList(");
-        int close = header.lastIndexOf(')');
-        require(close >= 0, "Missing official list parameter boundary");
-        String boundedList = header.substring(0, close) + ", int maximum" + header.substring(close) + original.substring(bodyStart);
-        boundedList = replace(boundedList, "int size = MinecraftTypes.readVarInt(buf);",
-            "int size = MinecraftTypes.readVarInt(buf); ItemDecodeBudget.limit(size,maximum,\"customModelData list\");");
-        String wrapper = list.getParameters().size() == 3 ?
-            "private static <T> List<T> readCmdList(ByteBuf buf, java.util.function.Function<ByteBuf,T> reader, int maximum) { return readCmdList(buf,reader,true,maximum); }\n" : "";
-        String read = methods(items, Set.of("readCustomModelData"));
-        read = replace(read, "MinecraftTypes.readList(buf, ByteBuf::readFloat)", "readCmdList(buf, ByteBuf::readFloat, 1)");
-        read = replace(read, "MinecraftTypes.readList(buf, ByteBuf::readBoolean)", "readCmdList(buf, ByteBuf::readBoolean, 0)");
-        read = replace(read, "MinecraftTypes.readList(buf, MinecraftTypes::readString)", "readCmdList(buf, MinecraftTypes::readString, 0)");
-        read = replace(read, "MinecraftTypes.readList(buf, ByteBuf::readInt)", "readCmdList(buf, ByteBuf::readInt, 0)");
-        read = replace(read, "List<Boolean> flags = ",
-            "if (floats.stream().anyMatch(value -> !Float.isFinite(value))) throw new IllegalArgumentException(\"Non-finite avatar customModelData float\");\n        List<Boolean> flags = ");
-        write(OWN + "BoundedCustomModelData", "package " + OWN.substring(0,OWN.length()-1) + ";\n" + imports(types, items) +
-            "import " + ROOT + "data.game.item.component.CustomModelData;\n" +
-            "/** Original fixed CMD reader/list implementation, with pre-allocation 1/0/0/0 caps and finite floats. */\n" +
-            "public final class BoundedCustomModelData {\n" + read + wrapper + boundedList + "\n}\n");
     }
 
     private void write(String name, String content) throws Exception {

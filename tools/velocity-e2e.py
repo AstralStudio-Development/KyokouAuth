@@ -122,7 +122,17 @@ read-timeout = 10000
     (run / "forwarding.secret").write_text("isolated-test-forwarding-secret-not-a-credential", encoding="utf-8")
     production = args.scenario in {"production", "unavailable"}
     shutil.copyfile(args.jar if production else test_jar(args.jar), plugins / "gate-test.jar")
-    if args.scenario == "unavailable":
+    if args.scenario == "production":
+        data = plugins / "kyokouauth"
+        driver = data / "libraries/com/h2database/h2/1.4.200/h2-1.4.200.jar"
+        driver.parent.mkdir(parents=True, exist_ok=True)
+        cached = sorted((Path.home() / ".gradle/caches/modules-2/files-2.1/com.h2database/h2/1.4.200").rglob("h2-1.4.200.jar"))
+        if cached:
+            shutil.copyfile(cached[0], driver)
+        else:
+            fixtures.download("https://repo.maven.apache.org/maven2/com/h2database/h2/1.4.200/h2-1.4.200.jar", driver)
+        (data / "config.yml").write_text("database:\n  type: h2\n  database: ./plugins/kyokouauth/isolated-db\n  auto-download-driver: false\n", encoding="utf-8")
+    elif args.scenario == "unavailable":
         data = plugins / "kyokouauth"
         data.mkdir(exist_ok=True)
         (data / "config.yml").write_text("database:\n  type: intentionally-invalid\n", encoding="utf-8")

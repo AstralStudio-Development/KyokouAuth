@@ -98,6 +98,45 @@ class VelocityPortsTest {
         assertFailsWith<IllegalStateException> { ports.registerEngine(767, address) }
     }
 
+    @Test
+    fun `role properties apply only to an active exact identity and preserve unmanaged values`() {
+        val id = java.util.UUID.randomUUID()
+        var active = true
+        var writes = 0
+        var properties = listOf(
+            com.velocitypowered.api.util.GameProfile.Property("textures", "old", "old-signature"),
+            com.velocitypowered.api.util.GameProfile.Property("kyokouauth:connection-id", "old-marker", ""),
+            com.velocitypowered.api.util.GameProfile.Property("native-extra", "keep", "native-signature"))
+        val native = stub<com.velocitypowered.api.proxy.Player> { method, arguments -> when (method) {
+            "getSessionId", "getUniqueId" -> id
+            "getUsername" -> "ExactRole"
+            "isActive" -> active
+            "getGameProfileProperties" -> properties
+            "setGameProfileProperties" -> {
+                @Suppress("UNCHECKED_CAST")
+                properties = (arguments[0] as Collection<com.velocitypowered.api.util.GameProfile.Property>).toList()
+                writes++; null
+            }
+            else -> error("Unexpected identity mutation or native call: $method")
+        } }
+        val player = VelocityPorts(Fixture().proxy).player(native)
+        val profile = moe.ryuu.kyokouauth.proxy.GameProfile(id, "ExactRole", listOf(
+            moe.ryuu.kyokouauth.proxy.GameProfile.Property("textures", "selected", "signed"),
+            moe.ryuu.kyokouauth.proxy.GameProfile.Property("kyokouauth:connection-id", "current-marker", ""),
+            moe.ryuu.kyokouauth.proxy.GameProfile.Property("injected-extra", "ignore", "")))
+        player.applyRoleProfile(profile).join()
+        assertEquals(id, native.uniqueId)
+        assertEquals("ExactRole", native.username)
+        assertEquals(listOf("native-extra", "textures", "kyokouauth:connection-id"), properties.map { it.name })
+        assertEquals(listOf("keep", "selected", "current-marker"), properties.map { it.value })
+        for (wrong in listOf(profile.copy(id = java.util.UUID.randomUUID()), profile.copy(name = "exactrole"))) {
+            assertFailsWith<java.util.concurrent.CompletionException> { player.applyRoleProfile(wrong).join() }
+        }
+        active = false
+        assertFailsWith<java.util.concurrent.CompletionException> { player.applyRoleProfile(profile).join() }
+        assertEquals(1, writes)
+    }
+
     private class Fixture {
         val publicServers = linkedMapOf<String, RegisteredServer>()
         val proxy: ProxyServer = stub { method, arguments ->

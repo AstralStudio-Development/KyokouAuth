@@ -18,7 +18,11 @@ def sha(path):
 
 
 def parse_fixture_output(text):
-    expected = {'minecraft:player_head', 'minecraft:generic_9x3', 'item-key', 'menu-key'}
+    registry_keys = {
+        'item-key': 'minecraft:player_head', 'name-tag-key': 'minecraft:name_tag',
+        'diamond-key': 'minecraft:diamond', 'menu-key': 'minecraft:generic_9x3',
+    }
+    expected = set(registry_keys) | set(registry_keys.values())
     values = {}
     for line in text.splitlines():
         marker = 'ROLE_FIXTURE '
@@ -32,9 +36,12 @@ def parse_fixture_output(text):
         values[key] = value
     if values.keys() != expected:
         raise ValueError(f'Incomplete official registry output: {sorted(values)}')
-    for key in ('minecraft:player_head', 'minecraft:generic_9x3'):
-        if not values[key].isascii() or not values[key].isdigit():
+    for key in registry_keys.values():
+        if not values[key].isascii() or not values[key].isdigit() or (key != 'minecraft:generic_9x3' and int(values[key]) <= 0):
             raise ValueError(f'Invalid official registry numeric ID: {key}')
+    for field, key in registry_keys.items():
+        if values[field] != key:
+            raise ValueError(f'Official registry key mismatch: {field}')
     return values
 
 
@@ -74,6 +81,8 @@ def extract(protocol, java, javac):
         'registry-server-sha256': sha(server),
         'exporter-sha256': sha(source),
         'player-head-id': int(values['minecraft:player_head']),
+        'name-tag-id': int(values['minecraft:name_tag']),
+        'diamond-id': int(values['minecraft:diamond']),
         'generic-9x3-id': int(values['minecraft:generic_9x3']),
     }
     target = ROOT / 'limbo/protocols' / str(protocol) / 'src/main/resources/limbo' / f'role-selector-{protocol}.properties'

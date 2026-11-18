@@ -85,7 +85,6 @@ class KyokouAuthVelocity @Inject constructor(
         try {
             val dataFolder = dataDirectory.toFile()
             val config = ProxyConfig.load(dataFolder)
-            if (config.rolesEnabled) requireRoleTransfers(server.configuration)
             val bedrock = VelocityFloodgate(server, config.bedrockEnabled, config.rolesEnabled).also { this.bedrock = it }
             val messages = MessageCatalogue(config.locale, File(dataFolder, "messages")).also { it.load() }
             val forwardingSecret = forwardingSecret(server.configuration)
@@ -141,13 +140,6 @@ class KyokouAuthVelocity @Inject constructor(
         } catch (failure: Exception) {
             logger.error("Could not initialize KyokouAuth; all logins will be refused", failure)
             closeServices()
-        }
-    }
-
-    internal fun requireRoleTransfers(configuration: Any) {
-        val getter = configuration.javaClass.getMethod("isAcceptTransfers")
-        check(getter.returnType == Boolean::class.javaPrimitiveType && getter.invoke(configuration) == true) {
-            "role-selection.enabled requires advanced.accepts-transfers = true in velocity.toml"
         }
     }
 

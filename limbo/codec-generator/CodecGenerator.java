@@ -335,7 +335,6 @@ public final class CodecGenerator {
         reflective.put("packet.ingame.clientbound.entity.player.ClientboundPlayerPositionPacket", protocol == 767 ? 7 : 10);
         reflective.put("packet.ingame.clientbound.level.ClientboundLevelChunkWithLightPacket", 6);
         if (protocol >= 773) reflective.put("data.game.entity.player.ResolvableProfile", 1);
-        if (protocol >= 769) reflective.put("data.game.item.component.CustomModelData", 4);
         // The offline exporter constructs these exact typed data constructors, not arbitrary SDK classes.
         reflective.put("packet.configuration.clientbound.ClientboundUpdateEnabledFeaturesPacket", 1);
         reflective.put("packet.configuration.clientbound.ClientboundSelectKnownPacks", 1);
@@ -378,7 +377,7 @@ public final class CodecGenerator {
             rules.append("-keep,allowoptimization class ").append(OWN).append("Login263 { public <init>(").append(LIB).append("protocol.packet.ingame.clientbound.ClientboundLoginPacket); }\n");
         }
         String componentOwner = LIB + "protocol.data.game.item.component." + (protocol <= 768 ? "DataComponentType" : "DataComponentTypes");
-        rules.append("-keepclassmembers,allowoptimization class ").append(componentOwner).append(" { public static *** PROFILE; public static *** CUSTOM_NAME; public static *** LORE; public static *** CUSTOM_MODEL_DATA; }\n");
+        rules.append("-keepclassmembers,allowoptimization class ").append(componentOwner).append(" { public static *** PROFILE; public static *** CUSTOM_NAME; public static *** LORE; }\n");
         rules.append("-keep,allowoptimization class ").append(OWN).append("RoleSelectorPackets { public static *** INSTANCE; public *** open(int,moe.ryuu.kyokouauth.limbo.RoleSelectorMenu); public *** content(int,int,moe.ryuu.kyokouauth.limbo.RoleSelectorMenu); public *** close(int); }\n");
         // Typed-packet export is an intentional tool API and must survive member shrinking.
         rules.append("-keep,allowoptimization class ").append(OWN).append("RegistrySnapshot { public static *** Companion; public java.util.List getRegistries(); public *** getTags(); }\n");

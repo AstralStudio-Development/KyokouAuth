@@ -20,18 +20,15 @@ class RoleSelectorApiTest {
         LimboListener.None.onRoleSelect(player, menu.generation, premium.optionId)
         assertEquals("microsoft", menu.microsoft.optionId)
         assertEquals("signature", menu.premium.textureSignature)
-        assertNull(menu.microsoft.avatarIcon)
-        assertNull(menu.premium.avatarIcon)
-        assertEquals(0x4B5901, RoleAvatarIcon.MICROSOFT.modelData)
-        assertEquals(0x4B5902, RoleAvatarIcon.PREMIUM.modelData)
-        assertEquals(2, RoleAvatarIcon.entries.size)
-        RoleAvatarIcon.entries.forEach { icon ->
-            assertTrue(icon.modelData in 1 until (1 shl 24))
-            assertEquals(icon.modelData, icon.modelData.toFloat().toInt())
-        }
+        assertEquals(RoleSelectorIcon.PLAYER_HEAD, menu.microsoft.icon)
+        assertEquals(RoleSelectorIcon.PLAYER_HEAD, menu.premium.icon)
+        assertEquals(listOf("PLAYER_HEAD", "NAME_TAG", "DIAMOND"), RoleSelectorIcon.entries.map { it.name })
+        val bedrock = microsoft.copy(icon = RoleSelectorIcon.NAME_TAG)
+        assertEquals(RoleSelectorIcon.NAME_TAG, bedrock.icon)
+        assertEquals(RoleSelectorIcon.DIAMOND, premium.copy(icon = RoleSelectorIcon.DIAMOND).icon)
         val oldJavaConstructor = RoleSelectorItem::class.java.getConstructor(String::class.java, UUID::class.java, String::class.java,
             String::class.java, String::class.java, TextComponent::class.java, List::class.java)
-        assertNull(oldJavaConstructor.newInstance("java", UUID(1, 2), "PremiumName", null, null, TextComponent("Label"), emptyList<TextComponent>()).avatarIcon)
+        assertEquals(RoleSelectorIcon.PLAYER_HEAD, oldJavaConstructor.newInstance("java", UUID(1, 2), "PremiumName", null, null, TextComponent("Label"), emptyList<TextComponent>()).icon)
         val leaked = (RoleSelectorItem::class.java.declaredFields + RoleSelectorMenu::class.java.declaredFields)
             .map { it.type.name }.filter { it.startsWith("org.geysermc.") || it.startsWith("net.kyori.") }
         assertTrue(leaked.isEmpty(), "Public selector API leaked SDK types: $leaked")

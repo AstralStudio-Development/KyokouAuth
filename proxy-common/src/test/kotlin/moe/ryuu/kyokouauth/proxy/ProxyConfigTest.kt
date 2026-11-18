@@ -35,49 +35,28 @@ class ProxyConfigTest {
     }
 
     @Test
-    fun `role selection is opt in and requires an explicit trusted reconnect target`() {
+    fun `Bedrock role selection is opt in without a Transfer target or image bridge`() {
         val defaults = ProxyConfig(emptyMap(), tempDir())
         assertEquals(false, defaults.rolesEnabled)
         assertEquals(60L, defaults.roleSelectionTimeoutSeconds)
-        assertEquals(30L, defaults.roleTransferTtlSeconds)
-        assertFailsWith<IllegalArgumentException> {
-            ProxyConfig(mapOf("role-selection.enabled" to "true"), tempDir())
-        }
-        for (host in listOf("https://proxy.invalid", "proxy.invalid:25577/path", "proxy.invalid?secret=1", "proxy invalid")) {
-            val error = assertFailsWith<IllegalArgumentException> {
-                ProxyConfig(mapOf("role-selection.enabled" to "true", "role-selection.reconnect-host" to host), tempDir())
-            }
-            assertTrue(error.message!!.contains("role-selection.reconnect-host"))
-            assertTrue(!error.message!!.contains(host))
-        }
-        val enabled = ProxyConfig(mapOf("role-selection.enabled" to "true",
-            "role-selection.reconnect-host" to "127.0.0.1", "role-selection.reconnect-port" to "25577"), tempDir())
+        assertEquals(30L, defaults.roleHintTtlSeconds)
+        val enabled = ProxyConfig(mapOf("role-selection.enabled" to "true", "bedrock.enabled" to "true"), tempDir())
         assertTrue(enabled.rolesEnabled)
-        assertEquals("127.0.0.1", enabled.roleTransferHost)
-        assertEquals(25577, enabled.roleTransferPort)
+        assertEquals(false, enabled.hasRetiredRoleSettings)
     }
 
     @Test
-    fun `Bedrock avatar bridge is opt in and only accepts an explicit loopback status endpoint`() {
-        val defaults = ProxyConfig(emptyMap(), tempDir())
-        assertEquals(false, defaults.roleAvatarsEnabled)
-        assertEquals(24682, defaults.roleAvatarBridgePort)
-        assertEquals("http://127.0.0.1:24683/v1/packs/status", defaults.roleAvatarStatusEndpoint.toString())
-        assertFailsWith<IllegalArgumentException> {
-            ProxyConfig(mapOf("role-selection.avatars.enabled" to "true"), tempDir())
-        }
-        for (endpoint in listOf("http://0.0.0.0:24683/v1/packs/status", "http://localhost:24683/v1/packs/status",
-                "http://192.168.1.1:24683/v1/packs/status", "http://127.0.0.1:24683/private",
-                "http://secret@127.0.0.1:24683/v1/packs/status", "http://127.0.0.1:24683/v1/packs/status?secret=1")) {
-            val failure = assertFailsWith<IllegalArgumentException> {
-                ProxyConfig(mapOf("role-selection.avatars.status-endpoint" to endpoint), tempDir())
+    fun `hint TTL accepts its legacy duration alias without reviving retired transports`() {
+        assertEquals(45L, ProxyConfig(mapOf("role-selection.transfer-ttl-seconds" to "45"), tempDir()).roleHintTtlSeconds)
+        assertEquals(20L, ProxyConfig(mapOf("role-selection.hint-ttl-seconds" to "20",
+            "role-selection.transfer-ttl-seconds" to "45"), tempDir()).roleHintTtlSeconds)
+        assertTrue(ProxyConfig(mapOf("role-selection.reconnect-host" to "obsolete",
+            "role-selection.avatars.enabled" to "true"), tempDir()).hasRetiredRoleSettings)
+        for (value in listOf("4", "121", "bad")) {
+            assertFailsWith<IllegalArgumentException> {
+                ProxyConfig(mapOf("role-selection.hint-ttl-seconds" to value), tempDir())
             }
-            assertTrue(failure.message!!.contains("role-selection.avatars.status-endpoint"))
-            assertTrue(!failure.message!!.contains(endpoint))
         }
-        val enabled = ProxyConfig(mapOf("bedrock.enabled" to "true", "role-selection.enabled" to "true",
-            "role-selection.reconnect-host" to "127.0.0.1", "role-selection.avatars.enabled" to "true"), tempDir())
-        assertTrue(enabled.roleAvatarsEnabled)
     }
 
     @Test

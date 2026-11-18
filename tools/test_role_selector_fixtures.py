@@ -10,13 +10,24 @@ spec.loader.exec_module(fixtures)
 
 class SelectorFixtureTests(unittest.TestCase):
     lines = ('ROLE_FIXTURE minecraft:player_head=1105', 'ROLE_FIXTURE minecraft:generic_9x3=2',
-             'ROLE_FIXTURE item-key=minecraft:player_head', 'ROLE_FIXTURE menu-key=minecraft:generic_9x3')
+             'ROLE_FIXTURE item-key=minecraft:player_head', 'ROLE_FIXTURE menu-key=minecraft:generic_9x3',
+             'ROLE_FIXTURE minecraft:name_tag=1200', 'ROLE_FIXTURE minecraft:diamond=800',
+             'ROLE_FIXTURE name-tag-key=minecraft:name_tag', 'ROLE_FIXTURE diamond-key=minecraft:diamond')
 
     def test_plain_and_vanilla_wrapped_stdout_are_equivalent(self):
         plain = '\n'.join(self.lines)
         wrapped = '\n'.join('[13:12:45] [main/INFO]: [STDOUT]: ' + line for line in self.lines)
         self.assertEqual(fixtures.parse_fixture_output(plain), fixtures.parse_fixture_output(wrapped))
         self.assertEqual('1105', fixtures.parse_fixture_output(wrapped)['minecraft:player_head'])
+
+    def test_vanilla_icons_are_exported_with_exact_round_trip_keys(self):
+        text = '\n'.join(self.lines)
+        exported = fixtures.parse_fixture_output(text)
+        self.assertEqual('1200', exported['minecraft:name_tag'])
+        self.assertEqual('800', exported['minecraft:diamond'])
+        for key in ('name-tag-key', 'diamond-key'):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                fixtures.parse_fixture_output(text.replace(exported[key], 'minecraft:stone'))
 
     def test_missing_duplicate_unknown_and_nonnumeric_are_rejected(self):
         for text in ('\n'.join(self.lines[:-1]), '\n'.join((*self.lines, self.lines[0])),

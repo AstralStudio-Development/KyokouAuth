@@ -7,6 +7,7 @@ AST preserves factory expressions; the loaded complete registry supplies packet 
 import argparse
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 
@@ -32,11 +33,18 @@ def main():
     classpath = os.pathsep.join([str(tool_classes), str(args.mcpl_jar.resolve()), args.classpath])
     command = [args.java, '-Xmx256m', '-XX:ActiveProcessorCount=2', '-cp', classpath, 'CodecGenerator',
                str(args.protocol), str(args.mcpl_jar.resolve()), str(args.sources_jar.resolve()), str(output)]
+    # This subtree is wholly generator-owned. Rebuild its source snapshot so retired
+    # classes cannot survive a normal incremental run; leave resources/caches alone.
+    java_sources = output / 'java'
+    if java_sources.resolve() != java_sources:
+        raise ValueError('Generated Java output must not alias another directory')
+    if java_sources.exists():
+        shutil.rmtree(java_sources)
     subprocess.run(command, check=True)
     if args.verify:
         generated_classes = output / 'verified-classes'
         generated_classes.mkdir(exist_ok=True)
-        generated_sources = sorted((output / 'java').rglob('*.java'))
+        generated_sources = sorted(java_sources.rglob('*.java'))
         subprocess.run([args.javac, '-J-Xmx192m', '-J-XX:ActiveProcessorCount=2', '--release', '21',
                         '-encoding', 'UTF-8', '-cp', classpath, '-d', str(generated_classes),
                         *map(str, generated_sources)], check=True)

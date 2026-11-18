@@ -102,7 +102,7 @@ public final class NewExporter {
     }
 
     private void run() throws Exception {
-        verifyAvatarBudgets();
+        verifySelectorBudgets();
         Object companion = type(SESSION + "RegistrySnapshot").getField("Companion").get(null);
         Object snapshot = companion.getClass().getMethod("load").invoke(companion);
         Object defaults = construct(ROOT + "LimboSettings");
@@ -160,14 +160,14 @@ public final class NewExporter {
         write("play", selector.getClass().getMethod("playerInventory", int.class).invoke(selector, 1));
         write("play", selector.getClass().getMethod("content", int.class, int.class, menuType).invoke(selector, 5, 1, menu));
         write("play", selector.getClass().getMethod("close", int.class).invoke(selector, 5));
-        Class<?> icons = type(ROOT + "RoleAvatarIcon");
-        Object markedMicrosoft = construct(ROOT + "RoleSelectorItem", "microsoft", new UUID(0,42), "MicrosoftName",
-                "public-fixture-texture", "public-fixture-signature", microsoftName, lore, icons.getField("MICROSOFT").get(null));
-        Object markedPremium = construct(ROOT + "RoleSelectorItem", "premium", PUBLIC_UUID, "OraclePlayer", null, null,
-                premiumName, lore, icons.getField("PREMIUM").get(null));
-        Object markedMenu = construct(ROOT + "RoleSelectorMenu", new UUID(4,6), title, markedMicrosoft, markedPremium);
-        write("play", selector.getClass().getMethod("open", int.class, menuType).invoke(selector, 6, markedMenu));
-        write("play", selector.getClass().getMethod("content", int.class, int.class, menuType).invoke(selector, 6, 1, markedMenu));
+        Class<?> icons = type(ROOT + "RoleSelectorIcon");
+        Object vanillaMicrosoft = construct(ROOT + "RoleSelectorItem", "microsoft", new UUID(0,42), "MicrosoftName",
+                "public-fixture-texture", "public-fixture-signature", microsoftName, lore, icons.getField("NAME_TAG").get(null));
+        Object vanillaPremium = construct(ROOT + "RoleSelectorItem", "premium", PUBLIC_UUID, "OraclePlayer", null, null,
+                premiumName, lore, icons.getField("DIAMOND").get(null));
+        Object vanillaMenu = construct(ROOT + "RoleSelectorMenu", new UUID(4,6), title, vanillaMicrosoft, vanillaPremium);
+        write("play", selector.getClass().getMethod("open", int.class, menuType).invoke(selector, 6, vanillaMenu));
+        write("play", selector.getClass().getMethod("content", int.class, int.class, menuType).invoke(selector, 6, 1, vanillaMenu));
         write("play", selector.getClass().getMethod("close", int.class).invoke(selector, 6));
     }
 
@@ -177,7 +177,7 @@ public final class NewExporter {
     }
 
     /** Exercise the actual isolated artifact's guarded factories, never an untrimmed SDK substitute. */
-    private void verifyAvatarBudgets() throws Exception {
+    private void verifySelectorBudgets() throws Exception {
         Object buffer = type("io.netty.buffer.Unpooled").getMethod("buffer").invoke(null);
         int probes = 0;
         try {
@@ -185,53 +185,41 @@ public final class NewExporter {
                 Class<?> owner = type(SESSION + (protocol <= 768 ? "BoundedItemCodecHelper" : "BoundedItemTypes"));
                 Object receiver = protocol <= 768 ? owner.getField("INSTANCE").get(null) : null;
                 Method reader = owner.getMethod("readDataComponentPatch", byteBufType);
-                variable(buffer, 5); variable(buffer, 0);
-                expectBudget(reader, receiver, buffer, "components"); probes++;
-            }
-            if (protocol >= 769) {
-                Object cmd = type(PROTOCOL + "data.game.item.component.DataComponentTypes").getField("CUSTOM_MODEL_DATA").get(null);
-                if (cmd == null) throw new IllegalStateException("Artifact has no CMD factory");
-                Method reader = cmd.getClass().getMethod("readDataComponent", byteBufType);
-                // Small invalid count first: an unguarded reader fails before any huge-allocation probe runs.
-                for (int length : new int[] {2, -1, Integer.MAX_VALUE}) {
-                    byteBufType.getMethod("clear").invoke(buffer); variable(buffer, length);
-                    expectBudget(reader, cmd, buffer, "customModelData"); probes++;
-                }
-                for (int field = 1; field < 4; field++) {
-                    byteBufType.getMethod("clear").invoke(buffer); variable(buffer, 1);
-                    byteBufType.getMethod("writeFloat", float.class).invoke(buffer, (float) 0x4B5901);
-                    for (int before = 1; before < field; before++) variable(buffer, 0);
-                    variable(buffer, Integer.MAX_VALUE);
-                    expectBudget(reader, cmd, buffer, "customModelData"); probes++;
-                }
-                for (float nonFinite : new float[] {Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY}) {
-                    byteBufType.getMethod("clear").invoke(buffer); variable(buffer, 1);
-                    byteBufType.getMethod("writeFloat", float.class).invoke(buffer, nonFinite);
-                    variable(buffer, 0); variable(buffer, 0); variable(buffer, 0);
-                    expectBudget(reader, cmd, buffer, "customModelData"); probes++;
+                for (int length : new int[] {4, -1, Integer.MAX_VALUE}) {
+                    byteBufType.getMethod("clear").invoke(buffer);
+                    variable(buffer, length); variable(buffer, 0);
+                    expectBudget(reader, receiver, buffer, "components"); probes++;
                 }
             }
             if (protocol >= 770) {
                 java.util.Map<Object,Integer> hashes = new java.util.HashMap<>();
                 Class<?> components = type(PROTOCOL + "data.game.item.component.DataComponentTypes");
-                for (String name : List.of("PROFILE", "CUSTOM_NAME", "LORE", "CUSTOM_MODEL_DATA")) hashes.put(components.getField(name).get(null), 0);
+                for (String name : List.of("PROFILE", "CUSTOM_NAME", "LORE")) hashes.put(components.getField(name).get(null), 0);
                 Object hash = construct(PROTOCOL + "data.game.item.HashedStack", 123, 1, hashes, Set.of());
                 Method write = type(PROTOCOL + "codec.MinecraftTypes").getMethod("writeHashedStack", byteBufType, hash.getClass());
                 Method read = type(SESSION + "BoundedItemTypes").getMethod("readHashedStack", byteBufType);
                 byteBufType.getMethod("clear").invoke(buffer); write.invoke(null, buffer, hash);
                 Object decoded = read.invoke(null, buffer);
                 if ((Integer) byteBufType.getMethod("readableBytes").invoke(buffer) != 0 ||
-                        ((java.util.Map<?,?>) decoded.getClass().getMethod("addedComponents").invoke(decoded)).size() != 4)
-                    throw new IllegalStateException("Artifact did not accept the four-component hash prediction");
+                        ((java.util.Map<?,?>) decoded.getClass().getMethod("addedComponents").invoke(decoded)).size() != 3)
+                    throw new IllegalStateException("Artifact did not accept the three-component hash prediction");
                 probes++;
-                Object empty = construct(PROTOCOL + "data.game.item.HashedStack", 123, 1, java.util.Map.of(), Set.of());
-                byteBufType.getMethod("clear").invoke(buffer); write.invoke(null, buffer, empty);
+                // Added+removed share the same exact total capacity, not separate three-entry budgets.
+                byteBufType.getMethod("clear").invoke(buffer); write.invoke(null, buffer, hash);
                 int end = (Integer) byteBufType.getMethod("writerIndex").invoke(buffer);
-                byteBufType.getMethod("writerIndex", int.class).invoke(buffer, end - 2);
-                variable(buffer, 5); variable(buffer, 0);
+                byteBufType.getMethod("writerIndex", int.class).invoke(buffer, end - 1);
+                variable(buffer, 1);
                 expectBudget(read, null, buffer, "hashedComponent"); probes++;
+                Object empty = construct(PROTOCOL + "data.game.item.HashedStack", 123, 1, java.util.Map.of(), Set.of());
+                for (int[] counts : new int[][] {{4,0}, {0,4}, {-1,0}, {Integer.MAX_VALUE,0}}) {
+                    byteBufType.getMethod("clear").invoke(buffer); write.invoke(null, buffer, empty);
+                    end = (Integer) byteBufType.getMethod("writerIndex").invoke(buffer);
+                    byteBufType.getMethod("writerIndex", int.class).invoke(buffer, end - 2);
+                    variable(buffer, counts[0]); variable(buffer, counts[1]);
+                    expectBudget(read, null, buffer, "hashedComponent"); probes++;
+                }
             }
-            System.out.println("EXPORTED avatar-budget protocol=" + protocol + " probes=" + probes + " source=actual-artifact-component-factories");
+            System.out.println("EXPORTED selector-budget protocol=" + protocol + " probes=" + probes + " source=actual-artifact-component-factories");
         } finally { byteBufType.getMethod("release").invoke(buffer); }
     }
 

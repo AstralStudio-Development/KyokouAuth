@@ -135,18 +135,6 @@ class KyokouAuthVelocityTest {
         assertFailsWith<IllegalStateException> { plugin.forwardingSecret(Configuration(Mode.MODERN, byteArrayOf())) }
     }
 
-    @Test
-    fun `role resumption refuses a target proxy that disables transferred logins`() {
-        val plugin = KyokouAuthVelocity(proxy, NOPLogger.NOP_LOGGER, directory)
-        assertFailsWith<IllegalStateException> { plugin.requireRoleTransfers(TransferConfiguration(false)) }
-        assertFailsWith<NoSuchMethodException> { plugin.requireRoleTransfers(Any()) }
-        plugin.requireRoleTransfers(TransferConfiguration(true))
-    }
-
-    class TransferConfiguration(private val accepted: Boolean) {
-        fun isAcceptTransfers(): Boolean = accepted
-    }
-
     enum class Mode { MODERN, LEGACY }
     class Configuration(private val mode: Mode, val secret: ByteArray) {
         fun getPlayerInfoForwardingMode() = mode

@@ -16,10 +16,11 @@ internal class VelocityFloodgate(
     private val proxy: ProxyServer,
     private val enabled: Boolean,
     private val allowLinked: Boolean = false,
+    private val guardRoleSkin: (java.util.UUID) -> Boolean = { allowLinked },
     private val channel: (InboundConnection) -> Channel = VelocityChannels(proxy.javaClass.classLoader)::resolve,
 ) : AutoCloseable {
     @Volatile private var closed = false
-    private val runtime = FloodgateRuntime(enabled, allowLinked, ::provider)
+    private val runtime = FloodgateRuntime(enabled, allowLinked, guardRoleSkin, ::provider)
 
     fun probe(native: InboundConnection): BedrockLogin {
         if (closed) return unavailable()
@@ -57,20 +58,25 @@ internal class VelocityFloodgate(
         }
     }
 
-    override fun close() { closed = true }
+    override fun close() {
+        closed = true
+        runtime.close()
+    }
 
     private fun unavailable() = BedrockLogin.Rejected(BedrockFailure.UNAVAILABLE)
 }
 
 /** Fixed Velocity 4.3.1 signatures; no arbitrary member walking or third-party implementation copy. */
-private class VelocityChannels(private val loader: ClassLoader) {
+internal class VelocityChannels(private val loader: ClassLoader) {
     private class Access(loader: ClassLoader) {
         val login = Class.forName("com.velocitypowered.proxy.connection.client.LoginInboundConnection", false, loader)
         val initial = Class.forName("com.velocitypowered.proxy.connection.client.InitialInboundConnection", false, loader)
         val player = Class.forName("com.velocitypowered.proxy.connection.client.ConnectedPlayer", false, loader)
-        val connection = Class.forName("com.velocitypowered.proxy.connection.MinecraftConnection", false, loader)
+        val connection = Class.forName("com.velocitypowered.proxy.connection.MinecraftConnection", false, loader).also {
+            check(it.`package`.implementationVersion == "4.3.1") { "Native channels require the verified Velocity 4.3.1 implementation" }
+        }
         val delegate = login.getDeclaredField("delegate").also {
-            check(it.type === initial && !Modifier.isStatic(it.modifiers) && Modifier.isFinal(it.modifiers))
+            check(it.type === initial && Modifier.isPrivate(it.modifiers) && !Modifier.isStatic(it.modifiers) && Modifier.isFinal(it.modifiers))
             check(it.trySetAccessible()) { "Velocity login delegate is inaccessible" }
         }
         val initialConnection = initial.getMethod("getConnection").also {
@@ -86,6 +92,15 @@ private class VelocityChannels(private val loader: ClassLoader) {
 
     // No native class is resolved for the default disabled, absent-provider configuration.
     private val access by lazy { Access(loader) }
+
+    /** Read-only exact-channel lifetime watch, independent of optional Floodgate/Cookie state. */
+    fun watchClosed(native: InboundConnection, onClosed: () -> Unit): AutoCloseable {
+        check(native.isActive) { "Native login connection closed" }
+        val channel = resolve(native)
+        val listener = io.netty.channel.ChannelFutureListener { onClosed() }
+        channel.closeFuture().addListener(listener)
+        return AutoCloseable { channel.closeFuture().removeListener(listener) }
+    }
 
     fun resolve(native: InboundConnection): Channel {
         val access = access

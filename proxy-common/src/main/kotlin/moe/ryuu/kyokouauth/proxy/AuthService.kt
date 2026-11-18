@@ -32,15 +32,13 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog,
             route = moe.ryuu.kyokouauth.core.http.Http.Route.DIRECT)
     }
     private val javaProfiles = moe.ryuu.kyokouauth.core.auth.OfficialJavaProfileClient()
-    private val roleAvatars = if (config.roleAvatarsEnabled)
-        moe.ryuu.kyokouauth.proxy.avatar.RoleAvatarService(config.roleAvatarBridgePort) else null
-    private val roleAvatarStatus = if (config.roleAvatarsEnabled)
-        moe.ryuu.kyokouauth.proxy.avatar.RoleAvatarStatusClient(config.roleAvatarStatusEndpoint) else null
 
     init {
         var opened: Database? = null
         var started: AuthTasks? = null
         try {
+            if (config.hasRetiredRoleSettings) logger.warn(
+                "Retired role avatar/transfer endpoint settings are ignored; remove avatars and reconnect-host/port from role-selection")
             drivers.prepare(config.database.dialect)
             MojangDirectory.configureNetwork(config.directoryNetwork)
             MojangDirectory.configureBudget(config.directoryBudget, config.directoryBudgetWindowMinutes)
@@ -56,38 +54,16 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog,
             val runner = AuthTasks(logger, config.ioWorkers, config.ioQueueCapacity)
             started = runner
             tasks = runner
-            roleAvatars?.start()
             maintenance = runner.scheduleAtFixedRate(SESSION_SWEEP_MILLIS) {
                 try { runner.execute { sessions.purgeExpired(System.currentTimeMillis()) } }
                 catch (_: RejectedExecutionException) { logger.warn("Session maintenance skipped: authentication workers are busy or closed") }
             }
         } catch (failure: Throwable) {
-            listOfNotNull<AutoCloseable>(started, roleAvatars, roleSkins, opened, drivers).forEach { resource ->
+            listOfNotNull<AutoCloseable>(started, roleSkins, opened, drivers).forEach { resource ->
                 try { resource.close() } catch (closing: Throwable) { failure.addSuppressed(closing) }
             }
             throw failure
         }
-    }
-
-    /** Presentation only. The caller must already hold the current strong subject/role proof. */
-    fun prepareRoleAvatars(xuid: moe.ryuu.kyokouauth.core.identity.Xuid, options: RoleOptions): CompletableFuture<String> {
-        if (closed.get()) return CompletableFuture.failedFuture(IllegalStateException("Avatar presentation is closed"))
-        val service = roleAvatars
-            ?: return CompletableFuture.failedFuture(IllegalStateException("Avatar presentation is not enabled"))
-        val microsoft = options.roles.singleOrNull { it.identity is moe.ryuu.kyokouauth.core.identity.Identity.Microsoft }
-        val premium = options.roles.singleOrNull { it.identity is moe.ryuu.kyokouauth.core.identity.Identity.Premium }
-        if (microsoft == null || premium == null ||
-            (microsoft.identity as moe.ryuu.kyokouauth.core.identity.Identity.Microsoft).xuid != xuid ||
-            premium.identity.uuid != options.linkedJavaUuid) {
-            return CompletableFuture.failedFuture(IllegalArgumentException("Avatar presentation needs two current role options"))
-        }
-        return service.prepare(xuid.value, microsoft.skin?.value, premium.skin?.value).thenApply { it.fingerprint }
-    }
-
-    /** Offered resource content is a visual hint, never an authorization result. */
-    fun roleAvatarOffer(xuid: moe.ryuu.kyokouauth.core.identity.Xuid): moe.ryuu.kyokouauth.proxy.avatar.RoleAvatarOffer? {
-        check(!closed.get()) { "Avatar presentation is closed" }
-        return roleAvatarStatus?.status(xuid.value)
     }
 
     /** Call only after this connection has proved its XUID, and only on the bounded IO executor. */
@@ -150,7 +126,7 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog,
         if (!closed.compareAndSet(false, true)) return
         maintenance.cancel(false)
         var failure: Throwable? = null
-        listOfNotNull<AutoCloseable>(tasks, roleAvatars, roleSkins, database, drivers).forEach { resource ->
+        listOfNotNull<AutoCloseable>(tasks, roleSkins, database, drivers).forEach { resource ->
             try { resource.close() } catch (closing: Throwable) {
                 if (failure == null) failure = closing else failure.addSuppressed(closing)
             }

@@ -54,8 +54,6 @@ class LoginGateRoleEventsTest {
         override fun resumeWithException(error: Throwable): Unit = throw AssertionError("Native must be denied and resumed", error)
     }
 
-    private data class Cookie(val bytes: ByteArray?)
-
     private class Timer(val action: () -> Unit) : ScheduledFuture<Unit> {
         private var cancelled = false
         override fun cancel(mayInterruptIfRunning: Boolean): Boolean { cancelled = true; return true }
@@ -68,9 +66,14 @@ class LoginGateRoleEventsTest {
         fun fire() { if (!cancelled) action() }
     }
 
-    private class Fixture(val roles: Boolean = true) : AutoCloseable {
+    private class Fixture(val roles: Boolean = true, val bedrock: Boolean = roles, val dual: Boolean = false) : AutoCloseable {
         val identity = Identity.Microsoft(GameName.parseOrThrow("Steve"), Xuid(1), "Steve")
+        val premium = Identity.Premium(GameName.parseOrThrow("PremiumRole"), UUID.fromString("f4688ebd-ccf7-4dea-922e-b18f68014f71"))
         val record = BoundIdentity.of(identity, 1L)
+        val backend = stub<com.velocitypowered.api.proxy.server.RegisteredServer> { method, _ -> when (method) {
+            "getServerInfo" -> com.velocitypowered.api.proxy.server.ServerInfo("backend", InetSocketAddress("127.0.0.1", 29001))
+            else -> error("Unexpected backend call: $method")
+        } }
         val clients = mutableListOf<Client>()
         val services = Services()
         val deadlines = mutableListOf<CompletableFuture<Unit>>()
@@ -78,31 +81,41 @@ class LoginGateRoleEventsTest {
             assertEquals(35_000L, it)
             CompletableFuture<Unit>().also { future -> deadlines += future }
         }) else null
-        val transfer = if (roles) VelocityRoleTransfer(object : VelocityCookieAccess {
-            override fun channel(connection: InboundConnection) = clients.single { it.sid == connection.sessionId }.channel
-            override fun request(): Any = "native-cookie-request"
-            override fun response(packet: Any) = (packet as? Cookie)?.let { VelocityCookieResponse(VelocityRoleTransfer.COOKIE_KEY, it.bytes) }
-        }) else null
         val proxy = stub<ProxyServer> { method, args -> when (method) {
             "getAllPlayers" -> clients.filter { it.active }.map { it.player }
             "getPlayer" -> Optional.ofNullable(clients.firstOrNull { it.active && (it.id == args[0] || it.name == args[0]) }?.player)
-            "getServer" -> Optional.empty<Any>()
+            "getServer" -> if (args[0] == "backend") Optional.of(backend) else Optional.empty<Any>()
             else -> error("Unexpected proxy access: $method")
         } }
-        val config = ProxyConfig(mapOf("role-selection.enabled" to roles.toString(),
-            "role-selection.reconnect-host" to "proxy.invalid", "verification.poll-interval-seconds" to "1"), File("unused-role-events"))
+        val config = ProxyConfig(mapOf("post-login.server" to "backend", "role-selection.enabled" to roles.toString(), "bedrock.enabled" to bedrock.toString(),
+            "verification.poll-interval-seconds" to "1"), File("unused-role-events"))
         val gate = LoginGate(proxy, config, MessageCatalogue("en_US", File("unused-role-events/messages")),
-            services, NOPLogger.NOP_LOGGER, roleTransfer = transfer, roleEvents = events).also { it.activate() }
+            services, NOPLogger.NOP_LOGGER, bedrockProbe = { connection ->
+                if (!bedrock) moe.ryuu.kyokouauth.proxy.BedrockLogin.Java
+                else moe.ryuu.kyokouauth.proxy.BedrockLogin.Verified(clients.single { it.sid == connection.sessionId }.proof)
+            }, watchClosed = { connection, action ->
+                val channel = clients.single { it.sid == connection.sessionId }.channel
+                val listener = io.netty.channel.ChannelFutureListener { action() }
+                channel.closeFuture().addListener(listener)
+                AutoCloseable { channel.closeFuture().removeListener(listener) }
+            }, roleEvents = events).also { it.activate() }
 
         inner class Client {
             val sid: UUID = UUID.randomUUID()
-            var id: UUID = UUID.randomUUID()
-            var name = "Steve"
+            var id: UUID = if (dual) premium.uuid else if (bedrock) identity.uuid else UUID.randomUUID()
+            var name = if (dual) "PremiumRole" else if (bedrock) ".Steve" else "Steve"
             var active = true
             var online = false
             var disconnects = 0
-            val cookies = mutableListOf<ByteArray>()
             val channel = EmbeddedChannel().apply { pipeline().addLast("minecraft-decoder", ChannelInboundHandlerAdapter()) }
+            val proof by lazy {
+                val current = { active && channel.isActive }
+                if (dual) moe.ryuu.kyokouauth.proxy.BedrockProof.createLinked(Xuid(1), premium.uuid, "PremiumRole", "Steve", channel, current)
+                else moe.ryuu.kyokouauth.proxy.BedrockProof.create(Xuid(1), identity.uuid, ".Steve", "Steve", ".", channel, current)
+            }
+            var properties = emptyList<GameProfile.Property>()
+            var menu: moe.ryuu.kyokouauth.limbo.RoleSelectorMenu? = null
+            var backendRequests = 0
             private fun invoke(method: String, args: Array<out Any?>): Any? = when (method) {
                 "getSessionId" -> sid
                 "getUsername" -> name
@@ -112,11 +125,27 @@ class LoginGateRoleEventsTest {
                 "getProtocolState" -> ProtocolState.LOGIN
                 "getIdentifiedKey" -> null
                 "getEffectiveLocale" -> Locale.US
+                "getCurrentServer" -> Optional.empty<com.velocitypowered.api.proxy.ServerConnection>()
                 "isActive" -> active
                 "isOnlineMode" -> online
                 "disconnect" -> { disconnects++; active = false; channel.close(); null }
-                "storeCookie" -> { cookies += (args[1] as ByteArray).copyOf(); null }
-                "transferToHost", "sendMessage" -> null
+                "getGameProfileProperties" -> properties
+                "setGameProfileProperties" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    properties = (args[0] as Collection<GameProfile.Property>).toList(); null
+                }
+                "storeCookie", "transferToHost", "retrieveCookie" -> error("Ordinary reconnect never uses Cookie or Transfer")
+                "createConnectionRequest" -> {
+                    assertSame(backend, args[0]); backendRequests++
+                    stub<com.velocitypowered.api.proxy.ConnectionRequestBuilder> { method, _ -> when (method) {
+                        "connect" -> CompletableFuture.completedFuture(stub<com.velocitypowered.api.proxy.ConnectionRequestBuilder.Result> { query, _ -> when (query) {
+                            "getStatus" -> com.velocitypowered.api.proxy.ConnectionRequestBuilder.Status.SUCCESS
+                            else -> error(query)
+                        } })
+                        else -> error(method)
+                    } }
+                }
+                "sendMessage" -> null
                 else -> error("Unexpected native client access: $method")
             }
             val inbound = stub<RoleEventTestInbound>(::invoke)
@@ -129,6 +158,8 @@ class LoginGateRoleEventsTest {
                 override fun sendMessage(message: TextComponent) = Unit
                 override fun showTitle(title: TextComponent, subtitle: TextComponent?, fadeIn: Int, stay: Int, fadeOut: Int) = Unit
                 override fun clearTitle() = Unit
+                override fun openRoleSelector(menu: moe.ryuu.kyokouauth.limbo.RoleSelectorMenu) { this@Client.menu = menu }
+                override fun closeRoleSelector() { this@Client.menu = null }
                 override fun disconnect(reason: TextComponent) { active = false }
                 override fun close() = Unit
             }
@@ -161,22 +192,22 @@ class LoginGateRoleEventsTest {
             override fun roleOptions(xuid: Xuid, gamertag: String, fallbackBedrockName: String?): RoleOptions {
                 check(worker) { "Role/network revalidation ran on the native event thread" }
                 roleCalls++
-                return RoleOptions(listOf(RoleOption(identity, record, null)), null)
+                return if (dual) RoleOptions(listOf(RoleOption(identity, record, null), RoleOption(premium, null, null)), premium.uuid)
+                else RoleOptions(listOf(RoleOption(identity, record, null)), null)
             }
             fun drain() { while (queue.isNotEmpty()) queue.removeFirst()() }
         }
 
         fun client(): Client = Client().also { clients += it }
 
-        fun preAndProfile(client: Client, cookie: ByteArray? = null) {
+        fun preAndProfile(client: Client) {
             val pre = PreLoginEvent(client.inbound, client.name, null)
             val task = gate.onPreLogin(pre)
             if (task != null) {
                 val continuation = Resume()
                 task.execute(continuation)
                 client.channel.runPendingTasks()
-                assertNotNull(client.channel.readOutbound<Any>())
-                client.channel.writeInbound(Cookie(cookie))
+                assertNull(client.channel.readOutbound<Any>(), "PreLogin must not emit Cookie/Transfer packets")
                 services.drain()
                 assertEquals(1, continuation.count)
             }
@@ -186,6 +217,7 @@ class LoginGateRoleEventsTest {
             gate.onGameProfile(profile)
             client.id = profile.gameProfile.id
             client.name = profile.gameProfile.name
+            client.properties = profile.gameProfile.properties.toList()
             assertTrue(client.active)
         }
 
@@ -204,21 +236,12 @@ class LoginGateRoleEventsTest {
         }
 
         fun selectedRole(): Client {
-            val chooser = client()
-            login(chooser)
-            gate.onJoin(chooser.limbo)
-            services.drain()
-            services.timers.last().fire()
-            services.drain()
-            val cookie = chooser.cookies.single()
-            chooser.active = false
-            gate.onDisconnect(DisconnectEvent(chooser.player, DisconnectEvent.LoginStatus.SUCCESSFUL_LOGIN))
-            val resumed = client()
-            preAndProfile(resumed, cookie)
-            assertEquals(identity.uuid, resumed.id)
-            assertEquals("Steve", resumed.name)
+            val client = client()
+            preAndProfile(client)
+            assertEquals(identity.uuid, client.id)
+            assertEquals("Steve", client.name)
             services.roleCalls = 0
-            return resumed
+            return client
         }
 
         override fun close() {
@@ -227,14 +250,13 @@ class LoginGateRoleEventsTest {
         }
     }
 
-    @Test fun `native prelogin cookie followed by dropped auth queue is bounded and late work cannot reopen result`() {
+    @Test fun `native prelogin with dropped auth queue is bounded and late work cannot reopen result`() {
         Fixture().use { fixture ->
             val client = fixture.client()
             val event = PreLoginEvent(client.inbound, client.name, null)
             val continuation = Resume()
             assertNotNull(fixture.gate.onPreLogin(event)).execute(continuation)
             client.channel.runPendingTasks()
-            client.channel.writeInbound(Cookie(null))
             val dropped = fixture.services.queue.removeFirst()
             assertEquals(0, continuation.count)
             fixture.deadlines.single().completeExceptionally(TimeoutException("dropped work"))
@@ -248,14 +270,29 @@ class LoginGateRoleEventsTest {
         }
     }
 
-    @Test fun `half-login channel close after cookie before auth work immediately resumes once and removes slot`() {
+    @Test fun `external native refusal during queued prelogin closes once instead of applying a late success`() {
+        Fixture().use { fixture ->
+            val client = fixture.client()
+            val event = PreLoginEvent(client.inbound, client.name, null)
+            val continuation = Resume()
+            assertNotNull(fixture.gate.onPreLogin(event)).execute(continuation)
+            event.result = PreLoginEvent.PreLoginComponentResult.denied(Component.text("late native refusal"))
+            fixture.services.drain()
+            assertFalse(client.active)
+            assertFalse(client.channel.isActive)
+            assertEquals(1, continuation.count)
+            assertEquals(1, client.disconnects)
+            assertFalse(event.result.isAllowed)
+        }
+    }
+
+    @Test fun `half-login exact channel close before auth work immediately resumes once and removes slot`() {
         Fixture().use { fixture ->
             val client = fixture.client()
             val event = PreLoginEvent(client.inbound, client.name, null)
             val continuation = Resume()
             assertNotNull(fixture.gate.onPreLogin(event)).execute(continuation)
             client.channel.runPendingTasks()
-            client.channel.writeInbound(Cookie(null))
             assertEquals(1, fixture.services.queue.size)
             client.active = false
             client.channel.close()
@@ -269,14 +306,13 @@ class LoginGateRoleEventsTest {
         }
     }
 
-    @Test fun `deactivation releases native continuation while cookie or queued work is waiting`() {
-        for (queued in listOf(false, true)) Fixture().use { fixture ->
+    @Test fun `deactivation releases native continuation while queued work is waiting`() {
+        Fixture().use { fixture ->
             val client = fixture.client()
             val event = PreLoginEvent(client.inbound, client.name, null)
             val continuation = Resume()
             assertNotNull(fixture.gate.onPreLogin(event)).execute(continuation)
             client.channel.runPendingTasks()
-            if (queued) client.channel.writeInbound(Cookie(null))
             fixture.gate.deactivate()
             fixture.services.drain()
             assertEquals(1, continuation.count)
@@ -299,7 +335,7 @@ class LoginGateRoleEventsTest {
             assertEquals(0, continuation.count)
             assertEquals(1, fixture.services.queue.size)
             fixture.services.drain()
-            assertTrue(fixture.services.roleCalls >= 2)
+            assertTrue(fixture.services.roleCalls > 0)
             assertTrue(event.result.isAllowed)
             assertEquals(1, continuation.count)
         }
@@ -328,6 +364,52 @@ class LoginGateRoleEventsTest {
         }
     }
 
+    @Test fun `same-identity Bedrock click keeps current Player and late native skin guard preserves extras`() {
+        Fixture(dual = true).use { fixture ->
+            val client = fixture.client()
+            fixture.login(client)
+            val player = fixture.gate.ports.player(client.player)
+            assertEquals(fixture.premium.uuid, client.id)
+            assertEquals("PremiumRole", client.name)
+            assertFalse(fixture.gate.common.isAuthenticated(player))
+            fixture.gate.onJoin(client.limbo)
+            fixture.services.drain()
+            val generation = assertNotNull(client.menu).generation
+            fixture.gate.onRoleSelect(client.limbo, generation, "premium")
+            fixture.services.drain()
+            assertTrue(fixture.gate.common.isAuthenticated(player))
+            assertTrue(client.active)
+            assertEquals(0, client.disconnects)
+            assertEquals(1, client.backendRequests)
+            assertEquals(fixture.premium.uuid, client.id)
+            assertEquals("PremiumRole", client.name)
+            val extra = GameProfile.Property("native-extra", "preserved", "signed")
+            client.properties = client.properties + extra + GameProfile.Property("textures", "late-wrong-skin", "wrong")
+            val event = com.velocitypowered.api.event.player.ServerPreConnectEvent(client.player, fixture.backend)
+            fixture.gate.onPreConnect(event)
+            assertTrue(event.result.isAllowed)
+            assertEquals(emptyList(), client.properties.filter { it.name == "textures" })
+            assertTrue(extra in client.properties)
+            assertEquals(client.sid.toString(), client.properties.single { it.name == LoginGate.CONNECTION_PROPERTY }.value)
+            assertEquals(0, client.disconnects)
+            assertNull(client.channel.readOutbound<Any>())
+        }
+    }
+
+    @Test fun `enabled Bedrock role selection keeps Java Microsoft login on basic path without cookie wait`() {
+        Fixture(bedrock = false).use { fixture ->
+            val client = fixture.client()
+            fixture.login(client)
+            val player = fixture.gate.ports.player(client.player)
+            assertEquals("Steve", client.name)
+            assertEquals(fixture.identity.uuid, client.id)
+            assertFalse(fixture.gate.common.requiresRoleProfile(player))
+            assertEquals(0, fixture.services.roleCalls)
+            assertNull(client.channel.readOutbound<Any>())
+            assertTrue(fixture.services.queue.isEmpty())
+        }
+    }
+
     @Test fun `feature off and ordinary Mojang Login retain synchronous null EventTask behavior`() {
         Fixture(roles = false).use { fixture ->
             val client = fixture.client()
@@ -343,7 +425,7 @@ class LoginGateRoleEventsTest {
             assertTrue(login.result.isAllowed)
             assertTrue(fixture.services.queue.isEmpty())
         }
-        Fixture().use { fixture ->
+        Fixture(bedrock = false).use { fixture ->
             val client = fixture.client().apply { online = true }
             fixture.services.decision = AuthCoordinator.Decision.MojangSession(client.id)
             fixture.preAndProfile(client)

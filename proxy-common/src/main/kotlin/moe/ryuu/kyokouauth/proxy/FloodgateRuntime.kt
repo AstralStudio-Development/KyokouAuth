@@ -6,10 +6,13 @@ import moe.ryuu.kyokouauth.core.identity.Xuid
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.util.UUID
+import java.util.function.Consumer
 
 /** Reflection belongs here, not in the shared authorization state machine. No SDK is bundled. */
 class FloodgateRuntime(private val enabled: Boolean, private val allowLinked: Boolean = false,
-                       private val provider: () -> FloodgateProvider?) {
+                       private val guardRoleSkin: (UUID) -> Boolean = { false },
+                       private val provider: () -> FloodgateProvider?) : AutoCloseable {
+    @Volatile private var closed = false
     private val authority = if (enabled) checkNotNull(provider()) {
         "bedrock.enabled requires a proxy Floodgate installation"
     } else null
@@ -20,6 +23,14 @@ class FloodgateRuntime(private val enabled: Boolean, private val allowLinked: Bo
         try { Access(original, allowLinked) } catch (failure: Exception) {
             throw IllegalStateException("bedrock.enabled requires initialized compatible proxy Floodgate (${failure.javaClass.simpleName})")
         }
+    }
+    private val skinSubscription = if (enabled && allowLinked) access?.subscribeSkinApply { playerId ->
+        !closed && providerCurrent() && runCatching { guardRoleSkin(playerId) }.getOrDefault(true)
+    } else null
+
+    override fun close() {
+        closed = true
+        skinSubscription?.close()
     }
 
     fun probe(connection: FloodgateConnection): BedrockLogin {
@@ -63,6 +74,7 @@ class FloodgateRuntime(private val enabled: Boolean, private val allowLinked: Bo
         }
 
     private fun providerCurrent(): Boolean {
+        if (closed) return false
         val original = authority ?: return false
         val installed = provider() ?: return false
         return installed.instance === original.instance && installed.classLoader === original.classLoader &&
@@ -92,6 +104,26 @@ class FloodgateRuntime(private val enabled: Boolean, private val allowLinked: Bo
         private val linkedUuid = linkedType?.let { method(it, "getJavaUniqueId", UUID::class.java) }
         private val linkedName = linkedType?.let { method(it, "getJavaUsername", String::class.java) }
         private val linkedBedrockId = linkedType?.let { method(it, "getBedrockId", UUID::class.java) }
+        private val eventBusMethod = if (allowLinked) apiClass.getMethod("getEventBus").also {
+            check(!it.returnType.isPrimitive && Modifier.isPublic(it.modifiers))
+        } else null
+        private val skinEventClass = if (allowLinked)
+            provider.classLoader.loadClass("org.geysermc.floodgate.api.event.skin.SkinApplyEvent") else null
+        private val skinEventPlayer = skinEventClass?.let { method(it, "player", playerClass) }
+        private val skinEventCancel = skinEventClass?.getMethod("setCancelled", Boolean::class.javaPrimitiveType!!)?.also {
+            check(it.returnType == Void.TYPE && Modifier.isPublic(it.modifiers))
+        }
+        private val postOrderClass = if (allowLinked) provider.classLoader.loadClass("org.geysermc.event.PostOrder") else null
+        private val subscribeMethod = eventBusMethod?.returnType?.getMethod(
+            "subscribe", Class::class.java, Consumer::class.java, checkNotNull(postOrderClass)
+        )?.also { check(!it.returnType.isPrimitive && Modifier.isPublic(it.modifiers)) }
+        private val unsubscribeMethod = subscribeMethod?.let { sub ->
+            val subscriberBase = provider.classLoader.loadClass("org.geysermc.event.subscribe.Subscriber")
+            check(subscriberBase.isAssignableFrom(sub.returnType))
+            checkNotNull(eventBusMethod).returnType.getMethod("unsubscribe", subscriberBase).also {
+                check(it.returnType == Void.TYPE && Modifier.isPublic(it.modifiers))
+            }
+        }
 
         init {
             check(provider.classLoader.loadClass("org.geysermc.floodgate.api.ProxyFloodgateApi").isInstance(api)) {
@@ -101,6 +133,23 @@ class FloodgateRuntime(private val enabled: Boolean, private val allowLinked: Bo
 
         fun isCurrent(): Boolean = singleton.invoke(null) === api
         fun player(id: UUID): Any? = lookup.invoke(api, id)
+
+        fun subscribeSkinApply(shouldCancel: (UUID) -> Boolean): AutoCloseable {
+            val bus = checkNotNull(checkNotNull(eventBusMethod).invoke(api)) { "Floodgate event bus is unavailable" }
+            val eventType = checkNotNull(skinEventClass)
+            val playerGetter = checkNotNull(skinEventPlayer)
+            val canceller = checkNotNull(skinEventCancel)
+            val lastOrder = checkNotNull(postOrderClass).enumConstants.first { (it as Enum<*>).name == "LAST" }
+            val consumer = Consumer<Any> { event ->
+                if (!eventType.isInstance(event)) return@Consumer
+                val fgPlayer = playerGetter.invoke(event) ?: return@Consumer
+                val id = uuid.invoke(fgPlayer) as UUID
+                if (shouldCancel(id)) canceller.invoke(event, true)
+            }
+            val subscriber = checkNotNull(checkNotNull(subscribeMethod).invoke(bus, eventType, consumer, lastOrder))
+            val unsub = checkNotNull(unsubscribeMethod)
+            return AutoCloseable { runCatching { unsub.invoke(bus, subscriber) } }
+        }
         fun read(player: Any, linkedDetails: Boolean = false): Snapshot {
                     check(playerClass.isInstance(player)) { "Unexpected Floodgate player type" }
                     val linkedPlayer = link.invoke(player)

@@ -18,8 +18,6 @@ def source(protocol):
     if protocol <= 774:
         text = text.replace('section.hasOnlyAir() && !section.hasFluid()', 'section.hasOnlyAir()')
         text = text.replace('        BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(access).forEach(net.minecraft.core.component.DataComponentInitializers.PendingComponents::apply);\n', '')
-        text = text.replace('Optional.ofNullable(stack.getComponentsPatch().get(stack.getPrototype(), net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA))',
-                            'stack.getComponentsPatch().get(net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA)')
     text = text.replace('spawn.previousGameType().isEmpty()', 'spawn.previousGameType() == null')
     text = text.replace('Optional.empty(), false, false, Optional.empty(), 0, 63);', 'null, false, false, Optional.empty(), 0, 63);')
     if protocol <= 775:

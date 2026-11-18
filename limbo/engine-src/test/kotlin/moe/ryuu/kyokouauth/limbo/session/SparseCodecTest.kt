@@ -100,6 +100,28 @@ class SparseCodecTest {
         }
     }
 
+    @Test fun `selector registry exposes exactly profile name and lore and rejects every omitted official ordinal`() {
+        val owner = Class.forName("org.geysermc.mcprotocollib.protocol.data.game.item.component." +
+            if (GeneratedCodec.PROTOCOL <= 768) "DataComponentType" else "DataComponentTypes")
+        val retained = owner.fields.filter { java.lang.reflect.Modifier.isStatic(it.modifiers) &&
+            org.geysermc.mcprotocollib.protocol.data.game.item.component.DataComponentType::class.java.isAssignableFrom(it.type) && it.get(null) != null }
+        assertEquals(setOf("PROFILE", "CUSTOM_NAME", "LORE"), retained.map { it.name }.toSet())
+        val ids = retained.associate { field ->
+            val value = field.get(null)
+            (value.javaClass.getMethod("getId").invoke(value) as Int) to value
+        }
+        val from = owner.getMethod("from", Int::class.java)
+        val size = owner.getMethod("size").invoke(null) as Int
+        assertTrue(size > 40, "Omitted ordinals must remain official tombstones, not shift retained IDs")
+        for (id in -1..size) {
+            if (id in ids) assertSame(ids[id], from.invoke(null, id))
+            else {
+                val failure = assertFailsWith<InvocationTargetException> { from.invoke(null, id) }
+                assertIs<IllegalArgumentException>(failure.targetException)
+            }
+        }
+    }
+
     @Test fun `thin server protocol owns both initializers without session listeners or auth flags`() {
         val server = SparseMinecraftProtocol()
         assertSame(sparse, server.codec)

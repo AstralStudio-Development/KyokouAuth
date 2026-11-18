@@ -39,6 +39,11 @@ def download(url, target):
     if target.is_file():
         return
     target.parent.mkdir(parents=True, exist_ok=True)
+    if target.name == "h2-1.4.200.jar":
+        cached = sorted((Path.home() / ".gradle/caches/modules-2/files-2.1/com.h2database/h2/1.4.200").rglob("h2-1.4.200.jar"))
+        if cached:
+            shutil.copyfile(cached[0], target)
+            return
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"}))
     with opener.open(url, timeout=90) as response:
         data = response.read()

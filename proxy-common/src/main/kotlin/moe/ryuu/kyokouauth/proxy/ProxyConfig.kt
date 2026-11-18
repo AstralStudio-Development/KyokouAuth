@@ -45,26 +45,13 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
     val bedrockEnabled = boolean("bedrock.enabled", false)
     val rolesEnabled = boolean("role-selection.enabled", false)
     val roleSelectionTimeoutSeconds = long("role-selection.timeout-seconds", 60L, 5L..600L)
-    val roleTransferTtlSeconds = long("role-selection.transfer-ttl-seconds", 30L, 5L..120L)
-    val roleTransferHost = text("role-selection.reconnect-host", "").trim().also { host ->
-        requireSetting((host.isEmpty() && !rolesEnabled) || (host.length in 1..253 && host.all {
-            it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in ".:-_"
-        }), "role-selection.reconnect-host", "an explicit trusted proxy hostname or IP without scheme or port")
-    }
-    val roleTransferPort = integer("role-selection.reconnect-port", 25577, 1..65535)
-    val roleAvatarsEnabled = boolean("role-selection.avatars.enabled", false).also { enabled ->
-        requireSetting(!enabled || rolesEnabled && bedrockEnabled, "role-selection.avatars.enabled",
-            "role selection and verified Bedrock access to be enabled")
-    }
-    val roleAvatarBridgePort = integer("role-selection.avatars.bridge-port", 24682, 1..65535)
-    val roleAvatarStatusEndpoint: URI = run {
-        val key = "role-selection.avatars.status-endpoint"
-        val uri = runCatching { URI(text(key, "http://127.0.0.1:24683/v1/packs/status")) }.getOrNull()
-        requireSetting(uri != null && uri.scheme == "http" && uri.host == "127.0.0.1" &&
-            uri.port in 1..65535 && uri.rawPath == "/v1/packs/status" &&
-            uri.userInfo == null && uri.rawQuery == null && uri.rawFragment == null,
-            key, "an explicit HTTP endpoint on literal 127.0.0.1 with fixed /v1/packs/status path")
-        requireNotNull(uri)
+    // The old TTL key remains a migration alias; it no longer enables a transfer or cookie flow.
+    val roleHintTtlSeconds = if ("role-selection.hint-ttl-seconds" in values)
+        long("role-selection.hint-ttl-seconds", 30L, 5L..120L)
+    else long("role-selection.transfer-ttl-seconds", 30L, 5L..120L)
+    internal val hasRetiredRoleSettings = values.keys.any {
+        it.startsWith("role-selection.avatars.") || it == "role-selection.reconnect-host" ||
+            it == "role-selection.reconnect-port"
     }
     val autoRenameMicrosoft = boolean("verification.auto-rename", true)
     val blockedCommands: Set<String> = run {

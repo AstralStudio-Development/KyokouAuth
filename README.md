@@ -37,11 +37,9 @@
 |---|---|
 | Java 微软认证 | 对应平台代理 JAR、代理离线模式、该平台的后端转发配置；插件默认 SQLite |
 | 基岩接入 | Geyser 指向代理、同代理内的 Floodgate、受控密钥配对、`auth-type: floodgate`、Xbox 验证，以及 `bedrock.enabled` |
-| 关联双角色 | `role-selection.enabled`、玩家可达的 `reconnect-host/port`；Velocity 还需允许 Transfer |
-| 基岩库存头像 | 独立 Avatar 扩展、双方头像开关和 loopback 端口配对、Geyser 自定义内容/资源包设置、客户端接受包 |
-| 基岩自动回连 | 另装 Transfer 扩展并配置目标地址白名单；不安装时需手动重连 |
+| 基岩关联双角色 | `role-selection.enabled`；原版图标箱子菜单，不需要自有 Geyser 扩展、图片HTTP桥或原生 Transfer |
 
-Geyser/Floodgate 不会由 KyokouAuth 自动安装、复制密钥或改写配置。SR 是可选的皮肤来源，不是认证依赖。头像桥只支持共享同一 loopback 网络环境；分开的主机或 Docker 网络不能直接把两端 `127.0.0.1` 当作彼此，也不应改成公网监听。可关闭头像适配而保留基岩认证与角色选择。
+Geyser/Floodgate 不会由 KyokouAuth 自动安装、复制密钥或改写配置。SR 是可选的角色皮肤来源，不是认证依赖。基岩选角使用原版物品，不需要安装本项目的 Geyser 扩展、自定义头像资源包，也没有需要额外配对或开放的图片HTTP端口。
 
 仓库中的 `run-*`、`.narrafork`、本机 JVM 代理参数和测试证据不是发行插件的安装依赖；用户自行部署不需要复制这些目录。具体配置见以下分层说明。
 
@@ -89,108 +87,46 @@ bedrock:
 
 网关始终保留 `java.auth-type: floodgate` 与 `advanced.bedrock.validate-bedrock-login: true`。没有有效 Xbox 签名/证明的离线基岩连接在 Geyser 建立 Java 下游连接前被拒绝，不回退到 Java 设备码流程；修改版启动器若仍提供有效 Xbox 登录，仍属于有证明的入口，不能按启动器名称判断。当前认证不是账号白名单，其他有效微软账号仍可按既有规则进入；本次不增加白名单或匿名基岩入口。
 
-### 关联账号与双角色选择（默认关闭）
+### 基岩关联账号与双角色选择（默认关闭）
 
 这是**选择独立角色**，不是把微软角色迁移到正版 UUID，也不是合并背包、位置、权限或存档：
 
 - **微软角色 U**：本服 XUID 绑定中的稳定 UUID（`UUID(0, XUID)`）和当前离线名字。Xbox gamertag 是微软档案资料，不是本服离线名字；改 gamertag 不会替你改本服名字。
 - **正版角色 J**：当前核验关联给出的 Mojang UUID；名字与正版纹理按该 UUID 读取官方 profile。角色流程最多复用60秒内成功验证的公开档案，避免选角、点击和回连短时重复查询；此元数据允许最多60秒的名字/皮肤更新窗口，不是关联或授权缓存。当前强证明与官方关联仍每次重验，过期后失败不会回用旧档案；上游错误会记录安全分类与HTTP状态。正版名字、gamertag 和本服微软名字可能完全不同。
-- 只有当前连接完成设备码/Xbox 验证或取得可信 Floodgate **强 XUID 证明**，再核验当前官方 global 关联，才有资格解析这两种角色。普通 Mojang 会话只证明其 Java 角色，不反向授予某个 XUID 的角色；IP 免验、公开 UUID/profile 查询和历史关系行也不能升级出正版选角权限。
+- 本轮双角色菜单只面向具有当前可信 Floodgate **强 XUID 证明**的基岩连接，再核验当前官方 global 关联。Java保留普通微软角色设备码认证与正版Mojang直登，暂不提供设备码后跨到另一角色的GUI；不通过IP、名字或服务器hint续用Java正版权限。公开UUID/profile查询和历史关系行都不是授权。
 
-默认配置如下；开启前将 `reconnect-host` 改为管理员控制、玩家可访问的 Java 代理地址，再将 `enabled` 设为 `true` 并重启代理。不能使用真实后端、私有 Limbo 地址或客户端自报地址作为回连目标。原生前登录/profile 桥不兼容时拒绝开启，而不是在 Player 登录后改显示名伪装换身份。
+默认配置如下；开启需要同时启用可信基岩入口及兼容的原生前登录/profile桥。不发送原生Transfer，不要求Velocity开启 `accepts-transfers`，没有自动跳转地址或Java Cookie交接。
 
 ```yaml
 role-selection:
   enabled: false
   timeout-seconds: 60
-  transfer-ttl-seconds: 30
-  reconnect-host: ""
-  reconnect-port: 25577
+  hint-ttl-seconds: 30
 ```
 
-**Velocity 部署要求**：接收选角回连的目标代理必须在 `velocity.toml` 的 `[advanced]` 段设置 `accepts-transfers = true` 并重启；不要放在 TOML 根级。否则原生 Java Transfer 握手会被 Velocity 以 `multiplayer.disconnect.transfers_disabled` 拒绝，不能改用普通登录来绕过该要求。插件不会自动改写运行服配置。
+旧 `transfer-ttl-seconds` 仅作为hint期限的迁移别名；新键优先。旧 `reconnect-host/port`、`avatars` 和图片桥配置已经退役，应从配置删除，启动时会提示，不会因为保留旧键重新打开传输或HTTP端点。
 
-有 U 和当前可用 J 时，认证后打开三行、27 格的原生头颅 GUI，第二行第 4/6 列（零基槽 **12/14**）分别显示“微软角色”和“正版角色”及当前名字。默认标题为无额外颜色的“请选择角色”，由客户端使用原版容器标题颜色；两个类别统一品牌青色 `#22D3EE`，弱灰 `»` 分隔白色名字，说明仅为“点击进入服务器”；选角物品的名称/说明根组件显式非斜体，不继承原版自定义物品的斜体/紫色默认，也不全局修改聊天样式。仅一个合法角色时直接选择它；首次 J 可以展示，但仅选择后按正常规则建档。不因为 linked 的 Java 名字制造一个新的微软角色；没有已有 U 的未关联基岩首次登录仍使用隔离前缀策略。
+有 U 和当前可用 J 时，基岩认证后打开三行、27格箱子菜单：零基槽 **12/14** 分别用原版 **NAME_TAG/DIAMOND** 表示微软角色/正版角色及当前名字，不把图标冒充实时皮肤头像。标题“请选择角色”继承原版GUI颜色，类别青色、命名gray分隔白名，说明简洁、根组件显式非斜体；Geyser-bound物品文案仅在此处补格式重置，不全局修改聊天或普通物品。仅一个合法角色时在原生Player创建前核验并落定，不制造一次无意义的选角回连；首次J仅在实际准入时建档。
 
-Java 选择器使用连接级随机临时身份；基岩选择器必须保留当前 Channel 的 Floodgate 原生注册 UUID，使真实 Geyser 的 `floodgate:*` 内部消息仍经过官方来源校验。两种选择器的显示名均为合法的随机隔离别名，提供方原始名字独立保存在当前连接证明内，不放宽私有 Limbo 的名字校验。保留原生消息身份不等于后端准入：选角阶段仍为 HELD。若该原生身份已经在线，拒绝本次新连接，不用临时 UUID 绕过 Floodgate 限制或挤掉旧角色。
+若强FG证明及当前关联允许的原生UUID/name就是合法候选，选择器保留该身份，不无条件改成KA别名；选择期间仍为HELD，绝不提前连接真实后端。在线UUID/名字及并发pending预约冲突会拒绝新连接，不踢掉已有角色，不写SDK alias或关闭官方 `floodgate:*` 消息来源校验。不能安全保留对应身份时保持隔离，不能反射修改已构造Player的身份来凑零重连。
 
 没有选择就不能进入后端，关闭菜单不会替玩家决定；选择超时或连接失效会拒绝。候选、点击和新连接交接按 XUID/UUID 重新核对当前关系及角色，不按名字或客户端提交的 UUID 授权。解绑/改绑、名字占用、角色删除或改名后的旧菜单/交接不能沿用旧权限；微软名字被 Mojang 认领也不能强行覆盖。微软自动改名仍受 `verification.auto-rename` 与原子名字冲突规则约束，角色 UUID 和两套资料不变。同一个 J 关联多个 XUID，不会使这些 XUID 互相取得对方的 U。
 
 **皮肤各归各的角色**：U 只按稳定 UUID 读取可选 SkinsRestorer 的显式设置；未安装或未设置时使用默认皮肤/默认头颅，不按离线名借用同名正版皮肤。J 使用官方 UUID 对应的正版纹理，不套用 U 的 SR 皮肤；官方资料/皮肤查询失败不是“默认皮肤”或认证成功。皮肤与公开 profile 查询本身都不是身份凭证。
 
-最终 UUID/name/profile 必须在新 Player 落定前设置。Java 使用短 TTL、一次性不透明 Cookie 交接；基岩只保存短期选择意图，新连接仍须取得新的 exact-channel Floodgate 证明并重验关联。没有长期默认角色，不把交接写成数据库登录凭证；这是一次真正的回连与加载，不是无缝切服。
+选中角色与实际Player的UUID及名字完全相同时，经重新核验、绑定与可信属性恢复后原连接进入后端，**0次选角重连**。真正选择另一UUID或名字时，关闭菜单并提示重新连接当前服务器，**一次普通回连**；服务端hint只记短时选择意图，新Channel仍须有新的有效Xbox/Floodgate证明并重验关联/记录才可消费。它不是凭证，不按IP、名字或客户端UUID授权，不使用原生Transfer，不默认记住上次角色。失效、解绑、改绑、改名或占用仍会拒绝；“一次”不包括玩家主动重试或上游持续故障。
 
-#### 基岩原生自动回连的可选 Geyser 扩展
+#### 从旧自有扩展版本升级
 
-[`platform-geyser-transfer`](platform-geyser-transfer/build.gradle.kts) 只做地址白名单转换，不参与认证。将 `platform-geyser-transfer/build/libs/KyokouAuth-GeyserTransfer-0.1.0-SNAPSHOT.jar` 安装到 **Geyser 的 `extensions/`**（不是代理 `plugins/`），启动后编辑该扩展数据目录生成的 `transfer-routes.properties`，替换以下示例地址并重启 Geyser：
+本项目不再提供或要求 Geyser Avatar/Transfer 生产扩展，也不创建图片HTTP端点、私有CMD或动态头像包。请在受控维护窗口备份并卸载旧 `KyokouAuth-GeyserAvatar` / `KyokouAuth-GeyserTransfer` 扩展及其自有配置/pack，再重启Geyser；只删除磁盘文件不能声称已卸载运行中的扩展。不要删除Floodgate密钥、正常Geyser资源或其他插件文件。
 
-```properties
-enabled=true
-route.local.java-host=proxy.example.com
-route.local.java-port=25577
-route.local.bedrock-host=bedrock.example.com
-route.local.bedrock-port=19132
-```
-
-Java host/port 必须精确匹配上面代理的 `reconnect-host` / `reconnect-port`（DNS 大小写除外）；Bedrock host/port 必须能被**基岩客户端**访问，不能填 `0.0.0.0`、后端地址或仅服务器可达的内部地址。白名单仅接受显式 DNS/IPv4 与端口，不支持通配符、URL、SRV 推导或客户端 hostname；扩展默认 `enabled=false`，只针对固定 Geyser **2.12.1 b1303**，不兼容构建拒绝启用。
-
-扩展将匹配的原生 `ServerTransferEvent` 转换为 Bedrock 目的地址，再由 Geyser 发送原生 Transfer；它不读取密钥、不搬 Cookie、不替代强 XUID 证明。**未安装/未配置白名单或客户端不支持 Transfer 时须手动重新连接**。即使安装，也仍有新连接与真实加载过程，不能承诺无缝回连。
-
-#### 基岩库存头像：独立 Avatar 扩展（默认关闭）
-
-Java 的真实 `PLAYER_HEAD/PROFILE` 纹理不等于基岩库存能够显示任意皮肤。基岩头像适配采用**两个精确 CMD 标记的自定义物品图标＋每会话专用资源覆盖包**：仅当前可信基岩选角物品携带 `0x4B5901` / `0x4B5902`，Geyser 只精确匹配这两个值，不使用“CMD 大于阈值”的范围匹配。它不注册 custom skull、不覆盖真实 skin hash 或普通玩家头颅；普通 Java GUI 仍保留真实 PROFILE、UUID、名字、纹理及签名。CMD 和图像都不是登录凭证。
-
-另装 [`platform-geyser-avatar`](platform-geyser-avatar/build.gradle.kts) 的 `KyokouAuth-GeyserAvatar-<版本>.jar` 到 **Geyser 的 `extensions/`**，不要替换只负责路由的 Transfer 扩展。固定入口为 `KyokouAuthAvatar`（id `kyokouauthavatar`），只适配 Geyser **2.12.1 b1303**。启动后编辑 Geyser 为该扩展生成的数据目录中的 [`avatar.properties`](platform-geyser-avatar/src/main/resources/avatar.properties)，以实际 SDK `dataFolder()` 为准，不猜目录名大小写。
-
-Proxy 端新增默认值如下，将 `avatars` 合并到现有 `role-selection` 段，不要重复创建顶级键；开启 `role-selection.avatars.enabled` 还必须已有 `role-selection.enabled: true`、`bedrock.enabled: true` 和原有可信回连配置。头像不会替代角色选择或 Floodgate 认证：
-
-```yaml
-role-selection:
-  avatars:
-    enabled: false
-    bridge-port: 24682
-    status-endpoint: "http://127.0.0.1:24683/v1/packs/status"
-```
-
-Geyser 扩展与 Proxy 配对后，将其生成配置的 `enabled` 设为 `true`；其余默认属性如下：
-
-```properties
-enabled=false
-proxy-endpoint=http://127.0.0.1:24682/v1/avatars
-status-host=127.0.0.1
-status-port=24683
-snapshot-timeout-ms=200
-max-packs=64
-max-sessions=1024
-```
-
-两端只监听字面量 `127.0.0.1`，端口须不同且无冲突；Proxy/Geyser 需要共享可达的受控本机 loopback 环境。不要为跨机部署改成 `0.0.0.0`、公网、任意 hostname 或开放转发。Proxy 的 `GET /v1/avatars?xuid=...` 只读已准备的 PNG 快照，MISS 为 `202/not-ready`；Geyser 的 `GET /v1/packs/status?xuid=...` 只读本次资源阶段的 `nonce`、`fingerprint` 与 `fallback`。`offered` 只是“已提供的 presentation”，**不是客户端已下载/已渲染的 ACK**。GET 不触发外网下载、角色创建或授权，也不返回 Cookie、token、名字、数据库凭据或玩家存档。
-
-客户端必须接受所需资源包；固定 Geyser schema12 的 `config.yml` 需要以下前提（不是 Proxy 配置），在现有 `gameplay` 段修改而非重复创建顶级键，然后重启 Geyser：
-
-```yaml
-gameplay:
-  enable-custom-content: true
-  force-resource-packs: true
-  enable-integrated-pack: true
-```
-
-关闭自定义内容会禁用 Geyser 的物品映射；关闭强制包会允许客户端拒绝包继续连接，不能在这两种情况下声称图标已显示。保留 integrated 包及其强制加载要求；头像覆盖只写自有 `kyokouauth` 图像路径，不改 integrated 包本身、普通头颅、其他插件纹理或游戏存档。
-
-资源阶段不能在异步完成后给同一会话热换包：
-
-- 命中当前实际图像指纹时，**头像视觉重连为 0 次**；单角色不为头像新增 GUI 或视觉重连。
-- 首次 MISS 时先提供明确占位，Proxy 在当前强 XUID/角色核验后有界准备两张透明三面头像；如果本次 offered 指纹不同，**最多一次真正的视觉重连**，新连接仍重新验证 Xbox/Floodgate、关联及角色。它不签发/消费选角权限，不替玩家选择角色，也不包含原有最终角色身份落定可能需要的交接重连。
-- 新用户和 SR 换肤可在下一次连接按实际图像内容刷新，无须每次重启 Geyser；已打开的活动会话不承诺热换资源包。名字/档案时间戳不单独改变头像内容指纹，不按同名跨角色串图；活动包文件保持不可变。
-- 超时、失败、缓存 MISS 或刷新预算用尽时，显示明确的问号占位及“头像暂不可用”提示，不把 fallback 冒充真实皮肤显示成功，也不会放松认证或无限重连。
-
-微软 U 没有 SR 显式设置时使用明确的默认 Steve 头像，已有设置则按稳定 U UUID 读取；正版 J 使用其官方 profile 皮肤。无设置与上游失败分开，头像准备、公开皮肤及任何 presentation 端点都没有授权能力。资源包 PNG/指纹、官方翻译路径和原生事件可自动验证，**真正手机上的包下载与头像显示、换肤和重连体验仍须操作者验收**；本节说明不代表已经部署或真人渲染通过。
+Geyser/Floodgate本体与Xbox验证仍保留。基岩NAME_TAG/DIAMOND就是普通物品，不显示任意实时皮肤头颅；Java真实profile/皮肤及角色各自的SR/官方纹理规则不因此混用。不会为头像额外断线或要求客户端接受我们的资源包。
 
 #### 存储升级与验收边界
 
 身份库启动时增量升级至 **schema v3**，新增表只保存 XUID、Java UUID、来源、范围与核验时间；不保存 token，不作为授权缓存。旧 v1/v2 的身份 UUID、名字、会话和 `kyokouauth_bedrock_link` 保留，旧链接**不自动导入授权**。升级前请独立备份数据库、配置与产物；关闭角色选择不等于跳过 schema 迁移，也不能假定换回旧 JAR 即可回滚数据库。
 
-安装能力和验收范围分开看：完整双角色原生回归目前覆盖 Velocity；Bungee 有独立的原生隔离、UUID/首次重连及 Floodgate 接入历史验证，但当前版本的双角色点击→交接→最终身份与 Avatar 完整原生链路尚未等价验收。Bungee 编译、单元测试或成品审计通过不等于这条链路已测。测试实例是按需启动后停止的临时沙盒，不要求同时运行两种代理。
+安装能力和验收范围分开看：每个实际候选JAR的两平台基岩在位准入/普通新登录、Java基础登录、私有转发与协议审计，均应以当次隔离结果报告为准；编译或通用单元测试不能外推完整原生链路通过。测试实例按需启动后停止，不要求同时部署两种代理；Java高级跨角色能力也不从基岩结果外推。
 
 静态接口、隔离回归、具体部署记录与真人验收分别记录。以前手工合成文字并直接调用 Geyser 底层转换的样式测试，不能证明真实 GUI 报文经过完整翻译后仍正确，也不能替代手机渲染。Java/Geyser 三行 GUI 的实机显示、基岩原生自动回连、两角色实际存档及真实账号登录仍需现场验收；不得把字段、合成输入或 mock 当作已显示成功。
 
@@ -269,7 +205,7 @@ verification:
 
 普通测试仅使用本地受控服务，不申请真实设备码或查询真实 Mojang 档案。确需联网验收时显式运行 `./gradlew -Dkyokou.test.live=true :core:test --tests '*DeviceCodeFlowLiveTest'`；它仍不能替代真实账号完成授权的验收。外部数据库测试需要独立测试库（会清空插件测试表），配置方式见 [ServerDialectTest](core/src/test/kotlin/moe/ryuu/kyokouauth/core/storage/ServerDialectTest.kt)。此前基线在全新 loopback 隔离实例验证了 MySQL 8.4.4 与 MariaDB 11.4.4（各两项通过），实例已停止；该记录不代表本次新增 schema/角色选择已完成这些服务器的回归。PostgreSQL 未配置，未声称实测通过。
 
-产物分别在 `platform-velocity/build/libs/` 与 `platform-bungee/build/libs/`，每个平台包含全部11个协议。字节数、SHA256 和相对10MiB软目标的差额以当次成品审计输出为准；20MiB硬上限及四组件闭包检查不因功能增加而放宽。已执行的官方Codec矩阵只证明对应产物的协议编解码，不等于完整原生登录、手机GUI渲染、真实微软/Xbox授权或Paper玩家存档验收；Geyser真实定义/翻译检查也必须区分合成输入与真实GUI报文。不外置下载协议依赖，也不打包Mojang游戏JAR。模块：
+产物分别在 `platform-velocity/build/libs/` 与 `platform-bungee/build/libs/`，每个平台包含全部11个协议。字节数、SHA256 和相对10MiB软目标的差额以当次成品审计输出为准；20MiB硬上限及三组件（`CUSTOM_NAME`、`LORE`、`PROFILE`）闭包检查不因功能增加而放宽。已执行的官方Codec矩阵只证明对应产物的协议编解码，不等于完整原生登录、手机GUI渲染、真实微软/Xbox授权或Paper玩家存档验收；Geyser真实翻译检查也必须区分合成输入与真实GUI报文。不外置下载协议依赖，也不打包Mojang游戏JAR。模块：
 
 | 模块 | 内容 |
 |---|---|
@@ -282,8 +218,6 @@ verification:
 | `proxy-common` | 共享认证接线、验证会话、配置/消息和管理命令业务 |
 | `platform-velocity` | Velocity 原生事件、profile、组件和命令适配 |
 | `platform-bungee` | Bungee 原生事件、profile bridge、私有入场票据与命令适配 |
-| `platform-geyser-transfer` | 固定 Geyser 的可选原生 Transfer 地址白名单扩展，不参与认证 |
-| `platform-geyser-avatar` | 固定 Geyser 的可选库存头像定义、自有资源覆盖包及只读 offered 状态，不参与认证 |
 
 Limbo 的物理目录统一收拢，Gradle 逻辑 project ID 保持兼容（例如 `:limbo-protocol-767:test`），不额外创建空的聚合项目：
 

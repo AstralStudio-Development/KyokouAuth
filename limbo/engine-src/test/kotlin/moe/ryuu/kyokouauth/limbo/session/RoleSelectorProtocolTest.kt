@@ -3,7 +3,7 @@ package moe.ryuu.kyokouauth.limbo.session
 import io.netty.buffer.ByteBuf
 import io.netty.buffer.Unpooled
 import moe.ryuu.kyokouauth.limbo.RoleSelectorItem
-import moe.ryuu.kyokouauth.limbo.RoleAvatarIcon
+import moe.ryuu.kyokouauth.limbo.RoleSelectorIcon
 import moe.ryuu.kyokouauth.limbo.RoleSelectorMenu
 import moe.ryuu.kyokouauth.limbo.protocol.TextComponent
 import net.kyori.adventure.text.Component
@@ -107,49 +107,40 @@ class RoleSelectorProtocolTest {
         } finally { buffer.release() }
     }
 
-    @Test fun `decoded avatar markers are exact and opt in without replacing real profiles`() {
-        fun decoded(value: RoleSelectorMenu): ClientboundContainerSetContentPacket {
-            val packet = RoleSelectorPackets.content(7, 1, value)
-            val buffer = Unpooled.buffer()
-            try {
-                encode(packet, buffer)
-                val codec = MinecraftCodec.CODEC.getCodec(ProtocolState.GAME)
-                return Wire.packet(codec, codec.getClientboundId(packet.javaClass), buffer) as ClientboundContainerSetContentPacket
-            } finally { buffer.release() }
+    @Test fun `vanilla role icons carry exactly name and lore without profiles or private model data`() {
+        val fixture = java.util.Properties().apply {
+            RoleSelectorPackets::class.java.getResourceAsStream("/limbo/role-selector-$protocol.properties").use { load(requireNotNull(it)) }
         }
-        fun value(head: ItemStack, name: String): Any? {
-            val type = Class.forName(componentOwner).getField(name).get(null) ?: return null
-            val patch = head.javaClass.methods.single { it.name in setOf("getDataComponents", "getDataComponentsPatch") }.invoke(head)
-            return patch.javaClass.getMethod("get", DataComponentType::class.java).invoke(patch, type)
-        }
-        val java = decoded(menu)
-        val marked = menu.copy(microsoft = menu.microsoft.copy(avatarIcon = RoleAvatarIcon.MICROSOFT),
-            premium = menu.premium.copy(avatarIcon = RoleAvatarIcon.PREMIUM))
-        val bedrock = decoded(marked)
-        for ((slot, icon, expected) in listOf(Triple(12, RoleAvatarIcon.MICROSOFT, menu.microsoft), Triple(14, RoleAvatarIcon.PREMIUM, menu.premium))) {
-            val unmarked = requireNotNull(java.items[slot])
-            val head = requireNotNull(bedrock.items[slot])
-            assertNull(value(unmarked, "CUSTOM_MODEL_DATA"), "Java default must not acquire a private avatar marker")
-            val cmd = assertNotNull(value(head, "CUSTOM_MODEL_DATA"), "Opt-in avatar marker was not serialized")
-            assertEquals(unmarked.id, head.id)
-            assertEquals(1, head.amount)
-            if (protocol <= 768) assertEquals(icon.modelData, assertIs<Int>(cmd))
-            else {
-                val floats = cmd.javaClass.getMethod("floats").invoke(cmd) as List<*>
-                assertEquals(1, floats.size)
-                assertEquals(icon.modelData.toFloat(), assertIs<Float>(floats.single()))
-                for (field in listOf("flags", "strings", "colors")) {
-                    assertTrue((cmd.javaClass.getMethod(field).invoke(cmd) as List<*>).isEmpty())
+        val icons = menu.copy(microsoft = menu.microsoft.copy(icon = RoleSelectorIcon.NAME_TAG),
+            premium = menu.premium.copy(icon = RoleSelectorIcon.DIAMOND))
+        val packet = RoleSelectorPackets.content(7, 1, icons)
+        val buffer = Unpooled.buffer()
+        try {
+            encode(packet, buffer)
+            val codec = MinecraftCodec.CODEC.getCodec(ProtocolState.GAME)
+            val decoded = Wire.packet(codec, codec.getClientboundId(packet.javaClass), buffer) as ClientboundContainerSetContentPacket
+            assertEquals(listOf(12, 14), decoded.items.indices.filter { decoded.items[it] != null })
+            for ((slot, key) in listOf(12 to "name-tag-id", 14 to "diamond-id")) {
+                val item = requireNotNull(decoded.items[slot])
+                assertEquals(fixture.getProperty(key).toInt(), item.id)
+                assertEquals(1, item.amount)
+                val patch = item.javaClass.methods.single { it.name in setOf("getDataComponents", "getDataComponentsPatch") }.invoke(item)
+                val get = patch.javaClass.getMethod("get", DataComponentType::class.java)
+                assertNull(get.invoke(patch, component("PROFILE")), "Vanilla role icons must not pretend to carry a player skin")
+                val values = patch.javaClass.getMethod("getDataComponents").invoke(patch) as Map<*, *>
+                assertEquals(setOf(component("CUSTOM_NAME"), component("LORE")), values.keys)
+                val name = get.invoke(patch, component("CUSTOM_NAME")) as Component
+                assertEquals(NamedTextColor.WHITE, name.color())
+                assertEquals(TextDecoration.State.FALSE, name.decoration(TextDecoration.ITALIC))
+                val lines = get.invoke(patch, component("LORE")) as List<*>
+                for (line in lines) {
+                    val lore = line as Component
+                    assertEquals(NamedTextColor.GRAY, lore.color())
+                    assertEquals(TextDecoration.State.FALSE, lore.decoration(TextDecoration.ITALIC))
                 }
             }
-            var profile = assertNotNull(value(head, "PROFILE"))
-            if (protocol >= 773) profile = profile.javaClass.getMethod("getProfile").invoke(profile)
-            profile as GameProfile
-            assertEquals(expected.profileUuid, profile.id)
-            assertEquals(expected.profileName, profile.name)
-            assertEquals(expected.textureValue, profile.properties.firstOrNull()?.value)
-            assertEquals(expected.textureSignature, profile.properties.firstOrNull()?.signature)
-        }
+            assertFalse(buffer.isReadable)
+        } finally { buffer.release() }
     }
 
     @Test fun `typed click rejects changed-slot preallocation and oversized frame before decoding`() {
@@ -180,7 +171,7 @@ class RoleSelectorProtocolTest {
                 return assertFails { receive(packet, bytes) }
             } finally { bytes.release() }
         }
-        assertContains(hostile { variable(it, 5); variable(it, 0) }.message.orEmpty(), "components")
+        assertContains(hostile { variable(it, 4); variable(it, 0) }.message.orEmpty(), "components")
         assertContains(hostile { variable(it, 1); variable(it, 0); variable(it, 0) }.message.orEmpty(), "Unsupported role selector component")
         val customName = component("CUSTOM_NAME").id
         // Byte-array tag length is deliberately absurd, with no body. Built-in LimitedDataInput must reject before allocation.
@@ -196,17 +187,37 @@ class RoleSelectorProtocolTest {
         assertContains(deep.message.orEmpty(), "deeply nested")
     }
 
-    @Test fun `hashed predictions reject component collection budget without treating predictions as authorization`() {
+    @Test fun `hashed predictions accept three retained components and reject four before collection allocation`() {
         if (protocol < 770) return
         val type = Class.forName("org.geysermc.mcprotocollib.protocol.data.game.item.HashedStack")
-        val hash = type.constructors.single().newInstance(123, 1, emptyMap<Any, Any>(), emptySet<Any>())
+        val components = listOf("PROFILE", "CUSTOM_NAME", "LORE").associate { component(it) to 0 }
+        val hash = type.constructors.single().newInstance(123, 1, components, emptySet<Any>())
         val packet = click(hash, emptyMap())
         val buffer = Unpooled.buffer()
         try {
             encode(packet, buffer)
-            // Hash maps were both empty: overwrite the final two counters with an oversized added count.
-            buffer.writerIndex(buffer.writerIndex() - 2)
-            variable(buffer, 5); variable(buffer, 0)
+            val decoded = receive(packet, buffer)
+            val carried = decoded.javaClass.getMethod("getCarriedItem").invoke(decoded)
+            val added = carried.javaClass.getMethod("addedComponents").invoke(carried) as Map<*, *>
+            assertEquals(components.keys, added.keys)
+            assertEquals(3, added.size)
+            assertFalse(buffer.isReadable)
+            val empty = type.constructors.single().newInstance(123, 1, emptyMap<Any, Any>(), emptySet<Any>())
+            val emptyPacket = click(empty, emptyMap())
+            for ((addedCount, removedCount) in listOf(4 to 0, 0 to 4)) {
+                buffer.clear()
+                encode(emptyPacket, buffer)
+                // Empty official hash counters: invalid count must fail before reading any collection element.
+                buffer.writerIndex(buffer.writerIndex() - 2)
+                variable(buffer, addedCount); variable(buffer, removedCount)
+                val failure = assertFailsWith<IllegalArgumentException> { receive(emptyPacket, buffer) }
+                assertContains(failure.message.orEmpty(), "hashedComponent")
+            }
+            // A full three-component added map consumes the entire total budget; a removed entry is a fourth.
+            buffer.clear()
+            encode(packet, buffer)
+            buffer.writerIndex(buffer.writerIndex() - 1)
+            variable(buffer, 1)
             val failure = assertFailsWith<IllegalArgumentException> { receive(packet, buffer) }
             assertContains(failure.message.orEmpty(), "hashedComponent")
         } finally { buffer.release() }

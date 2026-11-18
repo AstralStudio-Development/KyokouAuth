@@ -38,7 +38,6 @@ class KyokouAuthBungee : Plugin(), Listener {
     private var authority: PrivateTicketAuthority? = null
     private var limbo: LimboServer? = null
     private var sweep: ScheduledTask? = null
-    private var roleTransfer: BungeeRoleTransfer? = null
     private var roleSkinSource: BungeeRoleSkins? = null
     private var roleSkins: RoleSkinService? = null
 
@@ -60,12 +59,12 @@ class KyokouAuthBungee : Plugin(), Listener {
                 .also { this.floodgate = it }
             val messages = MessageCatalogue(config.locale, File(dataFolder, "messages")).also { it.load() }
             // No role-specific native signature/field access is initialized by default Java-only installs.
-            val transfer = if (config.rolesEnabled) BungeeRoleTransfer().also { roleTransfer = it } else null
             val roleBridge = if (config.rolesEnabled) BungeeRoleLoginBridge(javaClass.classLoader) else null
-            val platform = BungeePlatform(proxy, transfer).also { this.platform = it }
+            val platform = BungeePlatform(proxy).also { this.platform = it }
             val profiles = BungeeProfileBridge(javaClass.classLoader, bedrock = { pending ->
                 platform.find(pending)?.currentBedrockProof()
             }, role = { pending -> platform.find(pending)?.currentRoleProfile() })
+            platform.installProfiles(profiles)
             val authority = PrivateTicketAuthority().also { this.authority = it }
             val skinSource = if (config.rolesEnabled) BungeeRoleSkins {
                 proxy.pluginManager.getPlugin("SkinsRestorer") ?: proxy.pluginManager.getPlugin("skinsrestorer")
@@ -77,7 +76,7 @@ class KyokouAuthBungee : Plugin(), Listener {
                 submit = auth::execute, schedule = auth::schedule, accepting = { accepting },
                 intentTimeoutMillis = (config.sessionHandshakeTimeoutSeconds + 5L) * 1000L,
                 bedrock = floodgate::probe,
-                rolesEnabled = config.rolesEnabled, roleTransfer = transfer,
+                rolesEnabled = config.rolesEnabled,
                 prepareRole = roleBridge?.let { bridge -> { player: BungeePlayer, profile: GameProfile ->
                     val proof = player.currentBedrockProof()
                     bridge.prepare(player.pending, profile.id, profile.name, proof)
@@ -138,7 +137,6 @@ class KyokouAuthBungee : Plugin(), Listener {
         }
         release("connection watcher") { sweep?.cancel() }; sweep = null
         release("Bungee admission") { adapter?.close() }; adapter = null
-        release("native role transfer") { roleTransfer?.close() }; roleTransfer = null
         release("role skin provider generation") { roleSkinSource?.close() }; roleSkinSource = null
         release("Floodgate proof source") { floodgate?.close() }; floodgate = null
         release("native command boundary") { commandGuard?.close() }; commandGuard = null

@@ -82,13 +82,31 @@ internal class BungeePlayer(val pending: PendingConnection, private val platform
     private fun matchesIdentity(id: UUID, name: String): Boolean = pending.uniqueId == id && pending.name == name &&
         (native?.let { it.uniqueId == id && it.name == name } != false)
 
-    fun markClosed() { closed = true; bedrockProof = null; roleProfile = null }
+    @Synchronized fun markClosed() { closed = true; bedrockProof = null; roleProfile = null }
     override fun disconnect(message: RichText.Parsed) {
         markClosed()
         (native ?: pending).disconnect(message.toBungee())
     }
-    override fun transferRole(host: String, port: Int, cookie: ByteArray?): CompletableFuture<Unit> =
-        platform.transferRole(this, host, port, cookie)
+    override fun applyRoleProfile(profile: GameProfile): CompletableFuture<Unit> = try {
+        synchronized(this) {
+            check(platform.find(pending) === this && isActive && loggedIn && native != null &&
+                matchesIdentity(profile.id, profile.name)) { "Role properties require the exact live Player identity" }
+            check(bedrockProof?.isCurrent() != false) { "Role source proof expired" }
+            val profiles = platform.profiles()
+            val actual = profiles.read(pending)
+            check(actual.id == profile.id && actual.name == profile.name) { "Native role profile identity changed" }
+            val managed = setOf("textures", "kyokouauth:connection-id")
+            val merged = actual.withProperties(actual.properties.filterNot { it.name in managed } +
+                profile.properties.filter { it.name in managed })
+            profiles.apply(pending, merged)
+            check(isActive && matchesIdentity(profile.id, profile.name) && bedrockProof?.isCurrent() != false) {
+                "Role connection or source changed during property application"
+            }
+            // A late native skin guard must now restore this selection, never the old chooser.
+            roleProfile = merged.copy(properties = merged.properties.toList())
+        }
+        CompletableFuture.completedFuture(Unit)
+    } catch (failure: Exception) { CompletableFuture.failedFuture(failure) }
     override fun hasPermission(permission: String): Boolean = native?.hasPermission(permission) ?: false
     override fun sendMessage(message: RichText.Parsed) { native?.sendMessage(message.toBungee()) }
     override fun createConnectionRequest(target: RegisteredServer): ConnectionRequestBuilder = object : ConnectionRequestBuilder {
@@ -112,7 +130,13 @@ internal class BungeePlayer(val pending: PendingConnection, private val platform
     }
 }
 
-internal class BungeePlatform(val proxy: NativeProxy, private val roleTransfer: BungeeRoleTransfer? = null) : ProxyServer {
+internal class BungeePlatform(val proxy: NativeProxy) : ProxyServer {
+    @Volatile private var profileAccess: ProfileAccess? = null
+    @Synchronized fun installProfiles(profiles: ProfileAccess) {
+        check(profileAccess == null || profileAccess === profiles) { "Native profile bridge already installed" }
+        profileAccess = profiles
+    }
+    fun profiles(): ProfileAccess = checkNotNull(profileAccess) { "Native profile bridge unavailable" }
     private val players = IdentityHashMap<PendingConnection, BungeePlayer>()
     private val servers = IdentityHashMap<ServerInfo, RegisteredServer>()
     private val nativeServers = IdentityHashMap<RegisteredServer, ServerInfo>()
@@ -120,12 +144,6 @@ internal class BungeePlatform(val proxy: NativeProxy, private val roleTransfer: 
     private val privateServers = HashMap<String, RegisteredServer>()
     // Keep reserved names after removal: an expired private handle must never become public.
     private val privateServerNames = HashSet<String>()
-
-    fun transferRole(player: BungeePlayer, host: String, port: Int, cookie: ByteArray?): CompletableFuture<Unit> = try {
-        check(find(player.pending) === player && player.isActive && player.loggedIn) { "Role frontend is no longer admitted" }
-        val native = checkNotNull(player.native) { "Role transfer requires a logged-in native player" }
-        checkNotNull(roleTransfer) { "Native role transfer is disabled" }.transfer(native, host, port, cookie)
-    } catch (failure: Exception) { CompletableFuture.failedFuture(failure) }
 
     @Synchronized fun pending(connection: PendingConnection): BungeePlayer = players.getOrPut(connection) { BungeePlayer(connection, this) }
     @Synchronized fun find(connection: PendingConnection): BungeePlayer? = players[connection]

@@ -98,6 +98,33 @@ class BungeeFloodgateTest {
         return unsafeType.getMethod("allocateInstance", Class::class.java).invoke(unsafe, type)
     }
 
+    @Test fun `official2111 half-login watcher follows only its exact physical close and detaches cleanly`() {
+        val type = Class.forName("net.md_5.bungee.connection.InitialHandler", false, javaClass.classLoader)
+        val pending = allocate(type) as PendingConnection
+        val channel = object : EmbeddedChannel(object : io.netty.channel.ChannelInboundHandlerAdapter() {}) {
+            override fun remoteAddress0(): java.net.SocketAddress = java.net.InetSocketAddress("127.0.0.1", 43123)
+        }
+        val unrelated = EmbeddedChannel()
+        try {
+            type.getDeclaredField("ch").apply { isAccessible = true }
+                .set(pending, ChannelWrapper(checkNotNull(channel.pipeline().firstContext())))
+            val player = BungeePlatform(TestProxy()).pending(pending)
+            val access = BungeeFloodgateChannels(javaClass.classLoader)
+            var closes = 0
+            var detachedCloses = 0
+            val watcher = access.watchClosed(player) { closes++ }
+            access.watchClosed(player) { detachedCloses++ }.close()
+            unrelated.close()
+            unrelated.runPendingTasks()
+            assertEquals(0, closes)
+            channel.close()
+            channel.runPendingTasks()
+            assertEquals(1, closes)
+            assertEquals(0, detachedCloses)
+            watcher.close()
+        } finally { channel.finishAndReleaseAll(); unrelated.finishAndReleaseAll() }
+    }
+
     @Test fun `official2111 pending and native accessors reach the same actual Channel wrapper handle`() {
         val loader = javaClass.classLoader
         val pendingType = Class.forName("net.md_5.bungee.connection.InitialHandler", false, loader)

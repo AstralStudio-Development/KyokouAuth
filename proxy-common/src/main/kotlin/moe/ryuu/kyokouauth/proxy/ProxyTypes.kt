@@ -29,8 +29,9 @@ interface Player : InboundConnection, CommandSource {
     val protocolVersion: Int
     override val locale: String? get() = effectiveLocale.toString()
     fun createConnectionRequest(target: RegisteredServer): ConnectionRequestBuilder
-    fun transferRole(host: String, port: Int, cookie: ByteArray?): CompletableFuture<Unit> =
-        CompletableFuture.failedFuture(UnsupportedOperationException("Role transfer is unavailable"))
+    /** Update managed properties only; the existing native UUID/name must exactly match [profile]. */
+    fun applyRoleProfile(profile: GameProfile): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(UnsupportedOperationException("Role profile updates are unavailable"))
 }
 
 /** Instances must be stable for the registration lifetime, not re-created for each event. */
@@ -59,8 +60,7 @@ data class GameProfile(val id: UUID, val name: String, val properties: List<Prop
 }
 
 class PreLoginEvent(val connection: InboundConnection, val username: String, val uniqueId: UUID?,
-                    val bedrock: BedrockLogin = BedrockLogin.Java,
-                    val roleCookie: ByteArray? = null) {
+                    val bedrock: BedrockLogin = BedrockLogin.Java) {
     var result = PreLoginComponentResult.allowed()
     data class PreLoginComponentResult(val isAllowed: Boolean, val onlineMode: Boolean?, val reason: RichText.Parsed?) {
         companion object {

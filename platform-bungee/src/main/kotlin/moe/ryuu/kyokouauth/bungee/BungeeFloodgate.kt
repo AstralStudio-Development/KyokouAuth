@@ -17,6 +17,7 @@ internal class BungeeFloodgate(
     private val enabled: Boolean,
     private val lookup: () -> Plugin?,
     private val allowLinked: Boolean = false,
+    private val guardRoleSkin: (java.util.UUID) -> Boolean = { allowLinked },
     private val channelFactory: () -> FloodgateChannels = { BungeeFloodgateChannels(BungeeFloodgate::class.java.classLoader) },
 ) : AutoCloseable {
     @Volatile private var closed = false
@@ -26,7 +27,7 @@ internal class BungeeFloodgate(
             !closed && lookup() === plugin
         }
     }
-    private val runtime = FloodgateRuntime(enabled, allowLinked) { provider }
+    private val runtime = FloodgateRuntime(enabled, allowLinked, guardRoleSkin) { provider }
     private val channels by lazy(channelFactory)
 
     fun probe(player: BungeePlayer): BedrockLogin {
@@ -51,7 +52,10 @@ internal class BungeeFloodgate(
         )
     }
 
-    override fun close() { closed = true }
+    override fun close() {
+        closed = true
+        runtime.close()
+    }
 }
 
 /** InitialHandler and UserConnection must expose one exact physical frontend, not UUID API state. */
@@ -60,7 +64,7 @@ internal interface FloodgateChannels {
     fun native(player: ProxiedPlayer): Channel
 }
 
-/** Fixed official-2111 seam; never initialized by a default Java-only/no-Floodgate installation. */
+/** Fixed official-2111 seam shared by native login lifetime watches and optional Floodgate proof. */
 internal class BungeeFloodgateChannels(loader: ClassLoader) : FloodgateChannels {
     private val handler = Class.forName("net.md_5.bungee.connection.InitialHandler", false, loader)
     private val user = Class.forName("net.md_5.bungee.UserConnection", false, loader)
@@ -78,6 +82,16 @@ internal class BungeeFloodgateChannels(loader: ClassLoader) : FloodgateChannels 
         check(pendingChannel.type == wrapper && !Modifier.isStatic(pendingChannel.modifiers))
         check(nativeChannel.returnType == wrapper && handle.returnType == Channel::class.java)
         check(pendingChannel.trySetAccessible()) { "Bungee pending Channel is inaccessible" }
+    }
+
+    /** LOGIN disconnects do not emit PlayerDisconnectEvent; watch their actual frontend instead. */
+    fun watchClosed(player: BungeePlayer, onClosed: () -> Unit): AutoCloseable {
+        check(player.isActive) { "Native login connection closed" }
+        val channel = pending(player.pending)
+        check(player.native?.let { native(it) === channel } != false) { "Native pending and player Channels differ" }
+        val listener = io.netty.channel.ChannelFutureListener { onClosed() }
+        channel.closeFuture().addListener(listener)
+        return AutoCloseable { channel.closeFuture().removeListener(listener) }
     }
 
     override fun pending(connection: PendingConnection): Channel {

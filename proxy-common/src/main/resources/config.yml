@@ -40,29 +40,15 @@ bedrock:
   enabled: false
 
 role-selection:
-  # Opt-in: after fresh XUID proof, offer the independent Microsoft (U) and linked Java (J) roles.
-  # Never merges/migrates their data. Plain Mojang logins and IP sessions do not grant XUID roles.
-  # Requires compatible native pre-login/profile bridges; mismatches fail closed at startup.
+  # Bedrock only: fresh native Floodgate proof + current official link permit independent U/J roles.
+  # Java keeps basic Microsoft authentication and Mojang direct login; no Java cross-role Cookie flow.
+  # No native Transfer, self-authored Geyser extension, private CMD, avatar pack or image HTTP bridge.
   enabled: false
-  # Time to choose a role (5..600 seconds). Closing the menu does not choose for the player.
+  # Time to choose a role (5..600 seconds); closing the menu never chooses or authorizes a role.
   timeout-seconds: 60
-  # One-use Java handoff / Bedrock choice-hint lifetime (5..120 seconds), not a login/session cache.
-  transfer-ttl-seconds: 30
-  # REQUIRED when enabled: explicit administrator-controlled, client-reachable JAVA proxy host.
-  # No scheme or port in this field; never a backend, private Limbo address or client-supplied host.
-  reconnect-host: ""
-  reconnect-port: 25577
-  # Bedrock native automatic reconnect additionally needs platform-geyser-transfer installed on
-  # Geyser with an explicit Java host:port -> client-reachable Bedrock host:port allowlist.
-  # Without that extension, reconnect manually. A real new connection/loading screen remains.
-  avatars:
-    # Optional Bedrock-only role icons. Requires the separate Geyser Avatar extension and its pack.
-    # This service only prepares pictures; it cannot authenticate or select a role.
-    enabled: false
-    # Snapshot HTTP server binds ONLY literal 127.0.0.1, never the Minecraft/public listener.
-    bridge-port: 24682
-    # Fixed read-only Geyser presentation endpoint; no credentials, query or non-loopback host.
-    status-endpoint: "http://127.0.0.1:24683/v1/packs/status"
+  # Server-side choice intent for ONE ordinary new Bedrock login (5..120 seconds), never a credential.
+  # Same exact UUID/name can be admitted in place; another identity requires a fresh connection/proof.
+  hint-ttl-seconds: 30
 
 verification:
   # Enabled by default: after proving the same Microsoft XUID, move its binding to the new free name.

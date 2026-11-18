@@ -78,7 +78,7 @@ def synthetic_entries(protocols=PROTOCOLS):
     entries = {PREFIX + 'LimboServer.class': class_header(65), 'yggdrasil_session_pubkey.der': b'\x30\x82\x00\x80' + bytes(128)}
     def add_class(name, major=61):
         entries[name + '.class'] = class_header(major)
-    for name in ('LimboPlayer', 'LimboListener', 'LimboLogger', 'LimboSettings', 'LimboEngineFactory', 'EngineContext', 'ForwardingMode', 'RoleSelectorItem', 'RoleSelectorMenu', 'RoleAvatarIcon', 'protocol/TextComponent'):
+    for name in ('LimboPlayer', 'LimboListener', 'LimboLogger', 'LimboSettings', 'LimboEngineFactory', 'EngineContext', 'ForwardingMode', 'RoleSelectorItem', 'RoleSelectorMenu', 'RoleSelectorIcon', 'protocol/TextComponent'):
         add_class(PREFIX + name)
     entries[ENGINE_SERVICE] = '\n'.join(f'moe.ryuu.kyokouauth.limbo.engine.p{p}.session.EngineFactory' for p in protocols).encode()
     for protocol in protocols:
@@ -87,17 +87,15 @@ def synthetic_entries(protocols=PROTOCOLS):
                      'BoundedItemCodecHelper' if protocol <= 768 else 'BoundedItemTypes'):
             add_class(base + 'session/' + name, 65)
         entries[base + 'session/GeneratedCodec.class'] += b'BoundedItemCodecHelper'
-        if protocol >= 769:
-            entries[base + 'session/BoundedCustomModelData.class'] = class_header(65) + b'ItemDecodeBudget isFinite'
         selector = {'protocol': str(protocol), 'version': f'synthetic-{protocol}', 'source': 'official-server-bootstrap-built-in-registries',
                     'server-sha256': '1' * 64, 'registry-server-sha256': '2' * 64, 'exporter-sha256': '3' * 64,
-                    'player-head-id': '1105', 'generic-9x3-id': '2'}
+                    'player-head-id': '1105', 'name-tag-id': '1129', 'diamond-id': '805', 'generic-9x3-id': '2'}
         entries[f'limbo/role-selector-{protocol}.properties'] = ''.join(f'{k}={v}\n' for k, v in selector.items()).encode()
         entries[f'limbo/items-{protocol}.json'] = json.dumps({'schema': 1, 'protocol': protocol,
-            'source': 'pinned-official-mcpl-ast-sparse-item-closure', 'components': ['CUSTOM_MODEL_DATA', 'CUSTOM_NAME', 'LORE', 'PROFILE'],
-            'frameBytes': 65536, 'changedSlots': 64, 'componentCount': 4, 'cmdListMaxima': [1, 0, 0, 0], 'cmdFiniteFloats': True, 'listItems': 8, 'stringChars': 8192,
+            'source': 'pinned-official-mcpl-ast-sparse-item-closure', 'components': ['CUSTOM_NAME', 'LORE', 'PROFILE'],
+            'frameBytes': 65536, 'changedSlots': 64, 'componentCount': 3, 'listItems': 8, 'stringChars': 8192,
             'nbtBytes': 16384, 'nbtDepth': 16, 'sources': {'official/ItemTypes.java': '4' * 64},
-            'componentIds': {'CUSTOM_MODEL_DATA': 13, 'CUSTOM_NAME': 5, 'LORE': 7, 'PROFILE': 47}}).encode()
+            'componentIds': {'CUSTOM_NAME': 5, 'LORE': 7, 'PROFILE': 47}}).encode()
         fixture = f'synthetic-registry-{protocol}'.encode()
         entries[f'limbo/configuration-{protocol}.bin'] = fixture
         meta = {'protocol': str(protocol), 'version': f'synthetic-{protocol}', 'source': 'official-offline-server-empty-known-packs',
@@ -193,10 +191,15 @@ class ArtifactPolicyTests(unittest.TestCase):
                 self.assertIn('native player-head default components were not initialized', source)
                 self.assertIn('native profile control lost UUID/name', source)
                 self.assertEqual(protocol in {775, 776, 777}, modern_defaults in source)
-                modern_patch = 'get(stack.getPrototype(), net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA)'
-                self.assertEqual(protocol in {775, 776, 777}, modern_patch in source)
-                if protocol not in {775, 776, 777}:
-                    self.assertIn('stack.getComponentsPatch().get(net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA)', source)
+                self.assertIn('nativeVanillaItemPositiveControls();', source)
+                self.assertIn('ItemStack.OPTIONAL_STREAM_CODEC.encode(buffer, stack)', source)
+                self.assertIn('native vanilla icon default components were not initialized', source)
+                self.assertIn('Items.NAME_TAG', source)
+                self.assertIn('Items.DIAMOND', source)
+                self.assertIn('ordinary vanilla role icon must not carry a skin profile', source)
+                self.assertIn('selector must not carry private model data', source)
+                self.assertNotIn('checkAvatarMarker', source)
+                self.assertNotIn('0x4B590', source)
                 if protocol in {775, 776, 777}:
                     self.assertLess(source.index('Stream.concat(statics.registries(), loaded.registries())'), source.index(modern_defaults))
                     self.assertLess(source.index(modern_defaults), source.index('play = GameProtocols.CLIENTBOUND_TEMPLATE'))
@@ -207,25 +210,39 @@ class ArtifactPolicyTests(unittest.TestCase):
                 else:
                     self.assertIn('ResolvableProfile.createResolved(nativeProfile)', source)
 
-    def test_avatar_four_component_closure_accepts_only_bounded_cmd(self):
+    def test_selector_three_component_closure_rejects_obsolete_cmd_capacity(self):
         entries = synthetic_entries()
-        entries[PREFIX + 'RoleAvatarIcon.class'] = class_header(61)
+        entries[PREFIX + 'RoleSelectorIcon.class'] = class_header(61)
+        entries.pop(PREFIX + 'RoleAvatarIcon.class', None)
         for protocol in PROTOCOLS:
             key = f'limbo/items-{protocol}.json'
             metadata = json.loads(entries[key])
-            metadata.update(components=['CUSTOM_MODEL_DATA', 'CUSTOM_NAME', 'LORE', 'PROFILE'], componentCount=4,
-                            cmdListMaxima=[1, 0, 0, 0], cmdFiniteFloats=True)
-            metadata['componentIds']['CUSTOM_MODEL_DATA'] = 13
+            metadata.update(components=['CUSTOM_NAME', 'LORE', 'PROFILE'], componentCount=3)
+            for obsolete in ('cmdListMaxima', 'cmdFiniteFloats'):
+                metadata.pop(obsolete, None)
+            metadata['componentIds'].pop('CUSTOM_MODEL_DATA', None)
             entries[key] = json.dumps(metadata).encode()
-            if protocol >= 769:
-                entries[PREFIX + f'engine/p{protocol}/session/BoundedCustomModelData.class'] = class_header(65) + b'ItemDecodeBudget isFinite'
+            entries.pop(PREFIX + f'engine/p{protocol}/session/BoundedCustomModelData.class', None)
         report = AUDIT.audit(self.write_zip(entries))
         self.assertEqual([], report['errors'])
-        key = 'limbo/items-769.json'
-        metadata = json.loads(entries[key])
-        metadata['cmdListMaxima'] = [1, 0, 1, 0]
-        entries[key] = json.dumps(metadata).encode()
-        self.check_bad(entries, 'avatar CMD list budget differs')
+        for mutate in ('capacity', 'component', 'cmd-budget', 'cmd-reader', 'avatar-api'):
+            with self.subTest(mutate=mutate):
+                bad = dict(entries)
+                key = 'limbo/items-769.json'
+                metadata = json.loads(bad[key])
+                if mutate == 'capacity':
+                    metadata['componentCount'] = 4
+                elif mutate == 'component':
+                    metadata['components'].insert(0, 'CUSTOM_MODEL_DATA')
+                    metadata['componentIds']['CUSTOM_MODEL_DATA'] = 13
+                elif mutate == 'cmd-budget':
+                    metadata['cmdListMaxima'] = [1, 0, 0, 0]
+                elif mutate == 'cmd-reader':
+                    bad[PREFIX + 'engine/p769/session/BoundedCustomModelData.class'] = class_header(65)
+                else:
+                    bad[PREFIX + 'RoleAvatarIcon.class'] = class_header(61)
+                bad[key] = json.dumps(metadata).encode()
+                self.check_bad(bad, 'obsolete selector' if mutate in {'cmd-budget', 'cmd-reader', 'avatar-api'} else 'selector component')
 
     def test_complete_synthetic_layout_is_read_only(self):
         artifact = self.write_zip(synthetic_entries())
@@ -498,6 +515,68 @@ class ArtifactPolicyTests(unittest.TestCase):
         log = self.folder / '.narrafork/multiversion/assembly' / artifact.stem / 'assembly.log'
         self.assertIn(output, log.read_text(encoding='utf-8'))
         self.assertIn(error, log.read_text(encoding='utf-8'))
+
+    def test_incremental_codec_generation_replaces_only_owned_java_sources(self):
+        module = load_tool('generate-limbo-codec')
+        output = self.folder / 'incremental-codec'
+        java = output / 'java'
+        retired = java / 'moe/ryuu/kyokouauth/limbo/session/BoundedCustomModelData.java'
+        other_retired = java / 'other/RetiredGeneratedClass.java'
+        current = java / 'current/CurrentCodec.java'
+        protected = {
+            output / 'resources/limbo/role-selector-777.properties': b'fixture-preserved',
+            output / 'resources/limbo/items-777.json': b'metadata-preserved',
+            output / 'tool-classes/Tool.class': b'tool-cache-preserved',
+            output / 'verified-classes/Other.class': b'verification-cache-preserved',
+            output / 'tool-classpath.txt': b'classpath-preserved',
+            output.parent / 'user-source/Keep.java': b'user-source-preserved',
+        }
+        for path, data in {retired: b'retired CMD reader', other_retired: b'future retired generator', **protected}.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        def fake_process(command, **kwargs):
+            if command[0] == 'fake-java' and command[-1] != '--verify':
+                self.assertFalse(retired.exists(), 'Normal incremental generation retained an obsolete CMD reader')
+                self.assertFalse(other_retired.exists(), 'Cleanup must handle any retired generated class')
+                self.assertFalse(current.exists(), 'Each incremental run must replace the complete generated Java snapshot')
+                current.parent.mkdir(parents=True, exist_ok=True)
+                current.write_text('class CurrentCodec {}', encoding='utf-8')
+            elif command[0] == 'fake-javac' and '-cp' in command:
+                self.assertEqual([str(current)], [arg for arg in command if arg.endswith('.java')])
+            return subprocess.CompletedProcess(command, 0)
+        argv = ['generate-limbo-codec', '--protocol', '777', '--mcpl-jar', str(self.folder / 'pinned.jar'),
+                '--sources-jar', str(self.folder / 'pinned-sources.jar'), '--classpath', 'fixed-tool-classpath',
+                '--output-dir', str(output), '--java', 'fake-java', '--javac', 'fake-javac', '--verify']
+        with mock.patch.object(sys, 'argv', argv), mock.patch.object(module.subprocess, 'run', side_effect=fake_process) as execute:
+            module.main()
+            module.main()
+        self.assertEqual(8, execute.call_count)
+        self.assertEqual([current], sorted(java.rglob('*.java')))
+        for path, data in protected.items():
+            self.assertEqual(data, path.read_bytes(), f'Generation touched unrelated output/input: {path}')
+
+    def test_codec_generation_refuses_an_aliased_java_output(self):
+        module = load_tool('generate-limbo-codec')
+        output = self.folder / 'aliased-codec'
+        source = self.folder / 'protected-source'
+        source.mkdir()
+        keep = source / 'Keep.java'
+        keep.write_bytes(b'user-source-preserved')
+        original_resolve = module.Path.resolve
+        def resolved(path, *args, **kwargs):
+            # Model a symlink/junction without requiring Windows symlink privileges.
+            if path == output / 'java':
+                return source
+            return original_resolve(path, *args, **kwargs)
+        argv = ['generate-limbo-codec', '--protocol', '777', '--mcpl-jar', str(self.folder / 'pinned.jar'),
+                '--sources-jar', str(self.folder / 'pinned-sources.jar'), '--classpath', 'fixed-tool-classpath',
+                '--output-dir', str(output)]
+        with mock.patch.object(sys, 'argv', argv), mock.patch.object(module.Path, 'resolve', new=resolved), \
+                mock.patch.object(module.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(ValueError, 'must not alias'):
+                module.main()
+        self.assertEqual(1, execute.call_count, 'Only tool compilation may run; no generator or cleanup may follow the alias')
+        self.assertEqual(b'user-source-preserved', keep.read_bytes())
 
     def test_python_cli_help_and_no_relaxed_hard_cap(self):
         for name in ('verify-limbo.py', 'verify-limbo-matrix.py', 'limbo-assembly-smoke.py', 'audit-limbo-artifact.py'):

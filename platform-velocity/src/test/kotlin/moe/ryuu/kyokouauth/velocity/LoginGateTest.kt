@@ -90,6 +90,7 @@ class LoginGateTest {
                 else -> versionedLimbos.values.firstOrNull { it.serverInfo.name == args[0] }
             })
             "getPlayer" -> Optional.ofNullable(players.lastOrNull { it.active && it.player.uniqueId == args[0] }?.player)
+            "getAllPlayers" -> players.filter { it.active }.map { it.player }
             "getConfiguration" -> proxyConfig
             "getCommandManager" -> commandManager
             else -> error(method)

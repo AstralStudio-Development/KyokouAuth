@@ -11,8 +11,7 @@ import moe.ryuu.kyokouauth.core.text.MessageCatalogue
 import moe.ryuu.kyokouauth.core.text.RichText
 import moe.ryuu.kyokouauth.limbo.LimboPlayer
 import moe.ryuu.kyokouauth.limbo.RoleSelectorMenu
-import moe.ryuu.kyokouauth.limbo.RoleAvatarIcon
-import moe.ryuu.kyokouauth.proxy.avatar.RoleAvatarOffer
+import moe.ryuu.kyokouauth.limbo.RoleSelectorIcon
 import moe.ryuu.kyokouauth.limbo.protocol.TextComponent
 import org.junit.jupiter.api.Test
 import java.io.File
@@ -32,94 +31,109 @@ import kotlin.test.assertTrue
 
 class LoginGateContractTest {
     @Test
-    fun `role selection enabled never admits a Microsoft IP session without fresh proof`() {
-        val fixture = Fixture(mapOf("role-selection.enabled" to "true", "role-selection.reconnect-host" to "proxy.invalid"))
-        fixture.services.decision = AuthCoordinator.Decision.Admit(
-            Identity.Microsoft(record.name, Xuid(1L), "Steve"), record)
+    fun `new contract Java roles flag preserves ordinary trusted Microsoft session`() {
+        val fixture = Fixture(roleConfig)
+        fixture.services.decision = AuthCoordinator.Decision.Admit(record.toIdentity(), record)
         val player = fixture.player(777)
         fixture.login(player)
-        assertFalse(fixture.gate.isAuthenticated(player))
-        fixture.assertBackendDenied(player)
-        fixture.gate.onJoin(player.limbo)
-        fixture.services.runWork()
-        assertEquals(1, fixture.services.beginCalls)
+        assertEquals(record.uuid, player.uniqueId)
+        assertEquals("Steve", player.username)
+        assertTrue(fixture.gate.isAuthenticated(player))
+        assertEquals(0, fixture.services.roleCalls)
+        assertTrue(player.limbo.menus.isEmpty())
+    }
+
+    @Test
+    fun `new contract single Floodgate role is final before player creation with zero reconnects`() {
+        val fixture = Fixture(roleConfig + ("bedrock.enabled" to "true"))
+        fixture.services.options = RoleOptions(listOf(RoleOption(record.toIdentity(), record, null)), null)
+        val proof = BedrockProof.create(Xuid(1L), record.uuid, ".Steve", "Steve", ".", Any()) { true }
+        val player = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
+        fixture.login(player, bedrock = BedrockLogin.Verified(proof))
+        assertEquals(record.uuid, player.uniqueId)
+        assertEquals("Steve", player.username)
+        assertTrue(fixture.gate.isAuthenticated(player))
+        assertTrue(player.limbo.menus.isEmpty())
+        assertTrue(player.requests.isEmpty())
         assertEquals(0, fixture.services.grants)
     }
 
     @Test
-    fun `strong Microsoft proof opens two roles without admitting or occupying either real profile`() {
+    fun `new contract exact native dual role selects in place without any reconnect`() {
+        val fixture = Fixture(roleConfig + ("bedrock.enabled" to "true"))
+        val chooser = fixture.joinBedrock()
+        fixture.services.runWork()
+        assertEquals(premiumUuid, chooser.uniqueId)
+        assertEquals("Alex", chooser.username)
+        assertFalse(fixture.gate.isAuthenticated(chooser))
+        fixture.assertBackendDenied(chooser)
+        fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
+        fixture.services.runWork()
+        assertTrue(fixture.gate.isAuthenticated(chooser))
+        assertEquals(listOf(fixture.lobby), chooser.requests)
+        assertTrue(chooser.disconnects.isEmpty())
+        assertEquals(0, fixture.services.grants)
+    }
+
+    @Test
+    fun `Java role flag leaves basic device code verification and exact identity unchanged`() {
         val fixture = Fixture(roleConfig)
         val player = fixture.player(777)
-        player.properties = listOf(GameProfile.Property("textures", "untrusted", ""), GameProfile.Property("other", "keep", ""))
-        fixture.strongMicrosoft(player)
-        assertFalse(fixture.gate.isAuthenticated(player))
-        fixture.assertBackendDenied(player)
-        assertTrue(player.uniqueId != record.uuid && player.uniqueId != premiumUuid)
-        assertTrue(player.username != "Steve" && player.username != "Alex" && player.username.length == 16)
-        assertEquals(0, fixture.services.grants)
-        assertEquals(0, fixture.services.premiumBinds)
+        fixture.join(player)
+        fixture.services.pollResult = DeviceCodeFlow.PollResult.Authorized("test-token", null, 300)
+        fixture.services.advanceBy(1_000)
+        assertEquals(record.uuid, player.uniqueId)
+        assertEquals("Steve", player.username)
+        assertTrue(fixture.gate.isAuthenticated(player))
         assertEquals(1, fixture.services.bindCalls)
-        assertEquals(1, player.limbo.menus.size)
-        assertTrue(player.properties.none { it.name == "textures" })
-        assertTrue(player.properties.any { it.name == "other" && it.value == "keep" })
+        assertEquals(1, fixture.services.grants)
+        assertEquals(0, fixture.services.roleCalls)
+        assertTrue(player.limbo.menus.isEmpty())
     }
 
     @Test
-    fun `choosing premium transfers once then admits only a new final profile without Microsoft IP grant`() {
+    fun `different Floodgate role requires exactly one ordinary fresh login and never authorizes old chooser`() {
         val fixture = Fixture(roleConfig)
         val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser)
+        fixture.strongBedrock(chooser)
         val menu = chooser.limbo.menus.single()
-        fixture.gate.onRoleSelect(chooser.limbo, menu.generation, "premium")
-        fixture.gate.onRoleSelect(chooser.limbo, menu.generation, "premium")
+        fixture.gate.onRoleSelect(chooser.limbo, menu.generation, "microsoft")
+        fixture.gate.onRoleSelect(chooser.limbo, menu.generation, "microsoft")
         fixture.services.runWork()
-        assertEquals(1, chooser.transfers.size)
+        assertEquals(1, chooser.disconnects.size)
+        assertEquals(fixture.catalogue.parsed("role-selection.reconnect"), chooser.disconnects.single())
         assertFalse(fixture.gate.isAuthenticated(chooser))
         fixture.assertBackendDenied(chooser)
         assertEquals(0, fixture.services.premiumBinds)
-        val cookie = checkNotNull(chooser.transfers.single().third)
-        val resumed = fixture.player(777)
-        resumed.properties = listOf(GameProfile.Property("textures", "wrong-SR", ""), GameProfile.Property("other", "keep", ""))
-        fixture.login(resumed, cookie)
-        assertEquals(premiumUuid, resumed.uniqueId)
-        assertEquals("Alex", resumed.username)
-        assertFalse(resumed.isOnlineMode)
+        fixture.gate.onDisconnect(DisconnectEvent(chooser))
+        chooser.isActive = false
+        val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+        val resumed = fixture.player(777).apply {
+            uniqueId = proof.uniqueId; username = proof.username
+            properties = listOf(GameProfile.Property("textures", "wrong", ""), GameProfile.Property("other", "keep", ""))
+        }
+        fixture.login(resumed, bedrock = BedrockLogin.Verified(proof))
+        assertEquals(record.uuid, resumed.uniqueId)
+        assertEquals("Steve", resumed.username)
         assertTrue(fixture.gate.isAuthenticated(resumed))
-        assertEquals(1, fixture.services.premiumBinds)
         assertEquals(0, fixture.services.grants)
-        assertEquals(listOf(GameProfile.Property("textures", "official-texture", "official-signature")),
-            resumed.properties.filter { it.name == "textures" })
+        assertTrue(resumed.properties.none { it.name == "textures" })
         assertTrue(resumed.properties.any { it.name == "other" && it.value == "keep" })
         assertEquals(resumed.sessionId.toString(), resumed.properties.single { it.name == LoginGate.CONNECTION_PROPERTY }.value)
         assertTrue(resumed.limbo.menus.isEmpty())
-        val replay = PreLoginEvent(fixture.player(777), "Steve", record.uuid, roleCookie = cookie)
-        fixture.gate.onPreLogin(replay)
-        assertFalse(replay.result.isAllowed)
-    }
-
-    @Test
-    fun `single Microsoft role auto selects but only its final reconnect receives a session and explicit skin`() {
-        val fixture = Fixture(roleConfig)
-        val skin = GameProfile.Property("textures", "explicit-SR", "SR-signature")
-        val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser, RoleOptions(listOf(RoleOption(record.toIdentity(), record, skin)), null))
-        assertTrue(chooser.limbo.menus.isEmpty())
-        assertEquals(1, chooser.transfers.size)
-        assertEquals(0, fixture.services.grants)
-        val resumed = fixture.player(777)
-        fixture.login(resumed, checkNotNull(chooser.transfers.single().third))
-        assertEquals(record.uuid, resumed.uniqueId)
-        assertEquals(record.name.value, resumed.username)
-        assertTrue(fixture.gate.isAuthenticated(resumed))
-        assertEquals(1, fixture.services.grants)
-        assertEquals(listOf(skin), resumed.properties.filter { it.name == "textures" })
+        resumed.isActive = false
+        fixture.gate.onDisconnect(DisconnectEvent(resumed))
+        val ordinary = fixture.joinBedrock()
+        fixture.services.runWork()
+        assertEquals(1, ordinary.limbo.menus.size, "Consumed intent is not a remembered role preference")
+        assertFalse(fixture.gate.isAuthenticated(ordinary))
     }
 
     @Test
     fun `renamed menu refreshes generation and an old click cannot authorize or reinterpret the name`() {
         val fixture = Fixture(roleConfig)
         val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser)
+        fixture.strongBedrock(chooser)
         val old = chooser.limbo.menus.single()
         val renamed = record.copy(name = GameName.parseOrThrow("SteveNew"))
         fixture.services.options = RoleOptions(listOf(RoleOption(renamed.toIdentity(), renamed, null),
@@ -127,16 +141,18 @@ class LoginGateContractTest {
         fixture.gate.onRoleSelect(chooser.limbo, old.generation, "microsoft")
         fixture.services.runWork()
         assertEquals(2, chooser.limbo.menus.size)
-        assertTrue(chooser.transfers.isEmpty())
+        assertTrue(chooser.requests.isEmpty())
         val fresh = chooser.limbo.menus.last()
         assertTrue(fresh.generation != old.generation)
         fixture.gate.onRoleSelect(chooser.limbo, old.generation, "microsoft")
         fixture.services.runWork()
-        assertTrue(chooser.transfers.isEmpty())
+        assertTrue(chooser.requests.isEmpty())
         fixture.gate.onRoleSelect(chooser.limbo, fresh.generation, "microsoft")
         fixture.services.runWork()
+        fixture.gate.onDisconnect(DisconnectEvent(chooser))
+        chooser.isActive = false
         val resumed = fixture.player(777)
-        fixture.login(resumed, checkNotNull(chooser.transfers.single().third))
+        fixture.freshBedrockLogin(resumed)
         assertEquals("SteveNew", resumed.username)
         assertEquals(record.uuid, resumed.uniqueId)
         assertTrue(fixture.gate.isAuthenticated(resumed))
@@ -151,7 +167,7 @@ class LoginGateContractTest {
         val oldOptions = RoleOptions(listOf(fixture.dualRoles().roles.first(),
             RoleOption(oldIdentity, oldBinding, premium.skin)), premiumUuid)
         val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser, oldOptions)
+        fixture.strongBedrock(chooser, oldOptions)
         val oldMenu = chooser.limbo.menus.single()
 
         val currentIdentity = Identity.Premium(GameName.parseOrThrow("AlexNew"), premiumUuid)
@@ -159,7 +175,7 @@ class LoginGateContractTest {
             RoleOption(currentIdentity, oldBinding, premium.skin)), premiumUuid)
         fixture.gate.onRoleSelect(chooser.limbo, oldMenu.generation, "premium")
         fixture.services.runWork()
-        assertTrue(chooser.transfers.isEmpty())
+        assertTrue(chooser.requests.isEmpty())
         assertTrue(chooser.disconnects.isEmpty())
         assertEquals(2, chooser.limbo.menus.size)
         val currentMenu = chooser.limbo.menus.last()
@@ -168,12 +184,14 @@ class LoginGateContractTest {
         assertEquals("AlexNew", currentMenu.premium.profileName)
         fixture.gate.onRoleSelect(chooser.limbo, oldMenu.generation, "premium")
         fixture.services.runWork()
-        assertTrue(chooser.transfers.isEmpty())
+        assertTrue(chooser.requests.isEmpty())
 
         fixture.gate.onRoleSelect(chooser.limbo, currentMenu.generation, "premium")
         fixture.services.runWork()
+        fixture.gate.onDisconnect(DisconnectEvent(chooser))
+        chooser.isActive = false
         val resumed = fixture.player(777)
-        fixture.login(resumed, checkNotNull(chooser.transfers.single().third))
+        fixture.freshBedrockLogin(resumed)
         assertEquals(premiumUuid, resumed.uniqueId)
         assertEquals("AlexNew", resumed.username)
         assertTrue(fixture.gate.isAuthenticated(resumed))
@@ -188,36 +206,41 @@ class LoginGateContractTest {
     fun `unlinking while choosing premium fails closed instead of auto selecting Microsoft`() {
         val fixture = Fixture(roleConfig)
         val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser)
+        fixture.strongBedrock(chooser)
         val menu = chooser.limbo.menus.single()
         fixture.services.options = RoleOptions(listOf(RoleOption(record.toIdentity(), record, null)), null)
         fixture.gate.onRoleSelect(chooser.limbo, menu.generation, "premium")
         fixture.services.runWork()
-        assertTrue(chooser.transfers.isEmpty())
+        assertTrue(chooser.requests.isEmpty())
         assertTrue(chooser.disconnects.isNotEmpty())
         assertFalse(fixture.gate.isAuthenticated(chooser))
         assertEquals(0, fixture.services.premiumBinds)
     }
 
     @Test
-    fun `cookie rename revocation expiry malformed and issuer reuse never downgrade to ordinary login`() {
-        for (change in listOf("rename", "unlink", "expire", "malformed", "issuer")) {
+    fun `Bedrock hint rename revocation expiry gamertag and issuer reuse fail closed without Java fallback`() {
+        for (change in listOf("rename", "unlink", "expire", "gamertag", "issuer")) {
             val fixture = Fixture(roleConfig)
             val chooser = fixture.player(777)
-            fixture.strongMicrosoft(chooser)
-            fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
+            fixture.strongBedrock(chooser)
+            fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "microsoft")
             fixture.services.runWork()
-            var cookie = checkNotNull(chooser.transfers.single().third)
+            fixture.gate.onDisconnect(DisconnectEvent(chooser))
+            chooser.isActive = false
             when (change) {
-                "rename" -> fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.first(),
-                    RoleOption(Identity.Premium(GameName.parseOrThrow("AlexNew"), premiumUuid), null, null)), premiumUuid)
+                "rename" -> {
+                    val renamed = record.copy(name = GameName.parseOrThrow("SteveNew"))
+                    fixture.services.options = RoleOptions(listOf(RoleOption(renamed.toIdentity(), renamed, null),
+                        fixture.dualRoles().roles.last()), premiumUuid)
+                }
                 "unlink" -> fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.first()), null)
                 "expire" -> fixture.now += 31_000L
-                "malformed" -> cookie = byteArrayOf(1, 2, 3)
             }
+            val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex",
+                if (change == "gamertag") "RenamedGamer" else "Steve", Any()) { true }
             val calls = fixture.services.decideCalls
             val resumed = fixture.player(777, if (change == "issuer") chooser.sessionId else UUID.randomUUID())
-            val event = PreLoginEvent(resumed, "Steve", record.uuid, roleCookie = cookie)
+            val event = PreLoginEvent(resumed, proof.username, proof.uniqueId, BedrockLogin.Verified(proof))
             fixture.gate.onPreLogin(event)
             assertFalse(event.result.isAllowed, change)
             assertEquals(calls, fixture.services.decideCalls, change)
@@ -230,20 +253,20 @@ class LoginGateContractTest {
     fun `stale menu connection foreign handle invalid option and late timeout callbacks never transfer`() {
         val fixture = Fixture(roleConfig + ("role-selection.timeout-seconds" to "5"))
         val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser)
+        fixture.strongBedrock(chooser)
         val menu = chooser.limbo.menus.single()
         val impostor = fixture.player(777, chooser.sessionId)
         fixture.gate.onRoleSelect(impostor.limbo, menu.generation, "premium")
         fixture.gate.onRoleSelect(chooser.limbo, UUID.randomUUID(), "premium")
         fixture.gate.onRoleSelect(chooser.limbo, menu.generation, "admin")
         fixture.services.runWork()
-        assertTrue(chooser.transfers.isEmpty())
+        assertTrue(chooser.requests.isEmpty())
         fixture.gate.onRoleSelect(chooser.limbo, menu.generation, "premium")
         fixture.now += 5_000L
         fixture.services.runWork()
         fixture.gate.onRoleSelect(chooser.limbo, menu.generation, "premium")
         fixture.services.runWork()
-        assertTrue(chooser.transfers.isEmpty())
+        assertTrue(chooser.requests.isEmpty())
         assertTrue(chooser.disconnects.isNotEmpty())
         fixture.assertBackendDenied(chooser)
     }
@@ -253,14 +276,14 @@ class LoginGateContractTest {
         for (failure in listOf("disconnect", "stop", "queue", "resolve")) {
             val fixture = Fixture(roleConfig)
             val chooser = fixture.player(777)
-            fixture.strongMicrosoft(chooser)
+            fixture.strongBedrock(chooser)
             if (failure == "queue") fixture.services.rejectSubmissions = true
             if (failure == "resolve") fixture.services.roleFailure = IllegalStateException("unavailable")
             fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
             if (failure == "disconnect") fixture.gate.onDisconnect(DisconnectEvent(chooser))
             if (failure == "stop") fixture.gate.deactivate()
             fixture.services.runWork()
-            assertTrue(chooser.transfers.isEmpty(), failure)
+            assertTrue(chooser.requests.isEmpty(), failure)
             assertFalse(fixture.gate.isAuthenticated(chooser), failure)
             assertEquals(0, fixture.services.grants, failure)
         }
@@ -270,18 +293,20 @@ class LoginGateContractTest {
     fun `role profile LAST rejects id or name tampering and login cannot omit final validation`() {
         for (tamper in listOf("uuid", "name", "skip-last")) {
             val fixture = Fixture(roleConfig)
-            val player = fixture.player(777)
-            val pre = PreLoginEvent(player, "Steve", record.uuid)
+            fixture.services.options = fixture.dualRoles()
+            val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+            val player = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
+            val pre = PreLoginEvent(player, proof.username, proof.uniqueId, BedrockLogin.Verified(proof))
             fixture.gate.onPreLogin(pre)
             assertTrue(pre.result.isAllowed)
-            val event = GameProfileRequestEvent(player, GameProfile(record.uuid, "Steve", emptyList()))
+            val event = GameProfileRequestEvent(player, GameProfile(proof.uniqueId, proof.username, emptyList()), BedrockLogin.Verified(proof))
             fixture.gate.onPrepareGameProfile(event)
             if (tamper == "uuid") event.gameProfile = event.gameProfile.copy(id = UUID.randomUUID())
             if (tamper == "name") event.gameProfile = event.gameProfile.copy(name = "WrongName")
             if (tamper != "skip-last") fixture.gate.onGameProfile(event)
             player.uniqueId = event.gameProfile.id
             player.username = event.gameProfile.name
-            val login = LoginEvent(player)
+            val login = LoginEvent(player, BedrockLogin.Verified(proof))
             fixture.gate.onLogin(login)
             assertFalse(login.result.isAllowed, tamper)
             assertFalse(fixture.gate.isAuthenticated(player), tamper)
@@ -289,25 +314,19 @@ class LoginGateContractTest {
     }
 
     @Test
-    fun `online role is never kicked and a chooser may still select the other role`() {
+    fun `online Microsoft role is never kicked while native premium chooser selects its other free role`() {
         val fixture = Fixture(roleConfig)
+        fixture.services.decision = AuthCoordinator.Decision.Admit(record.toIdentity(), record)
         val playingU = fixture.player(777)
-        fixture.services.decision = AuthCoordinator.Decision.MojangSession(premiumUuid)
-        val playingJ = fixture.player(777).apply { uniqueId = premiumUuid; username = "Alex"; isOnlineMode = true }
-        fixture.login(playingJ)
-        playingU.isActive = false
-        fixture.services.decision = AuthCoordinator.Decision.Verify(record.uuid, AuthCoordinator.Reason.SESSION_EXPIRED, false, record)
+        fixture.login(playingU)
         val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser)
-        fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "microsoft")
+        fixture.strongBedrock(chooser)
+        fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
         fixture.services.runWork()
-        assertEquals(1, chooser.transfers.size)
-        assertTrue(playingJ.disconnects.isEmpty())
-        val resumed = fixture.player(777)
-        fixture.login(resumed, checkNotNull(chooser.transfers.single().third))
-        assertTrue(fixture.gate.isAuthenticated(resumed))
-        assertTrue(playingJ.disconnects.isEmpty())
-        assertTrue(fixture.gate.isAuthenticated(playingJ))
+        assertTrue(fixture.gate.isAuthenticated(chooser))
+        assertTrue(fixture.gate.isAuthenticated(playingU))
+        assertTrue(playingU.disconnects.isEmpty())
+        assertTrue(chooser.disconnects.isEmpty())
     }
 
     @Test
@@ -340,19 +359,18 @@ class LoginGateContractTest {
     }
 
     @Test
-    fun `Floodgate chooser preserves the provider registered profile while backend admission stays held`() {
-        for (linked in listOf(true, false)) {
-            val fixture = Fixture(roleConfig + ("bedrock.enabled" to "true"))
-            val proof = if (linked) BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
-                else BedrockProof.create(Xuid(1L), record.uuid, ".Steve", "Steve", ".", Any()) { true }
-            fixture.services.options = if (linked) fixture.dualRoles()
-                else RoleOptions(listOf(fixture.dualRoles().roles.first()), null)
+    fun `Floodgate dual chooser preserves exact legal native profile but isolates a noncandidate name`() {
+        for (candidate in listOf(true, false)) {
+            val fixture = Fixture(roleConfig)
+            val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, if (candidate) "Alex" else "OldAlex", "Steve", Any()) { true }
+            fixture.services.options = fixture.dualRoles()
             val chooser = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
             fixture.login(chooser, bedrock = BedrockLogin.Verified(proof))
-            assertEquals(proof.uniqueId, chooser.uniqueId, "Official Floodgate message lookup must recognize this native Player UUID")
-            assertTrue(chooser.username.matches(Regex("KA[A-Fa-f0-9]{14}")), "Only the display alias is temporary; Limbo still requires a Java-compatible name")
-            assertEquals(if (linked) "Alex" else ".Steve", proof.username, "The native connection proof must retain its original name")
-            assertFalse(fixture.gate.isAuthenticated(chooser), "Native messaging identity is not backend admission")
+            assertEquals(proof.uniqueId, chooser.uniqueId, "Floodgate messaging must recognize the native UUID")
+            if (candidate) assertEquals("Alex", chooser.username)
+            else assertTrue(chooser.username.matches(Regex("KA[A-Fa-f0-9]{14}")))
+            assertEquals(if (candidate) "Alex" else "OldAlex", proof.username)
+            assertFalse(fixture.gate.isAuthenticated(chooser))
             fixture.assertBackendDenied(chooser)
             fixture.gate.onJoin(chooser.limbo)
             fixture.services.runWork()
@@ -364,371 +382,22 @@ class LoginGateContractTest {
     }
 
     @Test
-    fun `strong Floodgate dual roles wait for asynchronous avatar preparation without selecting or authorizing`() {
-        val fixture = Fixture(avatarConfig)
-        fixture.services.options = fixture.dualRoles()
-        fixture.services.avatarPreparation = CompletableFuture()
-        val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
-        val chooser = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
-        fixture.login(chooser, bedrock = BedrockLogin.Verified(proof))
-        fixture.gate.onJoin(chooser.limbo)
+    fun `Floodgate menus use fixed vanilla icons with private item reset and no preparation stage`() {
+        val fixture = Fixture(roleConfig + ("bedrock.enabled" to "true"))
+        val player = fixture.joinBedrock()
         fixture.services.runWork()
-        assertTrue(chooser.limbo.menus.isEmpty(), "The role menu must not promise avatars before asynchronous preparation completes")
-        assertTrue(chooser.transfers.isEmpty())
-        assertFalse(fixture.gate.isAuthenticated(chooser))
-        fixture.assertBackendDenied(chooser)
-        assertEquals(0, fixture.services.beginCalls)
-        assertEquals(0, fixture.services.grants)
-        assertEquals(0, fixture.services.premiumBinds)
-        assertEquals(1, fixture.services.avatarPrepareCalls)
-        assertEquals(0, fixture.services.avatarOfferCalls)
-        fixture.services.avatarOffer = RoleAvatarOffer(UUID.randomUUID(), avatarFingerprint, false)
-        fixture.services.avatarPreparation.complete(avatarFingerprint)
-        assertEquals(0, fixture.services.avatarOfferCalls, "Loopback status must be queued on the bounded IO service")
-        fixture.services.runWork()
-        val menu = chooser.limbo.menus.single()
-        assertEquals(RoleAvatarIcon.MICROSOFT, menu.microsoft.avatarIcon)
-        assertEquals(RoleAvatarIcon.PREMIUM, menu.premium.avatarIcon)
-        assertEquals(record.uuid, menu.microsoft.profileUuid)
-        assertEquals(premiumUuid, menu.premium.profileUuid)
+        val menu = player.limbo.menus.single()
+        assertEquals(RoleSelectorIcon.NAME_TAG, menu.microsoft.icon)
+        assertEquals(RoleSelectorIcon.DIAMOND, menu.premium.icon)
         assertEquals("official-texture", menu.premium.textureValue)
-        assertEquals("official-signature", menu.premium.textureSignature)
-        assertEquals(1, menu.microsoft.lore.size)
-        assertEquals(1, menu.premium.lore.size)
-        assertEquals(1, fixture.services.avatarOfferCalls)
-        assertTrue(chooser.transfers.isEmpty())
-        assertFalse(fixture.gate.isAuthenticated(chooser))
-    }
-
-    @Test
-    fun `avatar miss transfers only visuals and fresh Floodgate proof still needs an explicit role choice`() {
-        val fixture = Fixture(avatarConfig)
-        val first = fixture.joinBedrock()
-        fixture.services.runWork()
-        fixture.services.avatarPreparation.complete(avatarFingerprint)
-        fixture.services.runWork()
-        assertEquals(1, first.transfers.size)
-        assertEquals(null, first.transfers.single().third)
-        assertTrue(first.limbo.menus.isEmpty())
-        assertFalse(fixture.gate.isAuthenticated(first))
-        fixture.assertBackendDenied(first)
-        assertEquals(0, fixture.services.grants)
-        assertEquals(0, fixture.services.premiumBinds)
-        fixture.gate.onDisconnect(DisconnectEvent(first))
-        first.isActive = false
-
-        fixture.services.avatarOffer = RoleAvatarOffer(UUID.randomUUID(), avatarFingerprint, false)
-        val second = fixture.joinBedrock()
-        fixture.services.runWork()
-        assertEquals(1, second.limbo.menus.size, "Visual refresh must not mint a selected-role hint")
-        assertTrue(second.transfers.isEmpty())
-        assertFalse(fixture.gate.isAuthenticated(second))
-        assertEquals(0, fixture.services.premiumBinds)
-        fixture.gate.onRoleSelect(second.limbo, second.limbo.menus.single().generation, "premium")
-        fixture.services.runWork()
-        assertEquals(1, second.transfers.size)
-        assertEquals(null, second.transfers.single().third)
-        fixture.gate.onDisconnect(DisconnectEvent(second))
-        second.isActive = false
-        val finalProof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
-        val final = fixture.player(777).apply { uniqueId = finalProof.uniqueId; username = finalProof.username }
-        fixture.login(final, bedrock = BedrockLogin.Verified(finalProof))
-        assertTrue(fixture.gate.isAuthenticated(final))
-        assertEquals(premiumUuid, final.uniqueId)
-        assertEquals("Alex", final.username)
-        assertEquals(1, fixture.services.premiumBinds)
-        assertEquals(0, fixture.services.grants)
-        assertEquals(0, fixture.services.beginCalls)
-    }
-
-    @Test
-    fun `same avatar fingerprint missing after one visual refresh opens explicit fallback without a transfer loop`() {
-        val fixture = Fixture(avatarConfig)
-        fixture.services.avatarPreparation.complete(avatarFingerprint)
-        val first = fixture.joinBedrock()
-        fixture.services.runWork()
-        assertEquals(1, first.transfers.size)
-        fixture.gate.onDisconnect(DisconnectEvent(first))
-        first.isActive = false
-        repeat(2) {
-            val next = fixture.joinBedrock()
-            fixture.services.runWork()
-            assertTrue(next.transfers.isEmpty())
-            val menu = next.limbo.menus.single()
-            assertEquals(RoleAvatarIcon.MICROSOFT, menu.microsoft.avatarIcon)
-            assertEquals(RoleAvatarIcon.PREMIUM, menu.premium.avatarIcon)
-            assertTrue(next.limbo.messages.contains(fixture.catalogue.parsed("role-selection.avatar-unavailable").toLimbo()))
-            assertFalse(fixture.gate.isAuthenticated(next))
-            fixture.assertBackendDenied(next)
-            fixture.gate.onDisconnect(DisconnectEvent(next))
-            next.isActive = false
-        }
-        assertEquals(0, fixture.services.grants)
-        assertEquals(0, fixture.services.premiumBinds)
-    }
-
-    @Test
-    fun `avatar status requires exact prepared content and a non fallback offer`() {
-        for (offer in listOf(null, RoleAvatarOffer(UUID.randomUUID(), "b".repeat(64), false),
-            RoleAvatarOffer(UUID.randomUUID(), avatarFingerprint, true))) {
-            val fixture = Fixture(avatarConfig)
-            fixture.services.avatarOffer = offer
-            fixture.services.avatarPreparation.complete(avatarFingerprint)
-            val player = fixture.joinBedrock()
-            fixture.services.runWork()
-            assertEquals(1, player.transfers.size)
-            assertEquals(null, player.transfers.single().third)
-            assertTrue(player.limbo.menus.isEmpty())
-            assertFalse(fixture.gate.isAuthenticated(player))
-            assertEquals(0, fixture.services.grants)
-        }
-    }
-
-    @Test
-    fun `avatar preparation is bypassed by Java feature off and single role while menu lore stays concise`() {
-        val java = Fixture(avatarConfig)
-        val javaPlayer = java.player(777)
-        java.strongMicrosoft(javaPlayer)
-        val javaMenu = javaPlayer.limbo.menus.single()
-        fun noLegacy(value: TextComponent): Boolean = '\u00a7' !in value.text && value.children.all(::noLegacy)
-        for (item in listOf(javaMenu.microsoft, javaMenu.premium)) {
-            assertTrue(noLegacy(item.name), "Java names must remain pure components, never literal Geyser legacy codes")
-            assertTrue(item.lore.all(::noLegacy), "Java lore must remain pure components")
-        }
-        assertTrue(noLegacy(javaMenu.title))
-        assertEquals(null, javaMenu.microsoft.avatarIcon)
-        assertEquals(null, javaMenu.premium.avatarIcon)
-        assertEquals(listOf(java.catalogue.parsed("role-selection.enter").toLimbo()), javaMenu.microsoft.lore)
-        assertEquals(listOf(java.catalogue.parsed("role-selection.enter").toLimbo()), javaMenu.premium.lore)
-        assertEquals(0, java.services.avatarPrepareCalls)
-        assertEquals(0, java.services.avatarOfferCalls)
-
-        val disabled = Fixture(roleConfig + ("bedrock.enabled" to "true"))
-        val disabledPlayer = disabled.joinBedrock()
-        disabled.services.runWork()
-        assertEquals(null, disabledPlayer.limbo.menus.single().microsoft.avatarIcon)
-        assertEquals(null, disabledPlayer.limbo.menus.single().premium.avatarIcon)
-        val disabledMenu = disabledPlayer.limbo.menus.single()
-        for (item in listOf(disabledMenu.microsoft, disabledMenu.premium)) {
-            assertEquals("\u00a7r\u00a7f", item.name.text, "Floodgate reset must also apply when avatars are disabled")
+        for (item in listOf(menu.microsoft, menu.premium)) {
+            assertEquals("\u00a7r\u00a7f", item.name.text)
             assertEquals("\u00a7r\u00a77", item.lore.single().text)
         }
-        assertTrue(noLegacy(disabledMenu.title), "Geyser item formatting must not change the window title")
-        assertEquals(0, disabled.services.avatarPrepareCalls)
-
-        val single = Fixture(avatarConfig)
-        val singlePlayer = single.joinBedrock(RoleOptions(listOf(single.dualRoles().roles.last()), premiumUuid))
-        single.services.runWork()
-        assertTrue(singlePlayer.limbo.menus.isEmpty())
-        assertEquals(1, singlePlayer.transfers.size, "The one role's existing selection transfer must not wait for avatars")
-        assertEquals(0, single.services.avatarPrepareCalls)
-        assertEquals(0, single.services.avatarOfferCalls)
-        assertEquals(0, single.services.grants)
-    }
-
-    @Test
-    fun `avatar prepare failure malformed content or bounded queue rejection shows explicit fallback without authorization`() {
-        for (failure in listOf("prepare", "future", "fingerprint", "prepare-queue", "status-queue")) {
-            val fixture = Fixture(avatarConfig)
-            when (failure) {
-                "prepare" -> fixture.services.avatarPrepareFailure = IllegalStateException("presentation unavailable")
-                "future" -> fixture.services.avatarPreparation.completeExceptionally(IllegalStateException("image unavailable"))
-                "fingerprint" -> fixture.services.avatarPreparation.complete("invalid")
-                "prepare-queue" -> fixture.services.duringRoles = { fixture.services.rejectSubmissions = true }
-                "status-queue" -> {
-                    fixture.services.avatarPreparation.complete(avatarFingerprint)
-                    fixture.services.duringAvatarPrepare = { fixture.services.rejectSubmissions = true }
-                }
-            }
-            val player = fixture.joinBedrock()
-            fixture.services.runWork()
-            val menu = player.limbo.menus.single()
-            assertEquals(RoleAvatarIcon.MICROSOFT, menu.microsoft.avatarIcon, failure)
-            assertEquals(RoleAvatarIcon.PREMIUM, menu.premium.avatarIcon, failure)
-            for (item in listOf(menu.microsoft, menu.premium)) {
-                assertEquals("\u00a7r\u00a7f", item.name.text, "Avatar Floodgate name lacks explicit native reset: $failure")
-                assertEquals("\u00a7r\u00a77", item.lore.single().text)
-            }
-            assertTrue(player.limbo.messages.contains(fixture.catalogue.parsed("role-selection.avatar-unavailable").toLimbo()), failure)
-            assertTrue(player.transfers.isEmpty(), failure)
-            assertFalse(fixture.gate.isAuthenticated(player), failure)
-            assertEquals(0, fixture.services.avatarOfferCalls, failure)
-            assertEquals(0, fixture.services.grants, failure)
-        }
-    }
-
-    @Test
-    fun `avatar callbacks after disconnect stop deadline stale proof or queued status cannot open or refresh a menu`() {
-        for (ending in listOf("disconnect", "stop", "deadline", "proof", "queued-status")) {
-            val fixture = Fixture(avatarConfig + ("role-selection.timeout-seconds" to "5"))
-            var current = true
-            val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { current }
-            val player = fixture.joinBedrock(proof = proof)
-            fixture.services.runWork()
-            assertEquals(1, fixture.services.avatarPrepareCalls)
-            when (ending) {
-                "disconnect" -> fixture.gate.onDisconnect(DisconnectEvent(player))
-                "stop" -> fixture.gate.deactivate()
-                "deadline" -> fixture.now += 5_000L
-                "proof" -> current = false
-                "queued-status" -> {
-                    fixture.services.avatarPreparation.complete(avatarFingerprint)
-                    fixture.gate.onDisconnect(DisconnectEvent(player))
-                }
-            }
-            fixture.services.avatarPreparation.complete(avatarFingerprint)
-            fixture.services.runWork()
-            assertTrue(player.limbo.menus.isEmpty(), ending)
-            assertTrue(player.transfers.isEmpty(), ending)
-            assertEquals(0, fixture.services.avatarOfferCalls, ending)
-            assertFalse(fixture.gate.isAuthenticated(player), ending)
-            assertFalse(fixture.services.avatarPreparation.isCancelled, "Closing a connection must not cancel shared image preparation")
-        }
-    }
-
-    @Test
-    fun `late old avatar future cannot populate a new same Floodgate UUID connection`() {
-        val fixture = Fixture(avatarConfig)
-        fixture.services.avatarOffer = RoleAvatarOffer(UUID.randomUUID(), avatarFingerprint, false)
-        val old = fixture.joinBedrock()
-        fixture.services.runWork()
-        val oldFuture = fixture.services.avatarPreparation
-        fixture.gate.onDisconnect(DisconnectEvent(old))
-        old.isActive = false
-        fixture.services.avatarPreparation = CompletableFuture()
-        val replacement = fixture.joinBedrock()
-        fixture.services.runWork()
-        assertEquals(old.uniqueId, replacement.uniqueId)
-        oldFuture.complete(avatarFingerprint)
-        fixture.services.runWork()
-        assertTrue(old.limbo.menus.isEmpty())
-        assertTrue(replacement.limbo.menus.isEmpty())
-        assertEquals(0, fixture.services.avatarOfferCalls)
-        fixture.services.avatarPreparation.complete(avatarFingerprint)
-        fixture.services.runWork()
-        assertEquals(1, replacement.limbo.menus.size)
-        assertEquals(1, fixture.services.avatarOfferCalls)
-        assertTrue(old.transfers.isEmpty())
-        assertFalse(fixture.gate.isAuthenticated(replacement))
-    }
-
-    @Test
-    fun `failed visual transfer falls back once and duplicate completion cannot retry or select a role`() {
-        val fixture = Fixture(avatarConfig)
-        val player = fixture.joinBedrock()
-        player.transferResult = CompletableFuture.failedFuture(IllegalStateException("native transfer unavailable"))
-        fixture.services.runWork()
-        fixture.services.avatarPreparation.complete(avatarFingerprint)
-        fixture.services.runWork()
-        assertEquals(1, player.transfers.size)
-        assertEquals(null, player.transfers.single().third)
-        assertEquals(1, player.limbo.menus.size)
-        assertTrue(player.limbo.messages.contains(fixture.catalogue.parsed("role-selection.avatar-unavailable").toLimbo()))
-        assertFalse(fixture.services.avatarPreparation.complete(avatarFingerprint))
-        fixture.services.runWork()
-        assertEquals(1, player.transfers.size)
+        assertFalse(menu.title.toString().contains('\u00a7'))
         assertFalse(fixture.gate.isAuthenticated(player))
-        assertEquals(0, fixture.services.grants)
-        assertEquals(0, fixture.services.premiumBinds)
-    }
-
-    @Test
-    fun `avatar refresh budget is bounded across XUIDs and a full budget only changes presentation`() {
-        val fixture = Fixture(avatarConfig + ("safety.pending-login-limit" to "1"))
-        fixture.services.avatarPreparation.complete(avatarFingerprint)
-        val first = fixture.joinBedrock()
-        fixture.services.runWork()
-        assertEquals(1, first.transfers.size)
-        fixture.gate.onDisconnect(DisconnectEvent(first))
-        first.isActive = false
-        val otherIdentity = Identity.Microsoft(GameName.parseOrThrow("Other"), Xuid(2L), "Other")
-        val otherOptions = RoleOptions(listOf(RoleOption(otherIdentity, BoundIdentity.of(otherIdentity, 1L), null),
-            fixture.dualRoles().roles.last()), premiumUuid)
-        val otherProof = BedrockProof.createLinked(Xuid(2L), premiumUuid, "Alex", "Other", Any()) { true }
-        val other = fixture.joinBedrock(otherOptions, otherProof)
-        fixture.services.runWork()
-        assertTrue(other.transfers.isEmpty())
-        assertEquals(1, other.limbo.menus.size)
-        assertTrue(other.limbo.messages.contains(fixture.catalogue.parsed("role-selection.avatar-unavailable").toLimbo()))
-        assertFalse(fixture.gate.isAuthenticated(other))
-        fixture.assertBackendDenied(other)
-    }
-
-    @Test
-    fun `open avatar menu name and skin refresh keeps the same session pack and true role profile`() {
-        val fixture = Fixture(avatarConfig)
-        fixture.services.avatarPreparation.complete(avatarFingerprint)
-        fixture.services.avatarOffer = RoleAvatarOffer(UUID.randomUUID(), avatarFingerprint, false)
-        val player = fixture.joinBedrock()
-        fixture.services.runWork()
-        val old = player.limbo.menus.single()
-        fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.first(),
-            RoleOption(Identity.Premium(GameName.parseOrThrow("AlexNew"), premiumUuid), null,
-                GameProfile.Property("textures", "new-official-texture", "new-signature"))), premiumUuid)
-        fixture.gate.onRoleSelect(player.limbo, old.generation, "premium")
-        fixture.services.runWork()
-        val refreshed = player.limbo.menus.last()
-        assertEquals(2, player.limbo.menus.size)
-        assertEquals("AlexNew", refreshed.premium.profileName)
-        assertEquals("new-official-texture", refreshed.premium.textureValue)
-        assertEquals(RoleAvatarIcon.PREMIUM, refreshed.premium.avatarIcon)
-        assertEquals(1, fixture.services.avatarPrepareCalls, "An open resource pack cannot be hot replaced by a menu/name refresh")
-        assertEquals(1, fixture.services.avatarOfferCalls)
-        assertTrue(player.transfers.isEmpty())
-        assertFalse(fixture.gate.isAuthenticated(player))
-    }
-
-    @Test
-    fun `visual avatar refresh still rejects a stale new proof or revoked current relationship`() {
-        for (failure in listOf("proof", "relationship")) {
-            val fixture = Fixture(avatarConfig)
-            fixture.services.avatarPreparation.complete(avatarFingerprint)
-            val first = fixture.joinBedrock()
-            fixture.services.runWork()
-            assertEquals(1, first.transfers.size)
-            fixture.gate.onDisconnect(DisconnectEvent(first))
-            first.isActive = false
-            fixture.services.avatarOffer = RoleAvatarOffer(UUID.randomUUID(), avatarFingerprint, false)
-            val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { failure != "proof" }
-            if (failure == "proof") {
-                val retry = fixture.player(777)
-                val pre = PreLoginEvent(retry, proof.username, proof.uniqueId, BedrockLogin.Verified(proof))
-                fixture.gate.onPreLogin(pre)
-                assertFalse(pre.result.isAllowed)
-                assertFalse(fixture.gate.isAuthenticated(retry))
-            } else {
-                val revoked = RoleOptions(listOf(fixture.dualRoles().roles.first()), null)
-                val retry = fixture.joinBedrock(revoked, proof)
-                fixture.services.runWork()
-                assertTrue(retry.limbo.menus.isEmpty())
-                assertTrue(retry.transfers.isEmpty())
-                assertTrue(retry.disconnects.isNotEmpty())
-                assertFalse(fixture.gate.isAuthenticated(retry))
-            }
-            assertEquals(1, fixture.services.avatarPrepareCalls, failure)
-            assertEquals(1, fixture.services.avatarOfferCalls, failure)
-            assertEquals(0, fixture.services.grants, failure)
-            assertEquals(0, fixture.services.premiumBinds, failure)
-        }
-    }
-
-    @Test
-    fun `avatar loopback timeout can refresh once then shows unavailable without changing authentication`() {
-        val fixture = Fixture(avatarConfig)
-        fixture.services.avatarPreparation.complete(avatarFingerprint)
-        fixture.services.avatarOfferFailure = java.net.SocketTimeoutException("isolated status timeout")
-        val first = fixture.joinBedrock()
-        fixture.services.runWork()
-        assertEquals(1, first.transfers.size)
-        fixture.gate.onDisconnect(DisconnectEvent(first))
-        first.isActive = false
-        val next = fixture.joinBedrock()
-        fixture.services.runWork()
-        assertTrue(next.transfers.isEmpty())
-        assertEquals(1, next.limbo.menus.size)
-        assertTrue(next.limbo.messages.contains(fixture.catalogue.parsed("role-selection.avatar-unavailable").toLimbo()))
-        assertFalse(fixture.gate.isAuthenticated(next))
-        assertEquals(0, fixture.services.grants)
+        assertEquals(0, fixture.services.beginCalls)
+        fixture.assertBackendDenied(player)
     }
 
     @Test
@@ -746,8 +415,7 @@ class LoginGateContractTest {
         assertEquals(1, chooser.limbo.menus.size)
         fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "microsoft")
         fixture.services.runWork()
-        assertEquals(1, chooser.transfers.size)
-        assertEquals(null, chooser.transfers.single().third)
+        assertEquals(1, chooser.disconnects.size)
         assertFalse(fixture.gate.isAuthenticated(chooser))
         proofCurrent = false
         fixture.gate.onDisconnect(DisconnectEvent(chooser))
@@ -776,17 +444,11 @@ class LoginGateContractTest {
         fixture.services.options = RoleOptions(listOf(RoleOption(proof.identity, null, null)), null)
         val chooser = fixture.player(777).apply { username = proof.username }
         fixture.login(chooser, bedrock = BedrockLogin.Verified(proof))
-        fixture.gate.onJoin(chooser.limbo)
-        fixture.services.runWork()
         assertTrue(chooser.limbo.menus.isEmpty())
-        assertEquals(1, chooser.transfers.size)
-        chooser.isActive = false
-        val fresh = BedrockProof.create(Xuid(1L), record.uuid, ".Steve", "Steve", ".", Any()) { true }
-        val resumed = fixture.player(777).apply { username = fresh.username }
-        fixture.login(resumed, bedrock = BedrockLogin.Verified(fresh))
-        assertTrue(fixture.gate.isAuthenticated(resumed))
-        assertEquals(".Steve", resumed.username)
-        assertEquals(record.uuid, resumed.uniqueId)
+        assertTrue(chooser.disconnects.isEmpty())
+        assertTrue(fixture.gate.isAuthenticated(chooser))
+        assertEquals(".Steve", chooser.username)
+        assertEquals(record.uuid, chooser.uniqueId)
         assertEquals(0, fixture.services.bindCalls)
         assertEquals(0, fixture.services.grants)
         assertEquals(0, fixture.services.premiumBinds)
@@ -802,7 +464,7 @@ class LoginGateContractTest {
             fixture.login(chooser, bedrock = BedrockLogin.Verified(proof))
             fixture.gate.onJoin(chooser.limbo)
             fixture.services.runWork()
-            fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
+            fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "microsoft")
             fixture.services.runWork()
             chooser.isActive = false
             if (failure == "expire") fixture.now += 31_000L
@@ -830,21 +492,19 @@ class LoginGateContractTest {
     @Test
     fun `unavailable public profile at final login stays denied with a retry message rather than internal error`() {
         val fixture = Fixture(roleConfig)
-        val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser)
-        fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
-        fixture.services.runWork()
-        val resumed = fixture.player(777)
-        val pre = PreLoginEvent(resumed, "Steve", record.uuid, roleCookie = checkNotNull(chooser.transfers.single().third))
+        fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.last()), premiumUuid)
+        val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+        val resumed = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
+        val pre = PreLoginEvent(resumed, proof.username, proof.uniqueId, BedrockLogin.Verified(proof))
         fixture.gate.onPreLogin(pre)
         assertTrue(pre.result.isAllowed)
-        val profile = GameProfileRequestEvent(resumed, GameProfile(record.uuid, "Steve", emptyList()))
+        val profile = GameProfileRequestEvent(resumed, GameProfile(proof.uniqueId, proof.username, emptyList()), BedrockLogin.Verified(proof))
         fixture.gate.onPrepareGameProfile(profile)
         fixture.gate.onGameProfile(profile)
         resumed.uniqueId = profile.gameProfile.id
         resumed.username = profile.gameProfile.name
         fixture.services.roleFailure = moe.ryuu.kyokouauth.core.auth.OfficialJavaProfileUnavailableException()
-        val login = LoginEvent(resumed)
+        val login = LoginEvent(resumed, BedrockLogin.Verified(proof))
         fixture.gate.onLogin(login)
         assertFalse(login.result.isAllowed)
         assertEquals("Role unavailable » Reconnect and try again", login.result.reason?.plainText)
@@ -856,21 +516,19 @@ class LoginGateContractTest {
     @Test
     fun `role login rechecks relationship after final profile before claiming premium`() {
         val fixture = Fixture(roleConfig)
-        val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser)
-        fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
-        fixture.services.runWork()
-        val resumed = fixture.player(777)
-        val pre = PreLoginEvent(resumed, "Steve", record.uuid, roleCookie = checkNotNull(chooser.transfers.single().third))
+        fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.last()), premiumUuid)
+        val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+        val resumed = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
+        val pre = PreLoginEvent(resumed, proof.username, proof.uniqueId, BedrockLogin.Verified(proof))
         fixture.gate.onPreLogin(pre)
         assertTrue(pre.result.isAllowed)
-        val profile = GameProfileRequestEvent(resumed, GameProfile(record.uuid, "Steve", emptyList()))
+        val profile = GameProfileRequestEvent(resumed, GameProfile(proof.uniqueId, proof.username, emptyList()), BedrockLogin.Verified(proof))
         fixture.gate.onPrepareGameProfile(profile)
         fixture.gate.onGameProfile(profile)
         resumed.uniqueId = profile.gameProfile.id
         resumed.username = profile.gameProfile.name
         fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.first()), null)
-        val login = LoginEvent(resumed)
+        val login = LoginEvent(resumed, BedrockLogin.Verified(proof))
         fixture.gate.onLogin(login)
         assertFalse(login.result.isAllowed)
         assertFalse(fixture.gate.isAuthenticated(resumed))
@@ -882,10 +540,10 @@ class LoginGateContractTest {
         val fixture = Fixture(roleConfig)
         val occupied = fixture.player(777)
         val chooser = fixture.player(777)
-        fixture.strongMicrosoft(chooser)
+        fixture.strongBedrock(chooser)
         fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "microsoft")
         fixture.services.runWork()
-        assertTrue(chooser.transfers.isEmpty())
+        assertTrue(chooser.requests.isEmpty())
         assertTrue(chooser.disconnects.isNotEmpty())
         assertTrue(occupied.disconnects.isEmpty())
     }
@@ -899,11 +557,10 @@ class LoginGateContractTest {
                 RoleOption(Identity.Microsoft(record.name, Xuid(2L), "Other"), null, null)), premiumUuid)
             else RoleOptions(listOf(RoleOption(record.toIdentity(), record, null)), null)
             val chooser = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
-            fixture.login(chooser, bedrock = BedrockLogin.Verified(proof))
-            fixture.gate.onJoin(chooser.limbo)
-            fixture.services.runWork()
-            assertTrue(chooser.transfers.isEmpty(), failure)
-            assertTrue(chooser.disconnects.isNotEmpty(), failure)
+            val pre = PreLoginEvent(chooser, proof.username, proof.uniqueId, BedrockLogin.Verified(proof))
+            fixture.gate.onPreLogin(pre)
+            assertFalse(pre.result.isAllowed, failure)
+            assertTrue(chooser.requests.isEmpty(), failure)
             assertFalse(fixture.gate.isAuthenticated(chooser), failure)
         }
     }
@@ -914,61 +571,219 @@ class LoginGateContractTest {
         fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.single { it.identity is Identity.Premium }), premiumUuid)
         val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
         val chooser = fixture.player(777).apply { uniqueId = premiumUuid; username = "Alex" }
-        fixture.login(chooser, bedrock = BedrockLogin.Verified(proof))
-        fixture.gate.onJoin(chooser.limbo)
-        fixture.services.runWork()
+        val pre = PreLoginEvent(chooser, proof.username, proof.uniqueId, BedrockLogin.Verified(proof))
+        fixture.gate.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+        assertEquals(0, fixture.services.premiumBinds, "PreLogin resolves but cannot claim a premium binding")
+        val profile = GameProfileRequestEvent(chooser, GameProfile(proof.uniqueId, proof.username, emptyList()), BedrockLogin.Verified(proof))
+        fixture.gate.onPrepareGameProfile(profile)
+        fixture.gate.onGameProfile(profile)
+        chooser.uniqueId = profile.gameProfile.id
+        chooser.username = profile.gameProfile.name
+        val login = LoginEvent(chooser, BedrockLogin.Verified(proof))
+        fixture.gate.onLogin(login)
+        assertTrue(login.result.isAllowed)
         assertTrue(chooser.limbo.menus.isEmpty())
-        assertEquals(1, chooser.transfers.size)
-        assertEquals(0, fixture.services.premiumBinds)
-        chooser.isActive = false
-        val fresh = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
-        val resumed = fixture.player(777).apply { uniqueId = premiumUuid; username = "Alex" }
-        fixture.login(resumed, bedrock = BedrockLogin.Verified(fresh))
-        assertTrue(fixture.gate.isAuthenticated(resumed))
-        assertEquals(premiumUuid, resumed.uniqueId)
-        assertEquals("Alex", resumed.username)
+        assertTrue(chooser.disconnects.isEmpty())
+        assertTrue(fixture.gate.isAuthenticated(chooser))
+        assertEquals(premiumUuid, chooser.uniqueId)
+        assertEquals("Alex", chooser.username)
         assertEquals(1, fixture.services.premiumBinds)
         assertEquals(0, fixture.services.bindCalls)
         assertEquals(0, fixture.services.grants)
     }
 
     @Test
-    fun `each later ordinary Microsoft login proves XUID again and reopens both role choices`() {
+    fun `each later ordinary Floodgate login proves XUID again and reopens both role choices`() {
         val fixture = Fixture(roleConfig)
         val first = fixture.player(777)
-        fixture.strongMicrosoft(first)
-        fixture.gate.onRoleSelect(first.limbo, first.limbo.menus.single().generation, "microsoft")
+        fixture.strongBedrock(first)
+        fixture.gate.onRoleSelect(first.limbo, first.limbo.menus.single().generation, "premium")
         fixture.services.runWork()
+        assertTrue(fixture.gate.isAuthenticated(first))
         first.isActive = false
-        val resumed = fixture.player(777)
-        fixture.login(resumed, checkNotNull(first.transfers.single().third))
-        assertEquals(1, fixture.services.grants)
-        resumed.isActive = false
-        fixture.gate.onDisconnect(DisconnectEvent(resumed))
-        fixture.services.decision = AuthCoordinator.Decision.Admit(record.toIdentity(), record)
+        fixture.gate.onDisconnect(DisconnectEvent(first))
         val next = fixture.player(777)
-        fixture.strongMicrosoft(next)
+        fixture.strongBedrock(next)
         assertFalse(fixture.gate.isAuthenticated(next))
         assertEquals(1, next.limbo.menus.size)
-        assertEquals(2, fixture.services.beginCalls)
-        assertEquals(1, fixture.services.grants)
+        assertEquals(0, fixture.services.beginCalls)
+        assertEquals(0, fixture.services.grants)
     }
 
     @Test
-    fun `failed native transfer revokes the issued Java cookie instead of authorizing its frontend`() {
+    fun `failed native property application never authorizes its frontend or reaches backend`() {
         val fixture = Fixture(roleConfig)
         val chooser = fixture.player(777)
-        chooser.transferResult = CompletableFuture<Unit>().also { it.completeExceptionally(IllegalStateException("write failed")) }
-        fixture.strongMicrosoft(chooser)
+        chooser.profileResult = CompletableFuture.failedFuture(IllegalStateException("write failed"))
+        fixture.strongBedrock(chooser)
         fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
         fixture.services.runWork()
-        val cookie = checkNotNull(chooser.transfers.single().third)
         assertFalse(fixture.gate.isAuthenticated(chooser))
         assertTrue(chooser.disconnects.isNotEmpty())
-        val replay = PreLoginEvent(fixture.player(777), "Steve", record.uuid, roleCookie = cookie)
-        fixture.gate.onPreLogin(replay)
-        assertFalse(replay.result.isAllowed)
         assertEquals(0, fixture.services.premiumBinds)
+        fixture.assertBackendDenied(chooser)
+    }
+
+    @Test
+    fun `canonical role properties cover held applying and selected snapshots while unmanaged properties survive`() {
+        val fixture = Fixture(roleConfig)
+        var current = true
+        val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { current }
+        val player = fixture.player(777).apply {
+            uniqueId = proof.uniqueId; username = proof.username
+            properties = listOf(GameProfile.Property("textures", "untrusted", ""), GameProfile.Property("other", "keep", ""))
+        }
+        fixture.services.options = fixture.dualRoles()
+        fixture.login(player, bedrock = BedrockLogin.Verified(proof))
+        fixture.gate.onJoin(player.limbo)
+        fixture.services.runWork()
+        assertTrue(fixture.gate.requiresRoleProfile(player))
+        val held = checkNotNull(fixture.gate.currentRoleProfile(player))
+        assertEquals(premiumUuid, held.id)
+        assertEquals("Alex", held.name)
+        assertEquals("official-texture", held.properties.single { it.name == "textures" }.value)
+        assertFalse(fixture.gate.isAuthenticated(player))
+        val changedSkin = GameProfile.Property("textures", "new-official-texture", "new-signature")
+        fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.first(), fixture.dualRoles().roles.last().copy(skin = changedSkin)), premiumUuid)
+        player.profileResult = CompletableFuture()
+        fixture.gate.onRoleSelect(player.limbo, player.limbo.menus.single().generation, "premium")
+        fixture.services.runWork()
+        val applying = checkNotNull(fixture.gate.currentRoleProfile(player))
+        assertEquals(listOf(changedSkin), applying.properties.filter { it.name == "textures" })
+        fixture.assertBackendDenied(player)
+        player.profileResult.complete(Unit)
+        fixture.services.runWork()
+        assertTrue(fixture.gate.isAuthenticated(player))
+        assertEquals(listOf(changedSkin), player.properties.filter { it.name == "textures" })
+        assertTrue(player.properties.any { it.name == "other" && it.value == "keep" })
+        val selected = checkNotNull(fixture.gate.currentRoleProfile(player))
+        assertEquals(player.sessionId.toString(), selected.properties.single { it.name == LoginGate.CONNECTION_PROPERTY }.value)
+        assertEquals(listOf(changedSkin), selected.properties.filter { it.name == "textures" })
+        val foreign = fixture.player(777, player.sessionId).apply { uniqueId = player.uniqueId; username = player.username }
+        assertEquals(null, fixture.gate.currentRoleProfile(foreign))
+        current = false
+        assertTrue(fixture.gate.requiresRoleProfile(player), "Late native guards must refuse a null required profile")
+        assertEquals(null, fixture.gate.currentRoleProfile(player))
+        assertFalse(fixture.gate.isAuthenticated(player))
+    }
+
+    @Test
+    fun `late native property callbacks cannot authorize after disconnect stop deadline proof link or name changes`() {
+        for (ending in listOf("disconnect", "stop", "deadline", "proof", "link", "name", "record")) {
+            val fixture = Fixture(roleConfig + ("role-selection.timeout-seconds" to "5"))
+            var current = true
+            val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { current }
+            val player = fixture.joinBedrock(proof = proof)
+            fixture.services.runWork()
+            player.profileResult = CompletableFuture()
+            fixture.gate.onRoleSelect(player.limbo, player.limbo.menus.single().generation, "premium")
+            fixture.services.runWork()
+            assertFalse(fixture.gate.isAuthenticated(player))
+            when (ending) {
+                "disconnect" -> fixture.gate.onDisconnect(DisconnectEvent(player))
+                "stop" -> fixture.gate.deactivate()
+                "deadline" -> fixture.now += 5_000
+                "proof" -> current = false
+                "link" -> fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.first()), null)
+                "name" -> fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.first(),
+                    fixture.dualRoles().roles.last().copy(identity = Identity.Premium(GameName.parseOrThrow("AlexNew"), premiumUuid))), premiumUuid)
+                "record" -> fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.first(),
+                    fixture.dualRoles().roles.last().copy(existing = BoundIdentity.of(Identity.Premium(GameName.parseOrThrow("Alex"), premiumUuid), 99L))), premiumUuid)
+            }
+            player.profileResult.complete(Unit)
+            fixture.services.runWork()
+            assertFalse(fixture.gate.isAuthenticated(player), ending)
+            assertTrue(player.requests.isEmpty(), ending)
+            assertEquals(0, fixture.services.grants, ending)
+        }
+    }
+
+    @Test
+    fun `late property completion and old timers cannot authorize or clean a replacement same UUID session`() {
+        val fixture = Fixture(roleConfig)
+        val old = fixture.joinBedrock()
+        fixture.services.runWork()
+        old.profileResult = CompletableFuture()
+        fixture.gate.onRoleSelect(old.limbo, old.limbo.menus.single().generation, "premium")
+        fixture.services.runWork()
+        val timers = fixture.services.timers.toList()
+        fixture.gate.onDisconnect(DisconnectEvent(old))
+        old.isActive = false
+        val next = fixture.player(777, old.sessionId)
+        fixture.strongBedrock(next)
+        old.profileResult.complete(Unit)
+        timers.forEach { it.runEvenIfCancelled() }
+        fixture.gate.onDisconnect(DisconnectEvent(old))
+        fixture.services.runWork()
+        assertFalse(fixture.gate.isAuthenticated(next))
+        assertTrue(next.disconnects.isEmpty())
+        assertTrue(old.requests.isEmpty())
+        fixture.gate.onRoleSelect(next.limbo, next.limbo.menus.single().generation, "premium")
+        fixture.services.runWork()
+        assertTrue(fixture.gate.isAuthenticated(next))
+    }
+
+    @Test
+    fun `pending role UUID and case insensitive names are reserved atomically before native registration`() {
+        for (collision in listOf("uuid", "name")) {
+            val fixture = Fixture(roleConfig)
+            val first = fixture.inbound()
+            val firstProof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+            fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.last()), premiumUuid)
+            val firstPre = PreLoginEvent(first, firstProof.username, firstProof.uniqueId, BedrockLogin.Verified(firstProof))
+            fixture.gate.onPreLogin(firstPre)
+            assertTrue(firstPre.result.isAllowed)
+            val second = fixture.inbound()
+            val otherUuid = if (collision == "uuid") premiumUuid else UUID.randomUUID()
+            val otherName = if (collision == "name") "aLeX" else "OtherName"
+            val otherProof = BedrockProof.createLinked(Xuid(2L), otherUuid, otherName, "Other", Any()) { true }
+            fixture.services.options = RoleOptions(listOf(RoleOption(Identity.Premium(GameName.parseOrThrow(otherName), otherUuid), null, null)), otherUuid)
+            val blocked = PreLoginEvent(second, otherName, otherUuid, BedrockLogin.Verified(otherProof))
+            fixture.gate.onPreLogin(blocked)
+            assertFalse(blocked.result.isAllowed, collision)
+            val invalidProfile = GameProfileRequestEvent(first, GameProfile(UUID.randomUUID(), "Wrong", emptyList()), BedrockLogin.Verified(firstProof))
+            fixture.gate.onGameProfile(invalidProfile)
+            val retry = PreLoginEvent(second, otherName, otherUuid, BedrockLogin.Verified(otherProof))
+            fixture.gate.onPreLogin(retry)
+            assertTrue(retry.result.isAllowed, "Rejection must release only the first reservation: $collision")
+        }
+    }
+
+    @Test
+    fun `expired pending role reservations are reclaimed before the next native login`() {
+        val fixture = Fixture(roleConfig)
+        fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.last()), premiumUuid)
+        fun proof() = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+        val first = fixture.inbound()
+        fixture.gate.onPreLogin(PreLoginEvent(first, "Alex", premiumUuid, BedrockLogin.Verified(proof())))
+        fixture.now += 300_000L
+        val next = fixture.inbound()
+        val pre = PreLoginEvent(next, "Alex", premiumUuid, BedrockLogin.Verified(proof()))
+        fixture.gate.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+    }
+
+    @Test
+    fun `single native profile proof revocation before login cannot acquire selected authorization`() {
+        val fixture = Fixture(roleConfig)
+        fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.last()), premiumUuid)
+        var current = true
+        val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { current }
+        val player = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
+        val pre = PreLoginEvent(player, proof.username, proof.uniqueId, BedrockLogin.Verified(proof))
+        fixture.gate.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+        val profile = GameProfileRequestEvent(player, GameProfile(proof.uniqueId, proof.username, emptyList()), BedrockLogin.Verified(proof))
+        fixture.gate.onPrepareGameProfile(profile)
+        fixture.gate.onGameProfile(profile)
+        current = false
+        assertTrue(fixture.gate.requiresRoleProfile(player))
+        assertEquals(null, fixture.gate.currentRoleProfile(player))
+        val login = LoginEvent(player, BedrockLogin.Verified(proof))
+        fixture.gate.onLogin(login)
+        assertFalse(login.result.isAllowed)
+        assertFalse(fixture.gate.isAuthenticated(player))
     }
 
     @Test
@@ -1825,11 +1640,18 @@ class LoginGateContractTest {
             }, { now },
         ).also { it.activate() }
 
+        fun inbound(): InboundConnection = object : InboundConnection {
+            override val sessionId = UUID.randomUUID()
+            override val isActive = true
+            override val remoteAddress = InetSocketAddress("127.0.0.1", 50000)
+            override fun disconnect(message: RichText.Parsed) = Unit
+        }
+
         fun player(version: Int, sessionId: UUID = UUID.randomUUID()) =
             FakePlayer(version, sessionId).also { players += it }
 
-        fun login(player: FakePlayer, cookie: ByteArray? = null, bedrock: BedrockLogin = BedrockLogin.Java) {
-            val pre = PreLoginEvent(player, player.username, player.uniqueId, bedrock, cookie)
+        fun login(player: FakePlayer, bedrock: BedrockLogin = BedrockLogin.Java) {
+            val pre = PreLoginEvent(player, player.username, player.uniqueId, bedrock)
             gate.onPreLogin(pre)
             assertTrue(pre.result.isAllowed)
             if (rolesEnabled) {
@@ -1845,13 +1667,14 @@ class LoginGateContractTest {
             assertTrue(login.result.isAllowed)
         }
 
-        fun strongMicrosoft(player: FakePlayer, options: RoleOptions = dualRoles()) {
+        fun strongBedrock(player: FakePlayer, options: RoleOptions = dualRoles()) {
             services.options = options
-            login(player)
+            val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+            player.uniqueId = proof.uniqueId
+            player.username = proof.username
+            login(player, bedrock = BedrockLogin.Verified(proof))
             gate.onJoin(player.limbo)
             services.runWork()
-            services.pollResult = DeviceCodeFlow.PollResult.Authorized("test-token", null, 300)
-            services.advanceBy(1_000L)
         }
 
         fun joinBedrock(options: RoleOptions = dualRoles(), proof: BedrockProof =
@@ -1861,6 +1684,13 @@ class LoginGateContractTest {
             login(player, bedrock = BedrockLogin.Verified(proof))
             gate.onJoin(player.limbo)
             return player
+        }
+
+        fun freshBedrockLogin(player: FakePlayer) {
+            val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+            player.uniqueId = proof.uniqueId
+            player.username = proof.username
+            login(player, bedrock = BedrockLogin.Verified(proof))
         }
 
         fun dualRoles(): RoleOptions = RoleOptions(listOf(
@@ -1899,14 +1729,6 @@ class LoginGateContractTest {
             var roleFailure: Exception? = null
             var duringRoles: () -> Unit = {}
             var options = RoleOptions(listOf(RoleOption(record.toIdentity(), record, null)), null)
-            var avatarPreparation = CompletableFuture<String>()
-            var avatarOffer: RoleAvatarOffer? = null
-            var avatarPrepareCalls = 0
-            var avatarOfferCalls = 0
-            var avatarPrepareFailure: Exception? = null
-            var avatarOfferFailure: Exception? = null
-            var duringAvatarPrepare: () -> Unit = {}
-            var duringAvatarOffer: () -> Unit = {}
             var allow = true
             var rejectSubmissions = false
             var rejectSchedules = false
@@ -1937,18 +1759,6 @@ class LoginGateContractTest {
                 duringRoles()
                 roleFailure?.let { throw it }
                 return options
-            }
-            override fun prepareRoleAvatars(xuid: Xuid, options: RoleOptions): CompletableFuture<String> {
-                avatarPrepareCalls++
-                duringAvatarPrepare()
-                avatarPrepareFailure?.let { throw it }
-                return avatarPreparation
-            }
-            override fun roleAvatarOffer(xuid: Xuid): RoleAvatarOffer? {
-                avatarOfferCalls++
-                duringAvatarOffer()
-                avatarOfferFailure?.let { throw it }
-                return avatarOffer
             }
             override fun bindMicrosoft(name: GameName, xuid: Xuid, gamertag: String): AuthCoordinator.ClaimOutcome {
                 bindCalls++
@@ -2011,11 +1821,15 @@ class LoginGateContractTest {
         override var username = record.name.value
         override var isOnlineMode = false
         var properties = emptyList<GameProfile.Property>()
-        val transfers = mutableListOf<Triple<String, Int, ByteArray?>>()
-        var transferResult = CompletableFuture.completedFuture(Unit)
-        override fun transferRole(host: String, port: Int, cookie: ByteArray?): CompletableFuture<Unit> {
-            transfers += Triple(host, port, cookie)
-            return transferResult
+        var profileResult = CompletableFuture.completedFuture(Unit)
+        val appliedProfiles = mutableListOf<GameProfile>()
+        override fun applyRoleProfile(profile: GameProfile): CompletableFuture<Unit> {
+            check(profile.id == uniqueId && profile.name == username)
+            appliedProfiles += profile
+            return profileResult.thenApply {
+                properties = properties.filterNot { it.name == "textures" || it.name == LoginGate.CONNECTION_PROPERTY } + profile.properties
+                Unit
+            }
         }
         override val effectiveLocale = Locale.US
         override val remoteAddress = InetSocketAddress("127.0.0.1", 50000)
@@ -2086,9 +1900,7 @@ class LoginGateContractTest {
     private companion object {
         val record = BoundIdentity.of(Identity.Microsoft(GameName.parseOrThrow("Steve"), Xuid(1L), "Steve"), 1L)
         val premiumUuid: UUID = UUID.fromString("12345678-1234-4234-9234-123456789abc")
-        val roleConfig = mapOf("role-selection.enabled" to "true", "role-selection.reconnect-host" to "proxy.invalid")
-        val avatarConfig = roleConfig + mapOf("bedrock.enabled" to "true", "role-selection.avatars.enabled" to "true")
-        val avatarFingerprint = "a".repeat(64)
+        val roleConfig = mapOf("role-selection.enabled" to "true", "bedrock.enabled" to "true")
         fun limboName(version: Int) = "${LoginGate.LIMBO_SERVER_NAME}-$version"
     }
 }

@@ -1,6 +1,0 @@
-id: kyokouauthavatar
-name: KyokouAuthAvatar
-main: moe.ryuu.kyokouauth.geyser.avatar.KyokouAvatarExtension
-api: 2.0.0
-version: ${version}
-authors: [Ryuu]

@@ -5,23 +5,39 @@ import java.net.InetSocketAddress
 import kotlin.test.*
 
 class BungeePlatformTest {
-    @Test fun `role transfer port uses only admitted exact native frontend and does not store FG hint cookies`() {
-        BungeeRoleTransfer().use { transfer ->
-            val platform = BungeePlatform(TestProxy(), transfer)
-            val fixture = PendingFixture()
-            val player = platform.pending(fixture.pending)
-            assertFails { player.transferRole("proxy.invalid", 25577, byteArrayOf(1)).join() }
-            player.bind(fixture.player)
-            player.loggedIn = true
-            player.transferRole("proxy.invalid", 25577, byteArrayOf(1, 2)).join()
-            player.transferRole("proxy.invalid", 25577, null).join()
-            assertEquals(listOf("proxy.invalid" to 25577, "proxy.invalid" to 25577), fixture.transfers)
-            assertEquals(1, fixture.storedCookies.size)
-            assertContentEquals(byteArrayOf(1, 2), fixture.storedCookies.single().second)
-            platform.remove(player)
-            assertFails { player.transferRole("proxy.invalid", 25577, null).join() }
-            assertEquals(2, fixture.transfers.size)
+    @Test fun `role properties update only the exact live native identity and selected expected profile`() {
+        val profiles = TestProfiles()
+        val platform = BungeePlatform(TestProxy())
+        platform.installProfiles(profiles)
+        val fixture = PendingFixture()
+        profiles.add(fixture)
+        val player = platform.pending(fixture.pending)
+        val original = fixture.profile
+        val property = moe.ryuu.kyokouauth.proxy.GameProfile.Property("native-extra", "keep", "signed")
+        profiles.apply(fixture.pending, original.withProperties(original.properties + property))
+        val selected = original.withProperties(listOf(
+            moe.ryuu.kyokouauth.proxy.GameProfile.Property("textures", "selected", "role-signature"),
+            moe.ryuu.kyokouauth.proxy.GameProfile.Property("kyokouauth:connection-id", "current-marker", ""),
+            moe.ryuu.kyokouauth.proxy.GameProfile.Property("untrusted-extra", "ignore", "")))
+        assertFails { player.applyRoleProfile(selected).join() }
+        player.bind(fixture.player)
+        player.loggedIn = true
+        player.applyRoleProfile(selected).join()
+        assertEquals(original.id, fixture.uuid)
+        assertEquals(original.name, fixture.name)
+        assertTrue(fixture.setterOrder.isEmpty(), "Existing Player UUID/name must never be rewritten")
+        val expected = listOf(property) + selected.properties.take(2)
+        assertEquals(expected, profiles.read(fixture.pending).properties)
+        assertEquals(expected, assertNotNull(player.currentRoleProfile()).properties)
+        for (wrong in listOf(selected.copy(id = java.util.UUID.randomUUID()), selected.copy(name = "oraclelocal"))) {
+            assertFails { player.applyRoleProfile(wrong).join() }
         }
+        fixture.connected = false
+        assertFails { player.applyRoleProfile(selected).join() }
+        fixture.connected = true
+        platform.remove(player)
+        assertFails { player.applyRoleProfile(selected).join() }
+        assertEquals(expected, profiles.read(fixture.pending).properties)
     }
 
     @Test fun `private engines never enter public proxy directory but retain exact internal handles`() {

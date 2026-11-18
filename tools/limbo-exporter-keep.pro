@@ -16,6 +16,16 @@
 -keep,allowoptimization interface moe.ryuu.kyokouauth.limbo.LimboListener
 -keep,allowoptimization interface moe.ryuu.kyokouauth.limbo.LimboLogger
 -keep,allowoptimization interface moe.ryuu.kyokouauth.limbo.ForwardingMode
+# Vanilla selector API: the seven-argument Java constructor still defaults to PLAYER_HEAD.
+-keep,allowoptimization enum moe.ryuu.kyokouauth.limbo.RoleSelectorIcon {
+    public static final *** PLAYER_HEAD;
+    public static final *** NAME_TAG;
+    public static final *** DIAMOND;
+}
+-keep,allowoptimization class moe.ryuu.kyokouauth.limbo.RoleSelectorItem {
+    public <init>(java.lang.String,java.util.UUID,java.lang.String,java.lang.String,java.lang.String,moe.ryuu.kyokouauth.limbo.protocol.TextComponent,java.util.List);
+    public <init>(java.lang.String,java.util.UUID,java.lang.String,java.lang.String,java.lang.String,moe.ryuu.kyokouauth.limbo.protocol.TextComponent,java.util.List,moe.ryuu.kyokouauth.limbo.RoleSelectorIcon);
+}
 -keep,allowoptimization class moe.ryuu.kyokouauth.limbo.LimboServer {
     public <init>(moe.ryuu.kyokouauth.limbo.LimboSettings,moe.ryuu.kyokouauth.limbo.LimboListener,moe.ryuu.kyokouauth.limbo.LimboLogger,java.net.InetSocketAddress,byte[],moe.ryuu.kyokouauth.limbo.ForwardingMode);
     public java.net.InetSocketAddress start();
@@ -54,6 +64,23 @@
 }
 -keep,allowoptimization class moe.ryuu.kyokouauth.limbo.engine.p*.libs.org.geysermc.mcprotocollib.auth.GameProfile {
     public <init>(java.util.UUID,java.lang.String);
+}
+
+# Actual-artifact three-component budget probes; no CMD factory or private avatar reader is kept.
+-keep,allowoptimization class moe.ryuu.kyokouauth.limbo.engine.p*.session.BoundedItemCodecHelper {
+    public static *** INSTANCE;
+    public *** readDataComponentPatch(io.netty.buffer.ByteBuf);
+}
+-keep,allowoptimization class moe.ryuu.kyokouauth.limbo.engine.p*.session.BoundedItemTypes {
+    public static *** readDataComponentPatch(io.netty.buffer.ByteBuf);
+    public static *** readHashedStack(io.netty.buffer.ByteBuf);
+}
+-keepclassmembers,allowoptimization class moe.ryuu.kyokouauth.limbo.engine.p*.libs.org.geysermc.mcprotocollib.protocol.data.game.item.HashedStack {
+    public <init>(int,int,java.util.Map,java.util.Set);
+    public java.util.Map addedComponents();
+}
+-keepclassmembers,allowoptimization class moe.ryuu.kyokouauth.limbo.engine.p*.libs.org.geysermc.mcprotocollib.protocol.codec.MinecraftTypes {
+    public static void writeHashedStack(io.netty.buffer.ByteBuf,moe.ryuu.kyokouauth.limbo.engine.p*.libs.org.geysermc.mcprotocollib.protocol.data.game.item.HashedStack);
 }
 
 # State/registry/serializer interface names are loaded by name, while getters are invoked on instances.

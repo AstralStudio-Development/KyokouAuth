@@ -23,11 +23,16 @@ import java.util.concurrent.ScheduledFuture
 internal class BungeeIntent(private val complete: () -> Unit) {
     private var done = false
     private var timer: ScheduledFuture<*>? = null
+    private var watcher: AutoCloseable? = null
+    @Synchronized fun isDone(): Boolean = done
     @Synchronized fun timer(task: ScheduledFuture<*>) { if (done) task.cancel(false) else timer = task }
+    @Synchronized fun watch(resource: AutoCloseable) { if (done) resource.close() else watcher = resource }
     @Synchronized fun finish(action: () -> Unit) {
         if (done) return
         done = true
         timer?.cancel(false)
+        runCatching { watcher?.close() }
+        watcher = null
         try { action() } finally { complete() }
     }
 }
@@ -46,12 +51,14 @@ internal class BungeeLoginGate(
     private val intentTimeoutMillis: Long = 35_000L,
     private val bedrock: (BungeePlayer) -> BedrockLogin = { BedrockLogin.Java },
     private val rolesEnabled: Boolean = false,
-    private val roleTransfer: BungeeRoleTransfer? = null,
+    private val watchClosed: (BungeePlayer, () -> Unit) -> AutoCloseable =
+        BungeeFloodgateChannels(BungeeLoginGate::class.java.classLoader)::watchClosed,
     private val prepareRole: ((BungeePlayer, GameProfile) -> Unit)? = null,
 ) : Listener {
     private data class Work(val player: BungeePlayer, val cancel: () -> Unit)
     private val intents = ConcurrentHashMap<BungeeIntent, Work>()
     @Volatile private var closed = false
+    init { platform.installProfiles(profiles) }
     private fun isAccepting() = !closed && accepting()
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -83,12 +90,10 @@ internal class BungeeLoginGate(
             if (!event.isCancelled) { event.isCancelled = true; event.reason = unavailable().toBungee() }
         }, {
             if (!event.isCancelled) {
-                // Only Java uses a cookie. FG resumption must obtain a fresh exact-channel proof;
-                // its server-side choice hint is never a cookie or an authorization credential.
-                val cookie = if (rolesEnabled && source is BedrockLogin.Java)
-                    checkNotNull(roleTransfer) { "Native role cookie bridge unavailable" }.retrieve(event.connection).join() else null
-                check(isAccepting() && player.isActive && !event.isCancelled) { "Prelogin closed while retrieving role cookie" }
-                common = CommonPreLogin(player, loginName, null, source, cookie)
+                // Java retains ordinary Mojang/device-code admission. FG selection hints are
+                // server-side intent only and still require a fresh exact-channel proof.
+                check(isAccepting() && player.isActive && !event.isCancelled) { "Prelogin closed before admission" }
+                common = CommonPreLogin(player, loginName, null, source)
                 gate.onPreLogin(common)
             }
         }) {
@@ -99,6 +104,7 @@ internal class BungeeLoginGate(
                     event.reason = reason.toBungee()
                     player.disconnect(reason)
                 }
+                if (player.isActive) player.disconnect(unavailable())
                 abandon(player)
             } else {
                 val online = checkNotNull(common.result.onlineMode) { "Gate did not choose an authentication mode" }
@@ -189,6 +195,7 @@ internal class BungeeLoginGate(
                     event.reason = reason.toBungee()
                     player.disconnect(reason)
                 }
+                if (player.isActive) player.disconnect(unavailable())
                 abandon(player)
             } else player.loggedIn = true
         }
@@ -200,7 +207,7 @@ internal class BungeeLoginGate(
         try {
             check(isAccepting() && player != null && player.loggedIn)
             player.bind(event.player)
-            if (player.hasRoleProfile) enforceRoleProperties(player)
+            if (gate.requiresRoleProfile(player) || player.hasRoleProfile) enforceRoleProperties(player)
             val common = PlayerChooseInitialServerEvent(player)
             gate.onChooseInitialServer(common)
             // Null from Gate means authenticated: keep the proxy's native forced/default target.
@@ -223,7 +230,7 @@ internal class BungeeLoginGate(
             gate.onPreConnect(common)
             check(common.result.server.orElse(null) === target) { "Gate refused backend/fallback" }
             // Covers JOIN_PROXY, LOBBY_FALLBACK, /server and every plugin reason. No recursive redirect.
-            if (player.hasRoleProfile) enforceRoleProperties(player)
+            if (gate.requiresRoleProfile(player) || player.hasRoleProfile) enforceRoleProperties(player)
             tickets.prepare(player, target)
         } catch (failure: Exception) {
             event.isCancelled = true
@@ -261,25 +268,19 @@ internal class BungeeLoginGate(
     fun close() {
         if (closed) return
         closed = true
-        roleTransfer?.close()
-        intents.keys.toList().forEach { intent -> intent.finish { intents[intent]?.let { it.cancel(); abandon(it.player) } } }
+        intents.keys.toList().forEach { intent -> intent.finish { intents[intent]?.let { it.cancel(); it.player.disconnect(unavailable()); abandon(it.player) } } }
         platform.connections().forEach { player -> player.disconnect(unavailable()); abandon(player) }
     }
 
     /** FG/SR PostLogin may replace textures, or create FG's legitimate skin-only container. */
     private fun enforceRoleProperties(player: BungeePlayer) {
-        val expected = checkNotNull(player.currentRoleProfile()) { "Prepared role identity or proof is no longer current" }
-        val actual = profiles.read(player.pending)
-        check(actual.id == expected.id && actual.name == expected.name) { "Native role identity changed after Login" }
-        val managed = setOf("textures", "kyokouauth:connection-id")
-        val retained = actual.properties.filterNot { it.name in managed }
-        val retainedNames = retained.mapTo(HashSet()) { it.name }
-        val missing = expected.properties.filterNot { it.name in managed || it.name in retainedNames }
-        profiles.apply(player.pending, actual.withProperties(missing + retained + expected.properties.filter { it.name in managed }))
+        val expected = checkNotNull(gate.currentRoleProfile(player)) { "Gate role profile is no longer current" }
+        val prepared = checkNotNull(player.currentRoleProfile()) { "Prepared role identity or proof is no longer current" }
+        check(prepared.id == expected.id && prepared.name == expected.name) { "Native prepared role differs from Gate selection" }
+        player.applyRoleProfile(expected).join()
     }
 
     private fun abandon(player: BungeePlayer) {
-        roleTransfer?.cancel(player.pending)
         player.markClosed()
         tickets.revoke(player)
         gate.onDisconnect(DisconnectEvent(player))
@@ -297,8 +298,14 @@ internal class BungeeLoginGate(
             intent.timer(schedule(intentTimeoutMillis) {
                 intent.finish { cancel(); player.disconnect(unavailable()); abandon(player) }
             })
+            intent.watch(watchClosed(player) {
+                intent.finish { cancel(); player.disconnect(unavailable()); abandon(player) }
+            })
+            if (intent.isDone()) return
             submit {
                 try {
+                    if (intent.isDone()) return@submit
+                    check(isAccepting() && player.isActive) { "Admission connection closed before worker execution" }
                     task()
                     intent.finish {
                         try { apply() } catch (failure: Exception) {

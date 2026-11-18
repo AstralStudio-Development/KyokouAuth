@@ -82,7 +82,7 @@ class VelocityRoleEventTasksTest {
         fixture.tasks.close()
     }
 
-    @Test fun `deactivation completes cookie wait and discarded queue without callbacks and late work stays denied`() {
+    @Test fun `deactivation completes source wait and discarded queue without callbacks and late work stays denied`() {
         for (queued in listOf(false, true)) {
             val fixture = Fixture()
             val request = Request(fixture)

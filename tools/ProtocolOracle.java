@@ -64,7 +64,7 @@ public final class ProtocolOracle {
     private final Set<Long> chunkCoordinates = new HashSet<>();
     private boolean centerSeen;
     private boolean javaSelectorSeen;
-    private boolean markedSelectorSeen;
+    private boolean vanillaSelectorSeen;
     private int lastState;
 
     private record Input(String state, int id, String name, byte[] body) {}
@@ -122,7 +122,7 @@ public final class ProtocolOracle {
                 "ClientboundContainerClosePacket")) {
             if (!seen.contains(type)) fail("coverage", new Violation("missing " + type));
         }
-        if (!javaSelectorSeen || !markedSelectorSeen) fail("avatar-coverage", new Violation("both unmarked Java and exact-marker menus must be decoded"));
+        if (!javaSelectorSeen || !vanillaSelectorSeen) fail("selector-coverage", new Violation("both Java profile heads and vanilla role icons must be decoded"));
         if (batchOpen) fail("chunk-batch", new Violation("batch never finished"));
         if (centerSeen && !chunkCoordinates.contains(chunkKey(centerX, centerZ)))
             fail("chunk-center", new Violation("initial spawn chunk was not successfully decoded"));
@@ -244,14 +244,21 @@ public final class ProtocolOracle {
             for (int slot=0; slot<items.size(); slot++) {
                 var stack = (net.minecraft.world.item.ItemStack) items.get(slot);
                 if (slot != 12 && slot != 14) { require(stack.isEmpty(), "selector unexpected occupied slot " + slot); continue; }
-                require(stack.getItem() == net.minecraft.world.item.Items.PLAYER_HEAD && stack.getCount() == 1, "selector item is not official player head");
-                require(stack.has(net.minecraft.core.component.DataComponents.PROFILE), "selector profile missing");
-                Object resolvedProfile = stack.get(net.minecraft.core.component.DataComponents.PROFILE);
-                Object gameProfile = selectorAccessor(resolvedProfile, "partialProfile", "gameProfile");
-                require((slot == 12 ? new UUID(0, 42) : TEST_UUID).equals(selectorAccessor(gameProfile, "id", "getId")),
-                        "selector role UUID differs from public fixture");
-                require((slot == 12 ? "MicrosoftName" : "OraclePlayer").equals(selectorAccessor(gameProfile, "name", "getName")),
-                        "selector role profile name differs from public fixture");
+                var expectedItem = window == 5 ? net.minecraft.world.item.Items.PLAYER_HEAD :
+                        slot == 12 ? net.minecraft.world.item.Items.NAME_TAG : net.minecraft.world.item.Items.DIAMOND;
+                require(stack.getItem() == expectedItem && stack.getCount() == 1, "selector item differs from official vanilla icon");
+                if (window == 5) {
+                    require(stack.has(net.minecraft.core.component.DataComponents.PROFILE), "Java selector profile missing");
+                    Object resolvedProfile = stack.get(net.minecraft.core.component.DataComponents.PROFILE);
+                    Object gameProfile = selectorAccessor(resolvedProfile, "partialProfile", "gameProfile");
+                    require((slot == 12 ? new UUID(0, 42) : TEST_UUID).equals(selectorAccessor(gameProfile, "id", "getId")),
+                            "selector role UUID differs from public fixture");
+                    require((slot == 12 ? "MicrosoftName" : "OraclePlayer").equals(selectorAccessor(gameProfile, "name", "getName")),
+                            "selector role profile name differs from public fixture");
+                } else {
+                    require(!stack.has(net.minecraft.core.component.DataComponents.PROFILE), "ordinary vanilla role icon must not carry a skin profile");
+                }
+                require(!stack.has(net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA), "selector must not carry private model data");
                 require(stack.has(net.minecraft.core.component.DataComponents.LORE), "selector lore missing");
                 Component name = stack.get(net.minecraft.core.component.DataComponents.CUSTOM_NAME);
                 String category = slot == 12 ? "微软角色" : "正版角色";
@@ -271,14 +278,8 @@ public final class ProtocolOracle {
                 List<?> lines = (List<?>) selectorAccessor(lore, "lines", "lines");
                 require(lines.size() == 1 && ((Component) lines.get(0)).getString().equals("点击进入服务器"), "selector lore differs");
                 checkItemRoot((Component) lines.get(0), 0xAAAAAA, "lore");
-                var marker = Optional.ofNullable(stack.getComponentsPatch().get(stack.getPrototype(), net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA));
-                if (window == 5) require(marker == null || marker.isEmpty(), "unmarked Java selector must not carry CMD");
-                else {
-                    require(marker != null && marker.isPresent(), "opt-in avatar marker missing");
-                    checkAvatarMarker(marker.get(), slot == 12 ? 0x4B5901 : 0x4B5902);
-                }
             }
-            if (window == 5) javaSelectorSeen = true; else markedSelectorSeen = true;
+            if (window == 5) javaSelectorSeen = true; else vanillaSelectorSeen = true;
         } else if (packet instanceof ClientboundContainerClosePacket) {
             int window = ((Number) selectorAccessor(packet, "getContainerId", "containerId")).intValue();
             require(window == 5 || window == 6, "selector close window differs");
@@ -293,22 +294,6 @@ public final class ProtocolOracle {
                 encoded.getAsJsonObject().get("italic").isJsonPrimitive() &&
                 encoded.getAsJsonObject().get("italic").getAsJsonPrimitive().isBoolean() &&
                 !encoded.getAsJsonObject().get("italic").getAsBoolean(), "selector " + field + " must explicitly disable italic");
-    }
-
-    private static void checkAvatarMarker(Object cmd, int expected) {
-        // Fixed official families: 767/768 record value(int), then four-list CustomModelData from 769 onward.
-        Object first = selectorAccessor(cmd, "value", "floats");
-        if (first instanceof Integer value) require(value == expected, "legacy avatar CMD sentinel differs");
-        else {
-            require(first instanceof List<?>, "unknown official CMD shape");
-            List<?> floats = (List<?>) first;
-            require(floats.size() == 1 && floats.get(0) instanceof Float value && Float.isFinite(value) &&
-                    Float.compare(value, (float) expected) == 0, "avatar CMD float must be exactly one private finite sentinel");
-            for (String field : List.of("flags", "strings", "colors")) {
-                Object values = selectorAccessor(cmd, field, field);
-                require(values instanceof List<?> && ((List<?>) values).isEmpty(), "avatar CMD auxiliary list must be empty");
-            }
-        }
     }
 
     /** Fixed official getter/record families only; this does not parse or fabricate any packet bytes. */
@@ -467,6 +452,7 @@ public final class ProtocolOracle {
 
     private void negativeControls() {
         nativeItemPositiveControl();
+        nativeVanillaItemPositiveControls();
         var holder = access.lookupOrThrow(Registries.DIMENSION_TYPE).get(OVERWORLD).orElseThrow();
         var spawn = new CommonPlayerSpawnInfo(holder, Level.OVERWORLD, 0L, GameType.ADVENTURE,
                 Optional.empty(), false, false, Optional.empty(), 0, 63);
@@ -528,6 +514,33 @@ public final class ProtocolOracle {
                     "OraclePlayer".equals(selectorAccessor(gameProfile, "name", "getName")), "native profile control lost UUID/name");
             log("PASS native-player-head-profile-control defaults=VANILLA identity=UUID_AND_NAME codec=ROUND_TRIP");
         } finally { buffer.release(); }
+    }
+
+    private void nativeVanillaItemPositiveControls() {
+        for (var item : List.of(net.minecraft.world.item.Items.NAME_TAG, net.minecraft.world.item.Items.DIAMOND)) {
+            var stack = new net.minecraft.world.item.ItemStack(item);
+            require(Integer.valueOf(64).equals(stack.get(net.minecraft.core.component.DataComponents.MAX_STACK_SIZE)),
+                    "native vanilla icon default components were not initialized");
+            stack.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME,
+                    Component.literal("Native vanilla icon control").withStyle(style -> style.withColor(0xFFFFFF).withItalic(false)));
+            stack.set(net.minecraft.core.component.DataComponents.LORE, new net.minecraft.world.item.component.ItemLore(
+                    List.of(Component.literal("Native lore control").withStyle(style -> style.withColor(0xAAAAAA).withItalic(false)))));
+            RegistryFriendlyByteBuf buffer = new RegistryFriendlyByteBuf(Unpooled.buffer(), access);
+            try {
+                net.minecraft.world.item.ItemStack.OPTIONAL_STREAM_CODEC.encode(buffer, stack);
+                var decoded = net.minecraft.world.item.ItemStack.OPTIONAL_STREAM_CODEC.decode(buffer);
+                require(!buffer.isReadable() && decoded.getItem() == item && decoded.getCount() == 1,
+                        "native vanilla icon stream codec control failed");
+                require(!decoded.has(net.minecraft.core.component.DataComponents.PROFILE) &&
+                        !decoded.has(net.minecraft.core.component.DataComponents.CUSTOM_MODEL_DATA), "native vanilla icon acquired profile/model data");
+                checkItemRoot(Objects.requireNonNull(decoded.get(net.minecraft.core.component.DataComponents.CUSTOM_NAME)), 0xFFFFFF, "native name");
+                Object lore = Objects.requireNonNull(decoded.get(net.minecraft.core.component.DataComponents.LORE));
+                List<?> lines = (List<?>) selectorAccessor(lore, "lines", "lines");
+                require(lines.size() == 1, "native vanilla icon lore control lost its line");
+                checkItemRoot((Component) lines.get(0), 0xAAAAAA, "native lore");
+                log("PASS native-vanilla-icon-control item=" + BuiltInRegistries.ITEM.getKey(item) + " defaults=VANILLA profile=ABSENT codec=ROUND_TRIP");
+            } finally { buffer.release(); }
+        }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

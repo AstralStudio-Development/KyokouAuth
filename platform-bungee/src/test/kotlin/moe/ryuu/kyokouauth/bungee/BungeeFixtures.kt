@@ -45,9 +45,7 @@ internal class PendingFixture(var name: String = "OracleLocal", val protocol: In
     val messages = mutableListOf<BaseComponent>()
     val connects = mutableListOf<ServerInfo>()
     val setterOrder = mutableListOf<String>()
-    var cookie = java.util.concurrent.CompletableFuture.completedFuture<ByteArray?>(null)
     var cookieRequests = 0
-    var beforeCookie: (() -> Unit)? = null
     val storedCookies = mutableListOf<Pair<String, ByteArray>>()
     val transfers = mutableListOf<Pair<String, Int>>()
     var profile = GameProfile(checkNotNull(uuid), name, listOf(GameProfile.Property("textures", "preserved", "signed")))
@@ -60,7 +58,7 @@ internal class PendingFixture(var name: String = "OracleLocal", val protocol: In
         "isOnlineMode" -> online
         "setOnlineMode" -> { online = args[0] as Boolean; setterOrder += "online:$online"; null }
         "isConnected" -> connected
-        "retrieveCookie" -> { check(args[0] == "kyokouauth:role_transfer"); cookieRequests++; beforeCookie?.invoke(); cookie }
+        "retrieveCookie" -> { cookieRequests++; error("Java admission must not request cookies") }
         "disconnect" -> { connected = false; disconnects++; null }
         else -> error("Unexpected PendingConnection.$method")
     } }
@@ -97,7 +95,7 @@ internal class TestProfiles : ProfileAccess {
     override fun read(pending: PendingConnection): GameProfile = checkNotNull(values[pending])
     override fun apply(pending: PendingConnection, profile: GameProfile) {
         check(!failApply) { "injected profile failure" }
-        check(profile.id == pending.uniqueId)
+        check(profile.id == pending.uniqueId && profile.name == pending.name)
         values[pending] = profile
     }
 }
@@ -172,6 +170,7 @@ internal class TestServices : LoginGate.Services {
     var decision: AuthCoordinator.Decision = AuthCoordinator.Decision.Verify(stableUuid,
         AuthCoordinator.Reason.SESSION_EXPIRED, false, null)
     var premiumBindings = 0
+    var authorizePremium = false
     var roles: moe.ryuu.kyokouauth.proxy.RoleOptions? = null
     var roleCalls = 0
     var authorize = false
@@ -183,7 +182,9 @@ internal class TestServices : LoginGate.Services {
     override fun decide(name: GameName, address: String): AuthCoordinator.Decision = decision
     override fun bindPremium(uuid: UUID, name: GameName): AuthCoordinator.ClaimOutcome {
         premiumBindings++
-        return AuthCoordinator.ClaimOutcome.Refused(AuthCoordinator.RejectReason.INTERNAL_ERROR, "test refusal")
+        return if (authorizePremium) AuthCoordinator.ClaimOutcome.Bound(moe.ryuu.kyokouauth.core.storage.BoundIdentity.of(
+            moe.ryuu.kyokouauth.core.identity.Identity.Premium(name, uuid), 1L))
+        else AuthCoordinator.ClaimOutcome.Refused(AuthCoordinator.RejectReason.INTERNAL_ERROR, "test refusal")
     }
     override fun bindMicrosoft(name: GameName, xuid: Xuid, gamertag: String): AuthCoordinator.ClaimOutcome =
         AuthCoordinator.ClaimOutcome.Bound(moe.ryuu.kyokouauth.core.storage.BoundIdentity.of(

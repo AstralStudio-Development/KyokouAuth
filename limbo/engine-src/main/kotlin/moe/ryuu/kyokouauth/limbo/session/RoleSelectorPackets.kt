@@ -1,5 +1,6 @@
 package moe.ryuu.kyokouauth.limbo.session
 
+import moe.ryuu.kyokouauth.limbo.RoleSelectorIcon
 import moe.ryuu.kyokouauth.limbo.RoleSelectorItem
 import moe.ryuu.kyokouauth.limbo.RoleSelectorMenu
 import moe.ryuu.kyokouauth.limbo.protocol.TextComponent
@@ -30,9 +31,6 @@ internal object RoleSelectorPackets {
     private val profileComponent = component("PROFILE")
     private val nameComponent = component("CUSTOM_NAME")
     private val loreComponent = component("LORE")
-    private val modelComponent = component("CUSTOM_MODEL_DATA")
-    private val modelConstructor = if (protocol >= 769) lookup.constructor(ROOT + "data.game.item.component.CustomModelData",
-        Any::class.java, List::class.java, List::class.java, List::class.java, List::class.java) else null
     private val resolvable = if (protocol >= 773) lookup.constructor(ROOT + "data.game.entity.player.ResolvableProfile",
         Any::class.java, GameProfile::class.java) else null
     private val fixture = Properties().apply {
@@ -45,7 +43,11 @@ internal object RoleSelectorPackets {
         }
         require(getProperty("generic-9x3-id").toInt() == ContainerType.GENERIC_9X3.ordinal) { "Upstream menu registry differs from official fixture" }
     }
-    private val playerHeadId = fixture.getProperty("player-head-id").toInt().also { require(it > 0) }
+    private val itemIds = mapOf(
+        RoleSelectorIcon.PLAYER_HEAD to fixture.getProperty("player-head-id").toInt(),
+        RoleSelectorIcon.NAME_TAG to fixture.getProperty("name-tag-id").toInt(),
+        RoleSelectorIcon.DIAMOND to fixture.getProperty("diamond-id").toInt(),
+    ).also { ids -> require(ids.values.all { it > 0 } && ids.values.toSet().size == RoleSelectorIcon.entries.size) }
     internal val lookupCounts get() = lookup.counts()
 
     /** Eager at engine startup, including the legacy component owner and modern profile wrapper signatures. */
@@ -58,25 +60,22 @@ internal object RoleSelectorPackets {
     fun content(window: Int, state: Int, menu: RoleSelectorMenu): ClientboundContainerSetContentPacket {
         // The menu is 27 slots; SetContent also includes all 36 player inventory slots. All are server-owned.
         val items = arrayOfNulls<ItemStack>(TOTAL_SLOTS)
-        items[MICROSOFT_SLOT] = head(menu.microsoft)
-        items[PREMIUM_SLOT] = head(menu.premium)
+        items[MICROSOFT_SLOT] = item(menu.microsoft)
+        items[PREMIUM_SLOT] = item(menu.premium)
         return ClientboundContainerSetContentPacket(window, state, items, null)
     }
 
-    private fun head(item: RoleSelectorItem): ItemStack {
-        val profile = GameProfile(item.profileUuid, item.profileName).apply {
-            setProperties(item.textureValue?.let { listOf(GameProfile.Property("textures", it, item.textureSignature)) } ?: emptyList())
-        }
+    private fun item(item: RoleSelectorItem): ItemStack {
         val patch = DataComponents(HashMap())
-        patch.put(profileComponent, resolvable?.newInstance(profile) ?: profile)
+        if (item.icon == RoleSelectorIcon.PLAYER_HEAD) {
+            val profile = GameProfile(item.profileUuid, item.profileName).apply {
+                setProperties(item.textureValue?.let { listOf(GameProfile.Property("textures", it, item.textureSignature)) } ?: emptyList())
+            }
+            patch.put(profileComponent, resolvable?.newInstance(profile) ?: profile)
+        }
         patch.put(nameComponent, itemText(item.name, "white").toLibrary())
         patch.put(loreComponent, item.lore.map { itemText(it, "gray").toLibrary() })
-        item.avatarIcon?.let { icon ->
-            val data: Any = if (protocol <= 768) icon.modelData else requireNotNull(modelConstructor).newInstance(
-                listOf(icon.modelData.toFloat()), emptyList<Boolean>(), emptyList<String>(), emptyList<Int>())
-            patch.put(modelComponent, data)
-        }
-        return ItemStack(playerHeadId, 1, patch)
+        return ItemStack(itemIds.getValue(item.icon), 1, patch)
     }
 
     /** Only item roots override vanilla defaults; explicit template styles remain intact in the child. */

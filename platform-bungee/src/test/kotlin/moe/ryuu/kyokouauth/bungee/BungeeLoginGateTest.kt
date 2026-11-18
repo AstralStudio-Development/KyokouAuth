@@ -25,20 +25,24 @@ class BungeeLoginGateTest {
         rolesEnabled: Boolean = false,
     ) {
         val proxy = TestProxy()
-        val transfer = if (rolesEnabled) BungeeRoleTransfer() else null
-        val platform = BungeePlatform(proxy, transfer)
+        val platform = BungeePlatform(proxy)
         val fixtures = java.util.IdentityHashMap<net.md_5.bungee.api.connection.PendingConnection, PendingFixture>()
         val services = TestServices()
-        val profiles = TestProfiles()
+        val profiles = TestProfiles().also(platform::installProfiles)
+        val closeWatchers = java.util.IdentityHashMap<BungeePlayer, () -> Unit>()
         val authority = PrivateTicketAuthority()
         val tickets = BungeeTickets(platform, profiles, authority)
         val log = ProxyLog { _, _, _ -> }
         val config = ProxyConfig(mapOf("post-login.server" to "backend", "bedrock.enabled" to bedrockEnabled.toString(),
-            "role-selection.enabled" to rolesEnabled.toString(), "role-selection.reconnect-host" to "proxy.invalid"), File("build/bungee-tests"))
+            "role-selection.enabled" to rolesEnabled.toString()), File("build/bungee-tests"))
         val gate = LoginGate(platform, config, MessageCatalogue("en_US", File("build/bungee-tests/messages")), services, log)
         var accepting = true
         val adapter = BungeeLoginGate(object : Plugin(proxy, net.md_5.bungee.api.plugin.PluginDescription()) {}, platform, profiles, tickets, gate, log,
-            services::submit, services::schedule, { accepting }, bedrock = bedrock, rolesEnabled = rolesEnabled, roleTransfer = transfer,
+            services::submit, services::schedule, { accepting }, bedrock = bedrock, rolesEnabled = rolesEnabled,
+            watchClosed = { player, action ->
+                closeWatchers[player] = action
+                AutoCloseable { if (closeWatchers[player] === action) closeWatchers.remove(player) }
+            },
             prepareRole = { player, profile ->
                 val fixture = checkNotNull(fixtures[player.pending])
                 fixture.pending.uniqueId = profile.id
@@ -48,6 +52,17 @@ class BungeeLoginGateTest {
             })
         val backend = proxy.constructServerInfo("backend", InetSocketAddress("127.0.0.1", 29001), "test", false)
         init {
+            if (rolesEnabled && bedrockEnabled) {
+                val local = moe.ryuu.kyokouauth.core.identity.Identity.Microsoft(
+                    moe.ryuu.kyokouauth.core.identity.GameName.parseOrThrow("OracleLocal"),
+                    moe.ryuu.kyokouauth.core.identity.Xuid(2535412345678901L), "Controlled")
+                val premium = moe.ryuu.kyokouauth.core.identity.Identity.Premium(
+                    moe.ryuu.kyokouauth.core.identity.GameName.parseOrThrow("PremiumRole"),
+                    UUID.fromString("f4688ebd-ccf7-4dea-922e-b18f68014f71"))
+                services.roles = moe.ryuu.kyokouauth.proxy.RoleOptions(listOf(
+                    moe.ryuu.kyokouauth.proxy.RoleOption(local, moe.ryuu.kyokouauth.core.storage.BoundIdentity.of(local, 1L), null),
+                    moe.ryuu.kyokouauth.proxy.RoleOption(premium, null, null)), premium.uuid)
+            }
             proxy.registered["backend"] = backend
             (767..777).forEach { platform.registerEngine(it, InetSocketAddress("127.0.0.1", 30000 + it)) }
             gate.activate()
@@ -71,72 +86,84 @@ class BungeeLoginGateTest {
         }
     }
 
-    @Test fun `enabled Java roles retrieve cookie under intent then construct a real isolated chooser identity`() {
-        val h = Harness(rolesEnabled = true)
+    @Test fun `external cancellation during queued prelogin closes physical connection and completes once`() {
+        val h = Harness()
         val fixture = PendingFixture()
-        val originalId = fixture.uuid
-        val originalName = fixture.name
-        assertFalse(h.pre(fixture).isCancelled)
-        val player = assertNotNull(h.platform.find(fixture.pending))
-        assertEquals(1, fixture.cookieRequests)
-        assertTrue(fixture.name.startsWith("KA") && fixture.name.length == 16)
-        assertNotEquals(originalName, fixture.name)
-        assertNotEquals(originalId, fixture.uuid)
-        assertEquals(fixture.uuid, h.profiles.read(fixture.pending).id)
-        assertEquals(fixture.name, h.profiles.read(fixture.pending).name)
-        assertNotNull(player.currentRoleProfile())
-        assertTrue(h.gate.requiresRoleProfile(player))
-        assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == "textures" })
-        h.adapter.close()
-    }
-
-    @Test fun `invalid Java role cookie never falls back to a fresh ordinary authentication decision`() {
-        val h = Harness(rolesEnabled = true)
-        val fixture = PendingFixture()
-        val original = fixture.uuid
-        fixture.cookie = java.util.concurrent.CompletableFuture.completedFuture(ByteArray(32))
-        assertTrue(h.pre(fixture).isCancelled)
-        assertEquals(1, fixture.cookieRequests)
-        assertEquals(original, fixture.uuid)
-        assertEquals("OracleLocal", fixture.name)
-        assertTrue(fixture.setterOrder.isEmpty())
-        assertNull(h.platform.find(fixture.pending))
-        h.adapter.close()
-    }
-
-    @Test fun `timeout during native cookie request cancels source and completes intent once before late work`() {
-        val h = Harness(rolesEnabled = true)
-        val fixture = PendingFixture()
-        fixture.cookie = java.util.concurrent.CompletableFuture()
-        fixture.beforeCookie = { h.services.tasks.first().fire() }
         h.fixtures[fixture.pending] = fixture
         h.profiles.add(fixture)
         var callbacks = 0
         val event = PreLoginEvent(fixture.pending) { _, _ -> callbacks++ }
         h.adapter.onPreLogin(event)
         event.postCall()
+        event.isCancelled = true
         h.services.drain()
         assertEquals(1, callbacks)
-        assertTrue(event.isCancelled)
-        assertTrue(fixture.cookie.isCancelled)
         assertFalse(fixture.connected)
         assertTrue(fixture.setterOrder.isEmpty())
-        fixture.cookie.complete(byteArrayOf(1))
+        assertNull(h.platform.find(fixture.pending))
+        h.adapter.close()
+        assertEquals(1, callbacks)
+    }
+
+    @Test fun `enabling Bedrock roles leaves Java on ordinary Microsoft admission without cookie or chooser`() {
+        val h = Harness(rolesEnabled = true)
+        val fixture = PendingFixture()
+        assertFalse(h.pre(fixture).isCancelled)
+        val player = assertNotNull(h.platform.find(fixture.pending))
+        assertEquals(0, fixture.cookieRequests)
+        assertEquals("OracleLocal", fixture.name)
+        assertEquals(h.services.stableUuid, fixture.uuid)
+        assertEquals("preserved", h.profiles.read(fixture.pending).properties.single { it.name == "textures" }.value)
+        assertNull(player.currentRoleProfile())
+        assertFalse(h.gate.requiresRoleProfile(player))
+        h.adapter.close()
+    }
+
+    @Test fun `Java role flag retains Mojang handshake mode without asking for a role cookie`() {
+        val h = Harness(rolesEnabled = true)
+        val fixture = PendingFixture()
+        h.services.decision = AuthCoordinator.Decision.MojangSession(assertNotNull(fixture.uuid))
+        assertFalse(h.pre(fixture).isCancelled)
+        assertEquals(0, fixture.cookieRequests)
+        assertTrue(fixture.online)
+        assertEquals("OracleLocal", fixture.name)
+        assertFalse(h.gate.requiresRoleProfile(assertNotNull(h.platform.find(fixture.pending))))
+        h.adapter.close()
+    }
+
+    @Test fun `exact half-login close cancels only its queued admission and never waits for cookie response`() {
+        val h = Harness(rolesEnabled = true)
+        val fixture = PendingFixture()
+        h.fixtures[fixture.pending] = fixture
+        h.profiles.add(fixture)
+        var callbacks = 0
+        val event = PreLoginEvent(fixture.pending) { _, _ -> callbacks++ }
+        h.adapter.onPreLogin(event)
+        event.postCall()
+        val player = assertNotNull(h.platform.find(fixture.pending))
+        val closed = assertNotNull(h.closeWatchers[player])
+        fixture.connected = false
+        closed()
+        assertEquals(1, callbacks)
+        assertTrue(event.isCancelled)
+        assertTrue(h.closeWatchers.isEmpty())
+        assertTrue(fixture.setterOrder.isEmpty())
+        assertEquals(0, fixture.cookieRequests)
         h.services.drain()
         assertEquals(1, callbacks)
+        assertTrue(fixture.setterOrder.isEmpty())
         h.adapter.close()
     }
 
     @Test fun `FG roles keep native proof separate from chooser and reset replaced skins at Login PostLogin and backend boundary`() {
-        val fixture = bedrockFixture()
-        val proof = bedrockProof(fixture, Any())
+        val fixture = linkedBedrockFixture()
+        val proof = linkedBedrockProof(fixture, Any())
         val h = Harness(bedrockEnabled = true, rolesEnabled = true, bedrock = { BedrockLogin.Verified(proof) })
         assertFalse(h.pre(fixture).isCancelled)
         val player = assertNotNull(h.platform.find(fixture.pending))
         val chooser = assertNotNull(player.currentRoleProfile())
         assertEquals(proof.uniqueId, fixture.uuid, "Official Floodgate messages must resolve this Player")
-        assertNotEquals(proof.username, fixture.name, "The private Limbo alias stays isolated while the native UUID remains registered")
-        assertTrue(fixture.name.matches(Regex("KA[A-Fa-f0-9]{14}")))
+        assertEquals(proof.username, fixture.name, "A proven candidate identity is retained while chooser stays HELD")
         assertFalse(h.gate.isAuthenticated(player))
         assertEquals(0, fixture.cookieRequests)
         assertSame(proof, player.currentBedrockProof())
@@ -149,7 +176,8 @@ class BungeeLoginGateTest {
         assertFalse(login.isCancelled)
         assertEquals(mutations, fixture.setterOrder, "FINISHING must never rewrite UUID/name")
         assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == "textures" })
-        h.profiles.apply(fixture.pending, chooser.withProperties(listOf(
+        val preExtras = h.profiles.read(fixture.pending).properties.filterNot { it.name == "textures" }
+        h.profiles.apply(fixture.pending, chooser.withProperties(preExtras + listOf(
             GameProfile.Property("textures", "FG-PostLogin-skin", "old"), GameProfile.Property("post-extra", "keep", ""))))
         h.adapter.onPostLogin(PostLoginEvent(fixture.player, h.backend, null))
         assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == "textures" })
@@ -162,15 +190,16 @@ class BungeeLoginGateTest {
         h.adapter.onServerConnect(connect)
         assertFalse(connect.isCancelled)
         assertTrue(h.profiles.read(fixture.pending).properties.none { it.name == "textures" })
-        assertEquals(".Controlled", proof.username)
+        assertEquals("PremiumRole", proof.username)
         assertSame(proof, player.currentBedrockProof())
         h.adapter.close()
     }
 
     @Test fun `role identity changes during FINISHING are refused instead of repaired`() {
         for (field in listOf("uuid", "name")) {
-            val h = Harness(rolesEnabled = true)
-            val fixture = PendingFixture()
+            val fixture = linkedBedrockFixture()
+            val proof = linkedBedrockProof(fixture, Any())
+            val h = Harness(bedrockEnabled = true, rolesEnabled = true, bedrock = { BedrockLogin.Verified(proof) })
             assertFalse(h.pre(fixture).isCancelled)
             val setters = fixture.setterOrder.toList()
             if (field == "uuid") fixture.uuid = UUID.randomUUID() else fixture.name = "TamperedRole"
@@ -184,9 +213,10 @@ class BungeeLoginGateTest {
         }
     }
 
-    @Test fun `single Microsoft role transfers a native cookie and new login settles real role UUID name and explicit skin once`() {
-        val h = Harness(rolesEnabled = true)
-        val chooser = PendingFixture()
+    @Test fun `single Bedrock role settles actual profile before Player with zero Transfer and no cookie`() {
+        val fixture = bedrockFixture()
+        val proof = bedrockProof(fixture, Any())
+        val h = Harness(bedrockEnabled = true, rolesEnabled = true, bedrock = { BedrockLogin.Verified(proof) })
         val identity = moe.ryuu.kyokouauth.core.identity.Identity.Microsoft(
             moe.ryuu.kyokouauth.core.identity.GameName.parseOrThrow("OracleLocal"),
             moe.ryuu.kyokouauth.core.identity.Xuid(h.services.stableUuid.leastSignificantBits), "Controlled")
@@ -194,31 +224,60 @@ class BungeeLoginGateTest {
         val skin = GameProfile.Property("textures", "explicit-role-skin", "role-signature")
         h.services.roles = moe.ryuu.kyokouauth.proxy.RoleOptions(listOf(
             moe.ryuu.kyokouauth.proxy.RoleOption(identity, record, skin)), null)
-        h.services.authorize = true
-        h.login(chooser)
-        h.gate.onJoin(ReadyPlayer(assertNotNull(h.platform.find(chooser.player))))
-        h.services.drain()
-        h.services.tasks.last().fire()
-        h.services.drain()
-        assertEquals(listOf("proxy.invalid" to 25577), chooser.transfers)
-        val cookie = chooser.storedCookies.single().second
-        assertEquals(32, cookie.size)
-        chooser.connected = false
-        h.adapter.sweepClosed()
-        h.proxy.online.clear()
-        val resumed = PendingFixture()
-        resumed.cookie = java.util.concurrent.CompletableFuture.completedFuture(cookie)
-        h.login(resumed)
-        assertEquals(identity.uuid, resumed.uuid)
-        assertEquals("OracleLocal", resumed.name)
-        assertEquals(listOf(skin), h.profiles.read(resumed.pending).properties.filter { it.name == "textures" })
-        val backend = ServerConnectEvent(resumed.player, h.backend, ServerConnectEvent.Reason.JOIN_PROXY)
+        h.login(fixture)
+        assertEquals(identity.uuid, fixture.uuid)
+        assertEquals("OracleLocal", fixture.name)
+        assertEquals(listOf(skin), h.profiles.read(fixture.pending).properties.filter { it.name == "textures" })
+        val player = assertNotNull(h.platform.find(fixture.player))
+        assertTrue(h.gate.isAuthenticated(player))
+        val mutations = fixture.setterOrder.toList()
+        val backend = ServerConnectEvent(fixture.player, h.backend, ServerConnectEvent.Reason.JOIN_PROXY)
         h.adapter.onServerConnect(backend)
         assertFalse(backend.isCancelled)
-        val replay = PendingFixture()
-        replay.cookie = java.util.concurrent.CompletableFuture.completedFuture(cookie)
-        assertTrue(h.pre(replay).isCancelled)
+        assertEquals(mutations, fixture.setterOrder, "The admitted Player's identity must remain immutable")
+        assertEquals(0, fixture.cookieRequests)
+        assertTrue(fixture.storedCookies.isEmpty())
+        assertTrue(fixture.transfers.isEmpty())
         assertEquals(0, h.services.premiumBindings)
+        h.adapter.close()
+    }
+
+    @Test fun `same-identity Bedrock click authorizes current Player and late skin guard keeps selected profile`() {
+        val fixture = linkedBedrockFixture()
+        val proof = linkedBedrockProof(fixture, Any())
+        val h = Harness(bedrockEnabled = true, rolesEnabled = true, bedrock = { BedrockLogin.Verified(proof) })
+        h.services.authorizePremium = true
+        h.login(fixture)
+        val player = assertNotNull(h.platform.find(fixture.player))
+        assertFalse(h.gate.isAuthenticated(player))
+        val ready = ReadyPlayer(player)
+        h.gate.onJoin(ready)
+        h.services.drain()
+        val generation = assertNotNull(ready.menu).generation
+        val setters = fixture.setterOrder.toList()
+        val id = fixture.uuid
+        val name = fixture.name
+        h.gate.onRoleSelect(ready, generation, "premium")
+        h.services.drain()
+        assertTrue(h.gate.isAuthenticated(player))
+        assertTrue(fixture.connected)
+        assertEquals(id, fixture.uuid)
+        assertEquals(name, fixture.name)
+        assertEquals(setters, fixture.setterOrder)
+        assertEquals(listOf(h.backend), fixture.connects)
+        assertTrue(fixture.transfers.isEmpty())
+        assertTrue(fixture.storedCookies.isEmpty())
+        val extra = GameProfile.Property("after-selection-extra", "keep", "")
+        val expected = h.profiles.read(fixture.pending)
+        h.profiles.apply(fixture.pending, expected.withProperties(expected.properties + extra +
+            GameProfile.Property("textures", "wrong-FG-late-skin", "old")))
+        val connect = ServerConnectEvent(fixture.player, h.backend, ServerConnectEvent.Reason.PLUGIN)
+        h.adapter.onServerConnect(connect)
+        assertFalse(connect.isCancelled)
+        assertEquals(emptyList(), h.profiles.read(fixture.pending).properties.filter { it.name == "textures" })
+        assertTrue(extra in h.profiles.read(fixture.pending).properties)
+        assertEquals(setters, fixture.setterOrder)
+        assertSame(proof, player.currentBedrockProof())
         h.adapter.close()
     }
 
@@ -257,6 +316,15 @@ class BungeeLoginGateTest {
     private fun bedrockProof(fixture: PendingFixture, source: Any, current: () -> Boolean = { fixture.connected }): BedrockProof =
         BedrockProof.create(moe.ryuu.kyokouauth.core.identity.Xuid(2535412345678901L),
             UUID(0L, 2535412345678901L), fixture.name, "Controlled", ".", source, current)
+
+    private fun linkedBedrockFixture(): PendingFixture = PendingFixture("PremiumRole").also {
+        it.uuid = UUID.fromString("f4688ebd-ccf7-4dea-922e-b18f68014f71")
+        it.profile = GameProfile(checkNotNull(it.uuid), it.name, it.profile.properties)
+    }
+
+    private fun linkedBedrockProof(fixture: PendingFixture, source: Any): BedrockProof = BedrockProof.createLinked(
+        moe.ryuu.kyokouauth.core.identity.Xuid(2535412345678901L), checkNotNull(fixture.uuid), fixture.name,
+        "Controlled", source) { fixture.connected }
 
     private fun bedrockFixture(): PendingFixture = PendingFixture(".Controlled").also {
         it.uuid = UUID(0L, 2535412345678901L)
@@ -565,6 +633,9 @@ class BungeeLoginGateTest {
         var titles = 0
         var clears = 0
         var kicked = false
+        var menu: moe.ryuu.kyokouauth.limbo.RoleSelectorMenu? = null
+        override fun openRoleSelector(menu: moe.ryuu.kyokouauth.limbo.RoleSelectorMenu) { this.menu = menu }
+        override fun closeRoleSelector() { menu = null }
         override fun sendMessage(message: moe.ryuu.kyokouauth.limbo.protocol.TextComponent) = Unit
         override fun showTitle(title: moe.ryuu.kyokouauth.limbo.protocol.TextComponent,
             subtitle: moe.ryuu.kyokouauth.limbo.protocol.TextComponent?, fadeIn: Int, stay: Int, fadeOut: Int) { titles++ }

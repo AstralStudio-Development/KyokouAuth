@@ -22,8 +22,7 @@ import moe.ryuu.kyokouauth.proxy.InboundConnection as PortConnection
 import moe.ryuu.kyokouauth.proxy.ConnectionRequestBuilder as PortRequest
 
 /** One wrapper per actual Player, so shared-flow identity checks remain exact-reference checks. */
-internal class VelocityPorts(private val proxy: ProxyServer,
-                             private val roleTransfer: VelocityRoleTransfer? = null) : moe.ryuu.kyokouauth.proxy.ProxyServer {
+internal class VelocityPorts(private val proxy: ProxyServer) : moe.ryuu.kyokouauth.proxy.ProxyServer {
     private data class ServerBinding(val native: RegisteredServer, val port: PortServer)
     private val servers = ConcurrentHashMap<String, ServerBinding>()
     private val engines = ConcurrentHashMap<String, ServerBinding>()
@@ -111,9 +110,22 @@ internal class VelocityPorts(private val proxy: ProxyServer,
         override fun hasPermission(permission: String) = native.hasPermission(permission)
         override fun sendMessage(message: RichText.Parsed) { native.sendMessage(message.toAdventure()) }
         override fun disconnect(message: RichText.Parsed) { native.disconnect(message.toAdventure()) }
-        override fun transferRole(host: String, port: Int, cookie: ByteArray?) =
-            roleTransfer?.transfer(native, host, port, cookie)
-                ?: java.util.concurrent.CompletableFuture.failedFuture<Unit>(IllegalStateException("Role transfer is unavailable"))
+        override fun applyRoleProfile(profile: moe.ryuu.kyokouauth.proxy.GameProfile): java.util.concurrent.CompletableFuture<Unit> = try {
+            synchronized(native) {
+                check(players[sessionId] === this && isActive && uniqueId == profile.id && username == profile.name) {
+                    "Role properties require the exact live Player identity"
+                }
+                val managed = setOf("textures", LoginGate.CONNECTION_PROPERTY)
+                val retained = native.gameProfileProperties.filterNot { it.name in managed }
+                val selected = profile.properties.filter { it.name in managed }.map {
+                    com.velocitypowered.api.util.GameProfile.Property(it.name, it.value, it.signature)
+                }
+                // Public property setter only: a constructed Player's UUID/name are immutable here.
+                native.setGameProfileProperties(retained + selected)
+                check(isActive && uniqueId == profile.id && username == profile.name) { "Role connection closed during property application" }
+            }
+            java.util.concurrent.CompletableFuture.completedFuture(Unit)
+        } catch (failure: Exception) { java.util.concurrent.CompletableFuture.failedFuture(failure) }
         override fun createConnectionRequest(target: PortServer) = object : PortRequest {
             override fun connect() = native.createConnectionRequest(unwrap(target)).connect().thenApply { result ->
                 PortRequest.Result(when (result.status) {

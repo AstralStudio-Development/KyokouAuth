@@ -59,6 +59,7 @@ class BungeeE2ePlugin : Plugin(), Listener {
             val profiles = BungeeProfileBridge(javaClass.classLoader, bedrock = { pending ->
                 platform.find(pending)?.currentBedrockProof()
             })
+            platform.installProfiles(profiles)
             val config = ProxyConfig(mapOf("post-login.server" to "backend",
                 "bedrock.enabled" to (bedrockScenario && scenario != "bedrock-disabled").toString(), "limbo.keep-alive-seconds" to "2",
                 "limbo.keep-alive-timeout-seconds" to "10", "limbo.join-timeout-seconds" to "5",
