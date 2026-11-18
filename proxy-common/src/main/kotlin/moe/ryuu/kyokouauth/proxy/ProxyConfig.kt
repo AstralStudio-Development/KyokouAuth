@@ -86,7 +86,7 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
     val sessionFailureMaxBackoffSeconds = long("premium.session-failure-max-backoff-seconds", 120L, sessionFailureBackoffSeconds..3600L)
     val sessionHandshakeTimeoutSeconds = long("premium.session-timeout-seconds", 30L, 5L..120L)
     val locale = text("messages.locale", "zh_CN").also {
-        requireSetting(it.matches(Regex("[A-Za-z0-9_-]{1,32}")), "messages.locale", "a locale name without path separators")
+        requireSetting(VALID_LOCALE.matches(it), "messages.locale", "a locale name without path separators")
     }
     val postLoginServer = text("post-login.server", "").trim().also {
         requireSetting(it.length <= 256 && it.none(Char::isISOControl), "post-login.server", "a valid server name")
@@ -96,7 +96,7 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
         viewDistance = integer("limbo.view-distance", 2, 2..8),
         biomeId = integer("limbo.biome-id", 41, 0..Int.MAX_VALUE),
         biomeKey = text("limbo.biome", "").trim().takeIf { it.isNotEmpty() }?.also {
-            requireSetting(it.matches(Regex("[a-z0-9_.-]+:[a-z0-9_/.-]+")), "limbo.biome", "a namespaced resource key")
+            requireSetting(VALID_BIOME_KEY.matches(it), "limbo.biome", "a namespaced resource key")
         },
         spawn = LimboSettings.Spawn(
             coordinate("limbo.spawn.x", 0.5, -28_999_999.0..28_999_999.0),
@@ -138,6 +138,9 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
     private fun invalid(key: String, expected: String): Nothing = throw IllegalArgumentException("Invalid configuration '$key': expected $expected")
 
     companion object {
+        private val VALID_LOCALE = Regex("[A-Za-z0-9_-]{1,32}")
+        private val VALID_BIOME_KEY = Regex("[a-z0-9_.-]+:[a-z0-9_/.-]+")
+
         fun load(dataFolder: File): ProxyConfig {
             check(dataFolder.isDirectory || dataFolder.mkdirs()) { "Cannot create the authentication data directory" }
             val file = File(dataFolder, "config.yml")

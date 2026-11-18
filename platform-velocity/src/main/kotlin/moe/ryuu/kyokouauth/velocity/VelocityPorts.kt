@@ -28,6 +28,9 @@ internal class VelocityPorts(private val proxy: ProxyServer) : moe.ryuu.kyokouau
     private val engines = ConcurrentHashMap<String, ServerBinding>()
     private val privateNames = ConcurrentHashMap.newKeySet<String>()
     private val players = ConcurrentHashMap<UUID, VelocityPlayer>()
+    private val disconnectMethods = object : ClassValue<java.lang.reflect.Method>() {
+        override fun computeValue(type: Class<*>): java.lang.reflect.Method = type.getMethod("disconnect", Component::class.java)
+    }
 
     /** Raw targets are usable by connection requests, but absent from native /server and discovery. */
     fun registerEngine(protocol: Int, address: InetSocketAddress): PortServer {
@@ -52,7 +55,7 @@ internal class VelocityPorts(private val proxy: ProxyServer) : moe.ryuu.kyokouau
         override val isActive get() = native.isActive
         override val remoteAddress get() = native.remoteAddress
         override fun disconnect(message: RichText.Parsed) {
-            native.javaClass.getMethod("disconnect", Component::class.java).invoke(native, message.toAdventure())
+            disconnectMethods.get(native.javaClass).invoke(native, message.toAdventure())
         }
     }
 

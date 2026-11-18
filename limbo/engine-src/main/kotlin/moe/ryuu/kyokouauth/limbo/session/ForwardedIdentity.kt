@@ -12,6 +12,9 @@ import javax.crypto.spec.SecretKeySpec
 internal data class ForwardedIdentity(val profile: GameProfile, val address: String, val connectionId: UUID) {
     companion object {
         const val CONNECTION_PROPERTY = "kyokouauth:connection-id"
+        private val RAW_UUID = Regex("[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+        private val UNDASHED_GROUPS = Regex("(.{8})(.{4})(.{4})(.{4})(.{12})")
+        private val VALID_NAME = Regex("[A-Za-z0-9_]{3,16}")
 
         /** Only explicitly selected PrivateTicket mode may inspect bounded legacy forwarding fields. */
         fun redeem(hostname: String, authority: PrivateTicketAuthority, requestedName: String, protocol: Int): ForwardedIdentity {
@@ -19,8 +22,8 @@ internal data class ForwardedIdentity(val profile: GameProfile, val address: Str
             val fields = hostname.split('\u0000')
             require(fields.size == 4 && fields[0].length in 1..255 && fields[1].length in 1..64)
             val rawUuid = fields[2]
-            require(rawUuid.matches(Regex("[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")))
-            val canonical = if (rawUuid.length == 32) rawUuid.replace(Regex("(.{8})(.{4})(.{4})(.{4})(.{12})"), "$1-$2-$3-$4-$5") else rawUuid
+            require(RAW_UUID.matches(rawUuid))
+            val canonical = if (rawUuid.length == 32) rawUuid.replace(UNDASHED_GROUPS, "$1-$2-$3-$4-$5") else rawUuid
             val uuid = UUID.fromString(canonical)
             require(fields[3].length <= 24576)
             val properties = JsonParser.parseString(fields[3]).asJsonArray
@@ -46,7 +49,7 @@ internal data class ForwardedIdentity(val profile: GameProfile, val address: Str
                 require(address.length in 1..64 && address.all { it.isLetterOrDigit() || it in ":.%_-" })
                 val uuid = Wire.readUUID(input)
                 val name = Wire.readString(input)
-                require(name == requestedName && name.matches(Regex("[A-Za-z0-9_]{3,16}"))) { "Forwarded name differs" }
+                require(name == requestedName && VALID_NAME.matches(name)) { "Forwarded name differs" }
                 require(uuid != UUID(0, 0))
                 val count = Wire.readVarInt(input)
                 require(count in 1..16) { "Invalid profile property count" }

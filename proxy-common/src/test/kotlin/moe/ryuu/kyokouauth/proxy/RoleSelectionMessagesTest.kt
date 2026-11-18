@@ -13,6 +13,35 @@ class RoleSelectionMessagesTest {
     @TempDir lateinit var directory: Path
 
     @Test
+    fun `bundled translations keep matching keys and runtime placeholders`() {
+        fun bundle(locale: String) = checkNotNull(javaClass.getResourceAsStream("/messages/$locale.yml"))
+            .use(moe.ryuu.kyokouauth.core.config.YamlDocument::load)
+        val english = bundle("en_US")
+        val chinese = bundle("zh_CN")
+        assertEquals(english.keys, chinese.keys)
+        val tokens = Regex("<(reason|name|url|code|minutes|from|to|dialect|session|locale|verifying|budget|cached|uuid|kind|subject|gamertag|address|owner)>")
+        for (key in english.keys.filterNot { it.startsWith("command.usage-") }) {
+            fun placeholders(value: String) = tokens.findAll(value).map { it.groupValues[1] }.toSet()
+            assertEquals(placeholders(english.getValue(key)), placeholders(chinese.getValue(key)), key)
+        }
+    }
+
+    @Test
+    fun `verification prompts retain usable links codes and expiration in both languages`() {
+        val messages = MessageCatalogue("zh_CN", directory.toFile()).also { it.load() }
+        val url = "https://example.invalid/verify?otc=TEST123"
+        for (locale in listOf("zh_CN", "en_US")) {
+            val prompt = messages.parsed("verification.prompt", locale,
+                "url" to url, "code" to "TEST123", "minutes" to "7")
+            assertTrue(prompt.spans.any { it.clickUrl == url }, locale)
+            assertTrue(prompt.plainText.contains("TEST123"), locale)
+            assertTrue(prompt.plainText.contains("7"), locale)
+            assertFalse(prompt.plainText.contains('<'), locale)
+            assertFalse(prompt.plainText.contains('>'), locale)
+        }
+    }
+
+    @Test
     fun `selector uses brand labels neutral names and a short action instead of storage jargon`() {
         val messages = MessageCatalogue("zh_CN", directory.toFile()).also { it.load() }
         assertEquals("请选择角色", messages.plain("role-selection.title"))

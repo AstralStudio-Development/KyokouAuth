@@ -164,8 +164,7 @@ class LoginGate constructor(
     }
 
     /** When the budget-exhaustion warning was last written, so it cannot become the flood. */
-    @Volatile
-    private var lastThrottleWarning: Long = 0L
+    private val lastThrottleWarning = java.util.concurrent.atomic.AtomicLong(0L)
 
     // --- who may enter ---------------------------------------------------------------------
 
@@ -559,8 +558,8 @@ class LoginGate constructor(
                 is AuthCoordinator.Decision.Reject -> error("Rejected decision reached login")
             }
             check(ready && player.isActive) { "Connection closed during login" }
+            if (pending.roles && pending.selected != null) admitSelectedRole(connection, pending.selected)
             synchronized(roleAdmissionLock) {
-                if (pending.roles && pending.selected != null) admitSelectedRole(connection, pending.selected)
                 check(connections.putIfAbsent(player.sessionId, connection) == null) { "Duplicate connection session id" }
             }
             if (connection.access == Access.HELD) {
@@ -596,7 +595,6 @@ class LoginGate constructor(
         check(connection.player.uniqueId == selected.identity.uuid && connection.player.username == selected.identity.name.value)
         val latest = revalidateRole(authorization.choice, checkNotNull(state.bedrock))
         check(latest.existing == selected.existing && latest.skin == selected.skin) { "Role record or properties changed" }
-        check(!roleOccupied(selected.identity.uuid, selected.identity.name.value, connection.player.sessionId)) { "Role is already online" }
         if (selected.identity is Identity.Premium) {
             // A fresh current XUID -> J relationship is its own proof, not a forged MojangSession.
             val outcome = services.bindPremium(selected.identity.uuid, selected.identity.name)
@@ -607,21 +605,52 @@ class LoginGate constructor(
         }
         val finalRole = revalidateRole(authorization.choice, checkNotNull(state.bedrock))
         check(finalRole.skin == selected.skin) { "Role properties changed" }
-        check(ready && connection.player.isActive && state.connection.isActive && state.bedrock.isCurrent() &&
-            (authorization.source != RoleAuthorizationSource.CURRENT_SELECTION ||
-                connection.selection?.let { clock() < it.deadline && !it.finished } == true)) { "Role login is stale" }
-        check(!roleOccupied(selected.identity.uuid, selected.identity.name.value, connection.player.sessionId)) { "Role is already online" }
-        connection.privateSelectedAuthorization = authorization.copy(role = finalRole)
-        connection.access = Access.AUTHENTICATED
+        synchronized(connection) {
+            check(ready && connection.player.isActive && state.connection.isActive && state.bedrock.isCurrent() &&
+                (authorization.source != RoleAuthorizationSource.CURRENT_SELECTION ||
+                    connection.selection?.let { clock() < it.deadline && !it.finished } == true)) { "Role login is stale" }
+            synchronized(roleAdmissionLock) {
+                val expected = RoleReference(finalRole.reference.kind, finalRole.identity.uuid, finalRole.identity.name.value)
+                check(roleReservations[connection.player.sessionId] == expected) { "Role reservation changed" }
+                check(!roleOccupiedLocked(finalRole.identity.uuid, finalRole.identity.name.value, connection.player.sessionId)) {
+                    "Role is already online"
+                }
+                connection.privateSelectedAuthorization = authorization.copy(role = finalRole)
+                connection.access = Access.AUTHENTICATED
+            }
+        }
     }
 
     private fun roleOccupied(uuid: UUID, name: String, session: UUID): Boolean = synchronized(roleAdmissionLock) {
+        roleOccupiedLocked(uuid, name, session)
+    }
+
+    private fun roleOccupiedLocked(uuid: UUID, name: String, session: UUID): Boolean {
         fun matches(otherUuid: UUID, otherName: String) = otherUuid == uuid || otherName.equals(name, ignoreCase = true)
-        server.allPlayers.any { it.isActive && it.sessionId != session && matches(it.uniqueId, it.username) } ||
+        return server.allPlayers.any { it.isActive && it.sessionId != session && matches(it.uniqueId, it.username) } ||
             connections.values.any { it.player.sessionId != session && current(it) && it.access != Access.CLOSED &&
                 matches(it.player.uniqueId, it.player.username) } ||
             roleReservations.any { (owner, role) -> owner != session && matches(role.uuid, role.name) }
     }
+
+
+        private fun reserveRole(connection: Connection, role: RoleOption): Boolean = synchronized(roleAdmissionLock) {
+            val session = connection.player.sessionId
+            if (roleOccupiedLocked(role.identity.uuid, role.identity.name.value, session)) return@synchronized false
+            roleReservations[session] = RoleReference(role.reference.kind, role.identity.uuid, role.identity.name.value)
+            true
+        }
+
+        private fun restoreRoleReservation(connection: Connection) = synchronized(roleAdmissionLock) {
+            val role = connection.pending.role
+            if (role == null) {
+                roleReservations.remove(connection.player.sessionId)
+            } else {
+                roleReservations[connection.player.sessionId] = RoleReference(
+                    role.reference.kind, role.identity.uuid, role.identity.name.value,
+                )
+            }
+        }
 
     private fun releaseRoleReservation(session: UUID) = synchronized(roleAdmissionLock) { roleReservations.remove(session); Unit }
 
@@ -955,14 +984,13 @@ class LoginGate constructor(
                         val currentRole = latest.roles.singleOrNull { it.reference == chosen.reference && it.existing == chosen.existing }
                         if (snapshot.linkedJavaUuid != latest.linkedJavaUuid || currentRole == null) {
                             // A stale menu must not silently reinterpret a renamed option or revoked J.
+                            restoreRoleReservation(connection)
                             if (latest.roles.size == 1) roleFailure(connection, "role-selection.retry")
                             else presentRoles(connection, selection, latest)
                             return@submit
                         }
                         connection.pending.bedrock?.let { check(it.linkedJavaUuid == latest.linkedJavaUuid) }
-                        check(!roleOccupied(currentRole.identity.uuid, currentRole.identity.name.value, connection.player.sessionId)) {
-                            "Role is already online or reserved"
-                        }
+                        check(reserveRole(connection, currentRole)) { "Role is already online or reserved" }
                         val choice = BedrockRoleChoice(selection.xuid, selection.gamertag, currentRole.reference,
                             latest.linkedJavaUuid, connection.player.sessionId)
                         if (connection.player.uniqueId == currentRole.identity.uuid &&
@@ -993,30 +1021,37 @@ class LoginGate constructor(
         }
     }
 
-    /** Native adapters may only replace managed properties of an already exact matching profile. */
     private fun authorizeInPlace(connection: Connection, selection: RoleSelection, choice: BedrockRoleChoice, role: RoleOption) {
         val authorization = SelectedRoleAuthorization(choice, role, connection.player.sessionId, RoleAuthorizationSource.CURRENT_SELECTION)
         val profile = roleProfile(GameProfile(connection.player.uniqueId, connection.player.username, emptyList()), connection.pending, role)
         connection.applyingRoleProfile = role
         connection.player.applyRoleProfile(profile).whenComplete { _, failure ->
-            synchronized(connection) {
-                if (!selectionActive(connection, selection)) return@whenComplete
-                if (failure != null) { roleFailure(connection, "role-selection.retry"); return@whenComplete }
-                try {
-                    services.submit {
+            if (failure != null) {
+                synchronized(connection) { if (selectionActive(connection, selection)) roleFailure(connection, "role-selection.retry") }
+                return@whenComplete
+            }
+            try {
+                services.submit {
+                    try {
+                        admitSelectedRole(connection, authorization)
                         synchronized(connection) {
-                            if (!selectionActive(connection, selection)) return@submit
-                            try {
-                                synchronized(roleAdmissionLock) { admitSelectedRole(connection, authorization) }
-                                selection.finished = true
-                                selection.menuVisible = false
-                                selection.timeout?.cancel(false)
-                                selection.player.closeRoleSelector()
-                                release(connection)
-                            } catch (_: Exception) { roleFailure(connection, "role-selection.retry") }
+                            if (!current(connection) || connection.selection !== selection || connection.access != Access.AUTHENTICATED) return@synchronized
+                            selection.finished = true
+                            selection.menuVisible = false
+                            selection.timeout?.cancel(false)
+                            selection.player.closeRoleSelector()
+                            release(connection)
+                        }
+                    } catch (_: Exception) {
+                        synchronized(connection) {
+                            if (current(connection) && connection.access == Access.HELD && connection.selection === selection) {
+                                roleFailure(connection, "role-selection.retry")
+                            }
                         }
                     }
-                } catch (_: Exception) { roleFailure(connection, "role-selection.retry") }
+                }
+            } catch (_: Exception) {
+                synchronized(connection) { if (selectionActive(connection, selection)) roleFailure(connection, "role-selection.retry") }
             }
         }
     }
@@ -1153,12 +1188,13 @@ class LoginGate constructor(
      * The session binding still records the exact address; this coarser key exists only to bound
      * bursts.
      */
+    @OptIn(ExperimentalStdlibApi::class)
     private fun limitKey(address: java.net.InetAddress?): String {
         if (address == null) return "unknown"
 
         val bytes = address.address
         if (bytes.size == 16) {
-            return bytes.copyOfRange(0, 8).joinToString("") { "%02x".format(it) } + "::/64"
+            return bytes.toHexString(0, 8) + "::/64"
         }
         return address.hostAddress
     }
@@ -1227,9 +1263,9 @@ class LoginGate constructor(
      */
     private fun warnThrottled(name: GameName, detail: String) {
         val now = clock()
-        if (now - lastThrottleWarning < THROTTLE_WARNING_MILLIS) return
+        val previous = lastThrottleWarning.get()
+        if (now - previous < THROTTLE_WARNING_MILLIS || !lastThrottleWarning.compareAndSet(previous, now)) return
 
-        lastThrottleWarning = now
         logger.warn(
             "Mojang lookups are being withheld, so {} was turned away and unknown names will be until the window resets: {}",
             name,
@@ -1268,7 +1304,7 @@ class LoginGate constructor(
                 auth.roleOptions(xuid, gamertag, fallbackBedrockName)
         }
 
-        /** The name the limbo is registered under. Visible in `/server` and in the proxy's lists. */
+        /** Internal server name prefix for private Limbo endpoints; never registered in public `/server` lists. */
         const val LIMBO_SERVER_NAME = "kyokouauth-limbo"
 
         const val CONNECTION_PROPERTY = "kyokouauth:connection-id"

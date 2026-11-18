@@ -25,7 +25,7 @@ internal class MojangDirectorySources(
     private val pauses = arrayOfNulls<Pause>(sources.size)
 
     override fun fetch(name: String, permit: () -> Boolean): Http.Response {
-        require(name.matches(Regex("[A-Za-z0-9_]{3,16}"))) { "Invalid profile lookup name" }
+        require(VALID_NAME.matches(name)) { "Invalid profile lookup name" }
         sources.forEachIndexed { index, source ->
             val now = clock()
             val paused = synchronized(pauses) { pauses[index]?.until?.let { now < it } == true }
@@ -85,6 +85,8 @@ internal class MojangDirectorySources(
     }
 
     companion object {
+        private val VALID_NAME = Regex("[A-Za-z0-9_]{3,16}")
+
         internal fun retryDelay(response: Http.Response, now: Long): Long? {
             val value = response.headers.entries.firstOrNull { it.key.equals("Retry-After", true) }
                 ?.value?.firstOrNull()?.trim() ?: return null

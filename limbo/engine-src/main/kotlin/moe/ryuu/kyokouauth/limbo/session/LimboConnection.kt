@@ -117,7 +117,7 @@ internal class LimboConnection(
             Phase.HELLO -> {
                 require(packet is ServerboundHelloPacket)
                 loginName = packet.username
-                require(loginName.matches(Regex("[A-Za-z0-9_]{3,16}")))
+                require(VALID_NAME.matches(loginName))
                 when (val mode = forwardingMode) {
                     is ForwardingMode.VelocityModern -> {
                         require('\u0000' !in hostname) { "Legacy forwarding is forbidden in modern mode" }
@@ -231,7 +231,7 @@ internal class LimboConnection(
         require(menu.premium.optionId.isNotBlank() && menu.premium.optionId.length <= 128)
         require(menu.microsoft.optionId != menu.premium.optionId)
         for (item in listOf(menu.microsoft, menu.premium)) {
-            require(item.profileName.matches(Regex("[A-Za-z0-9_]{3,16}")))
+            require(VALID_NAME.matches(item.profileName))
             require((item.textureValue?.length ?: 0) <= 8192 && (item.textureSignature?.length ?: 0) <= 8192)
             require(item.textureSignature == null || item.textureValue != null)
             require(item.lore.size <= 8)
@@ -390,5 +390,8 @@ internal class LimboConnection(
     private fun execute(action: () -> Unit) {
         if (!executor.isShutdown) executor.execute(action)
     }
-    companion object { private val RANDOM = SecureRandom() }
+    companion object {
+        private val RANDOM = SecureRandom()
+        private val VALID_NAME = Regex("[A-Za-z0-9_]{3,16}")
+    }
 }

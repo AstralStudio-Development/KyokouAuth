@@ -33,7 +33,7 @@ internal class BungeeRoleLoginBridge(loader: ClassLoader) {
     fun prepare(pending: PendingConnection, id: UUID, roleName: String, proof: BedrockProof? = null) {
         val nativeBedrockName = proof != null && proof.isCurrent() && proof.username == roleName && proof.uniqueId == id
         require(roleName.length in 1..16 && roleName.none { it.isWhitespace() || it.isISOControl() } &&
-            (roleName.matches(Regex("[A-Za-z0-9_]{1,16}")) || nativeBedrockName)) { "Invalid native role name" }
+            (VALID_ROLE_NAME.matches(roleName) || nativeBedrockName)) { "Invalid native role name" }
         check(pending.javaClass == handler) { "Only the verified official InitialHandler is supported" }
         check(pending.isConnected && !pending.isOnlineMode && userCon.get(pending) == null &&
             (state.get(pending) as Enum<*>).name == "USERNAME") { "Role identity may only be prepared in offline prelogin" }
@@ -49,4 +49,8 @@ internal class BungeeRoleLoginBridge(loader: ClassLoader) {
 
     private fun mutablePrivate(modifiers: Int) = Modifier.isPrivate(modifiers) &&
         !Modifier.isStatic(modifiers) && !Modifier.isFinal(modifiers)
+
+    private companion object {
+        val VALID_ROLE_NAME = Regex("[A-Za-z0-9_]{1,16}")
+    }
 }

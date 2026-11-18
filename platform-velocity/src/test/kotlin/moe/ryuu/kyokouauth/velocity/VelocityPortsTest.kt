@@ -137,6 +137,31 @@ class VelocityPortsTest {
         assertEquals(1, writes)
     }
 
+    interface DisconnectableInbound : com.velocitypowered.api.proxy.InboundConnection {
+        fun disconnect(reason: net.kyori.adventure.text.Component)
+    }
+
+    @Test
+    fun `cached disconnect method still invokes the exact inbound instance`() {
+        val ports = VelocityPorts(Fixture().proxy)
+        val delivered = List(2) { mutableListOf<net.kyori.adventure.text.Component>() }
+        val natives = delivered.map { messages -> stub<DisconnectableInbound> { method, args ->
+            when (method) {
+                "disconnect" -> { messages += args[0] as net.kyori.adventure.text.Component; null }
+                else -> error("Unexpected inbound access: $method")
+            }
+        } }
+        assertSame(natives[0].javaClass, natives[1].javaClass)
+        for (index in natives.indices) {
+            repeat(2) {
+                ports.inbound(natives[index]).disconnect(moe.ryuu.kyokouauth.core.text.RichText.parse("Denied$index"))
+            }
+        }
+        for (index in delivered.indices) {
+            assertEquals(List(2) { moe.ryuu.kyokouauth.core.text.RichText.parse("Denied$index").toAdventure() }, delivered[index])
+        }
+    }
+
     private class Fixture {
         val publicServers = linkedMapOf<String, RegisteredServer>()
         val proxy: ProxyServer = stub { method, arguments ->

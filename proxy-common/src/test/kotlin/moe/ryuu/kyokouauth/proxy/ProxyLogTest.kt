@@ -11,6 +11,22 @@ class ProxyLogTest {
     private val log = ProxyLog { level, message, error -> entries += Entry(level, message, error) }
 
     @Test
+    fun `unformatted messages preserve template identity and empty messages`() {
+        val template = charArrayOf('{', '}', ' ', 'x').concatToString()
+        log.info(template)
+        log.warn("")
+        assertSame(template, entries.first().message)
+        assertEquals("", entries.last().message)
+        entries.forEach { assertNull(it.error) }
+    }
+
+    @Test
+    fun `adjacent placeholders and argument braces are not reparsed`() {
+        log.info("{}{}{} tail", "{}", "next", null)
+        assertEquals("{}nextnull tail", entries.single().message)
+    }
+
+    @Test
     fun `formatting replaces placeholders in order and preserves literal replacement text`() {
         log.info("{} logged in with {} and {}", "Steve", "\$1\\{}", null)
         val entry = entries.single()

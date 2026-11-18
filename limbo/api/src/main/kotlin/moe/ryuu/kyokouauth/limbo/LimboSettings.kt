@@ -20,7 +20,7 @@ data class LimboSettings(
     init {
         require(protocolVersion in 767..777)
         require(biomeId >= 0)
-        require(biomeKey == null || biomeKey.matches(Regex("[a-z0-9_.-]+:[a-z0-9_/.-]+")))
+        require(biomeKey == null || VALID_BIOME_KEY.matches(biomeKey))
         require(viewDistance in 2..8 && maxPlayers >= 0)
         require(keepAliveSeconds in 1..300 && keepAliveTimeoutSeconds in 1..600 && joinTimeoutSeconds in 1..600)
         require(spawn.x.isFinite() && spawn.y.isFinite() && spawn.z.isFinite())
@@ -33,5 +33,9 @@ data class LimboSettings(
         companion object {
             fun defaults(version: String) = Messages(TextComponent("This login screen requires Minecraft $version."))
         }
+    }
+
+    private companion object {
+        val VALID_BIOME_KEY = Regex("[a-z0-9_.-]+:[a-z0-9_/.-]+")
     }
 }

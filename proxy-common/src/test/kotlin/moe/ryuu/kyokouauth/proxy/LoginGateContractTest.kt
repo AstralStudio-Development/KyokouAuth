@@ -31,6 +31,69 @@ import kotlin.test.assertTrue
 
 class LoginGateContractTest {
     @Test
+    fun `parallel throttled logins share one warning per minute without being admitted`() {
+        val fixture = Fixture()
+        val now = java.util.concurrent.atomic.AtomicLong(1_000_000L)
+        val warnings = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val services = object : LoginGate.Services by fixture.services {
+            override fun decide(name: GameName, address: String) =
+                AuthCoordinator.Decision.Reject(AuthCoordinator.RejectReason.DIRECTORY_THROTTLED, "test budget")
+        }
+        val gate = LoginGate(fixture.proxy, ProxyConfig(emptyMap(), File("unused-contract-config")),
+            fixture.catalogue, services, ProxyLog { level, message, _ ->
+                if (level == ProxyLog.Level.WARN) warnings.add(message)
+            }, now::get).also { it.activate() }
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(8)
+        try {
+            fun burst() {
+                val barrier = java.util.concurrent.CyclicBarrier(8)
+                val events = List(8) { PreLoginEvent(fixture.inbound(), "Throttled$it", null) }
+                val jobs = events.map { event -> executor.submit {
+                    barrier.await(5, TimeUnit.SECONDS)
+                    gate.onPreLogin(event)
+                } }
+                jobs.forEach { it.get(5, TimeUnit.SECONDS) }
+                assertTrue(events.all { !it.result.isAllowed })
+            }
+            burst()
+            assertEquals(1, warnings.size)
+            now.addAndGet(59_999)
+            burst()
+            assertEquals(1, warnings.size)
+            now.incrementAndGet()
+            burst()
+            assertEquals(2, warnings.size)
+        } finally {
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+            gate.deactivate()
+        }
+    }
+
+    @Test
+    fun `connection rate limit preserves IPv4 and groups IPv6 by lowercase padded 64 bit prefix`() {
+        val fixture = Fixture()
+        val keys = mutableListOf<String>()
+        val services = object : LoginGate.Services by fixture.services {
+            override fun allow(key: String): Boolean { keys += key; return false }
+        }
+        val gate = LoginGate(fixture.proxy, ProxyConfig(emptyMap(), File("unused-contract-config")),
+            fixture.catalogue, services, ProxyLog { _, _, _ -> }).also { it.activate() }
+        try {
+            for (address in listOf("192.0.2.10", "2001:db8:80ff:1::1", "2001:db8:80ff:1::ffff", "2001:db8:80ff:2::1")) {
+                val inbound = object : InboundConnection by fixture.inbound() {
+                    override val remoteAddress = InetSocketAddress(address, 50000)
+                }
+                val event = PreLoginEvent(inbound, "Limited", null)
+                gate.onPreLogin(event)
+                assertFalse(event.result.isAllowed)
+            }
+            assertEquals(listOf("192.0.2.10", "20010db880ff0001::/64", "20010db880ff0001::/64", "20010db880ff0002::/64"), keys)
+            assertEquals(0, fixture.services.decideCalls)
+        } finally { gate.deactivate() }
+    }
+
+    @Test
     fun `new contract Java roles flag preserves ordinary trusted Microsoft session`() {
         val fixture = Fixture(roleConfig)
         fixture.services.decision = AuthCoordinator.Decision.Admit(record.toIdentity(), record)
@@ -340,6 +403,41 @@ class LoginGateContractTest {
         assertEquals(0, fixture.services.beginCalls)
         assertEquals(0, fixture.services.grants)
         assertTrue(player.limbo.menus.isEmpty())
+    }
+
+    @Test
+    fun `slow role lookup does not delay an unrelated Java login`() {
+        val fixture = Fixture(roleConfig)
+        val proof = BedrockProof.createLinked(Xuid(1L), premiumUuid, "Alex", "Steve", Any()) { true }
+        fixture.services.options = RoleOptions(listOf(fixture.dualRoles().roles.last()), premiumUuid)
+        val role = fixture.player(777).apply { uniqueId = premiumUuid; username = "Alex" }
+        val vanilla = fixture.player(777)
+        val lookupStarted = java.util.concurrent.CountDownLatch(1)
+        val resumeLookup = java.util.concurrent.CountDownLatch(1)
+        fixture.services.duringRoles = {
+            if (fixture.services.roleCalls > 1) {
+                lookupStarted.countDown()
+                check(resumeLookup.await(15, TimeUnit.SECONDS))
+            }
+        }
+        val a = fixture.prepareLogin(role, BedrockLogin.Verified(proof))
+        fixture.services.decision = AuthCoordinator.Decision.Admit(record.toIdentity(), record)
+        val b = fixture.prepareLogin(vanilla, BedrockLogin.Java)
+        val workers = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val roleLogin = workers.submit { fixture.gate.onLogin(a) }
+            assertTrue(lookupStarted.await(5, TimeUnit.SECONDS))
+            workers.submit { fixture.gate.onLogin(b) }.get(3, TimeUnit.SECONDS)
+            assertTrue(b.result.isAllowed && fixture.gate.isAuthenticated(vanilla))
+            assertFalse(fixture.gate.isAuthenticated(role))
+            resumeLookup.countDown()
+            roleLogin.get(5, TimeUnit.SECONDS)
+            assertTrue(a.result.isAllowed && fixture.gate.isAuthenticated(role))
+        } finally {
+            resumeLookup.countDown()
+            workers.shutdown()
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS))
+        }
     }
 
     @Test
@@ -1650,7 +1748,7 @@ class LoginGateContractTest {
         fun player(version: Int, sessionId: UUID = UUID.randomUUID()) =
             FakePlayer(version, sessionId).also { players += it }
 
-        fun login(player: FakePlayer, bedrock: BedrockLogin = BedrockLogin.Java) {
+        fun prepareLogin(player: FakePlayer, bedrock: BedrockLogin = BedrockLogin.Java): LoginEvent {
             val pre = PreLoginEvent(player, player.username, player.uniqueId, bedrock)
             gate.onPreLogin(pre)
             assertTrue(pre.result.isAllowed)
@@ -1662,7 +1760,11 @@ class LoginGateContractTest {
                 player.username = profile.gameProfile.name
                 player.properties = profile.gameProfile.properties
             }
-            val login = LoginEvent(player, bedrock)
+            return LoginEvent(player, bedrock)
+        }
+
+        fun login(player: FakePlayer, bedrock: BedrockLogin = BedrockLogin.Java) {
+            val login = prepareLogin(player, bedrock)
             gate.onLogin(login)
             assertTrue(login.result.isAllowed)
         }

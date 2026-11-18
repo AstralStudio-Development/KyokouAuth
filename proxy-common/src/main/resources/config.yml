@@ -1,111 +1,94 @@
 # KyokouAuth on Velocity / BungeeCord
 #
-# Everything here is read once at startup. A missing key is a default, so an upgrade that adds a
-# setting never leaves the plugin refusing to start; a missing file is written out from the jar.
-#
-# Ordinary Java name ownership is decided by Mojang: premium names require the launcher's session
-# handshake; other Java names require Microsoft proof before binding. Optional role selection adds
-# a separate path for a fresh connection-proven XUID plus a currently verified official global link;
-# public profile lookups, stored links and IP sessions never grant that permission.
+# Settings are loaded once at startup. Missing keys fall back to built-in defaults, and a missing
+# file is created from the plugin jar. `/kyokouauth reload` reloads message files only; changes in
+# this file take effect after restarting the proxy.
 
 database:
   # sqlite | h2 | mysql | mariadb | postgresql
   type: "sqlite"
-  # For sqlite this is a file next to this config; every other type needs a host below.
+  # File name inside `plugins/kyokouauth/` for SQLite, or database name for server dialects.
   database: "kyokouauth"
   host: "127.0.0.1"
-  # 0 means "the default port of the type".
+  # 0 uses the default port for the selected database type.
   port: 0
   username: ""
   password: ""
   pool-size: 4
-  # Where a missing JDBC driver is fetched from, and kept. Drivers are cached in
-  # `libraries/` inside this plugin's folder.
+  # Repository for downloading missing JDBC drivers into `plugins/kyokouauth/libraries/`.
   driver-repository: "https://repo1.maven.org/maven2"
   auto-download-driver: true
 
 session:
-  # How long a successful verification keeps a player trusted. 0 disables session reuse entirely.
+  # Hours a verified Microsoft role stays trusted before requiring sign-in again. 0 disables reuse.
   hours: 12
-  # Whether a session only counts from the address that earned it. Turn this off when every player
-  # shares one address behind NAT or a tunnel, where the check distinguishes nobody.
+  # Require the same client IP for session reuse. Disable only when players share one NAT/tunnel IP.
   bind-address: true
 
 bedrock:
-  # Optional proxy Floodgate 2.2.5 integration. Requires a trusted Geyser auth-type: floodgate chain.
-  # Without role-selection, only unlinked players are admitted with an isolated non-Java prefix.
-  # Linked players additionally require role-selection and verified global linking (not local linking).
-  # Missing/incompatible Floodgate refuses initialization; unbound Bedrock display names/IP sessions
-  # are never persisted as Java bindings. This switch is independent from role-selection.enabled.
+  # Accept Bedrock logins verified by Floodgate 2.2.5 on this proxy (`auth-type: floodgate` on Geyser).
+  # When `role-selection.enabled` is false, only unlinked Bedrock players are admitted under their
+  # Floodgate prefix; linked accounts require `role-selection.enabled: true` and an official global link.
   enabled: false
 
 role-selection:
-  # Bedrock only: fresh native Floodgate proof + current official link permit independent U/J roles.
-  # Java keeps basic Microsoft authentication and Mojang direct login; no Java cross-role Cookie flow.
-  # No native Transfer, self-authored Geyser extension, private CMD, avatar pack or image HTTP bridge.
+  # Let linked Bedrock players choose between their server Microsoft role and linked Java role.
+  # Each role keeps its own UUID, name, skin and player data. Independent of `bedrock.enabled`.
   enabled: false
-  # Time to choose a role (5..600 seconds); closing the menu never chooses or authorizes a role.
+  # Seconds allowed on the role menu before disconnecting (5..600). Closing the menu never selects a role.
   timeout-seconds: 60
-  # Server-side choice intent for ONE ordinary new Bedrock login (5..120 seconds), never a credential.
-  # Same exact UUID/name can be admitted in place; another identity requires a fresh connection/proof.
+  # Seconds a chosen role waits for one manual reconnect when switching UUID or name (5..120).
   hint-ttl-seconds: 30
 
 verification:
-  # Enabled by default: after proving the same Microsoft XUID, move its binding to the new free name.
-  # The XUID/UUID stays the same; the old name is released. Premium and occupied names are refused.
-  # A provisional connection reconnects once; it then uses the new name and the stable identity.
+  # Move a player's Microsoft binding to a new free non-premium name after signing in with the same
+  # Microsoft account. Their UUID stays the same and the old name is released.
   auto-rename: true
-  # How long a player has to finish the Microsoft sign-in before they are disconnected.
+  # Seconds allowed to finish Microsoft device-code sign-in before disconnecting.
   timeout-seconds: 300
-  # Minimum polling interval; Microsoft's larger interval/Retry-After is always honored.
+  # Minimum seconds between Microsoft token polls; longer intervals from Microsoft always take priority.
   poll-interval-seconds: 5
-  # Command roots unavailable before authentication (execution, command tree and completion).
-  # Add names without arguments. Case, leading / and namespaces are normalized; list aliases too.
-  # [] disables this list only; ["*"] blocks every command. Server-switch isolation always remains.
-  # Changes take effect after restarting the proxy; /ka reload only reloads messages.
+  # Command roots hidden and blocked until verification or role selection completes (no `/` or args).
+  # List standalone aliases separately. `[]` clears command blocking; `["*"]` blocks all commands.
+  # Unauthenticated players can never switch backend servers regardless of this list.
   blocked-commands:
     - server
 
 safety:
-  # How many connection attempts one address may make per minute. 0 disables the cap. Guards the
-  # Mojang lookup budget rather than the account.
+  # Maximum connection attempts per IP per minute. 0 disables the limit.
   connections-per-minute: 10
-  # Pending admission and blocking-work queues are bounded; overflow is refused, never run inline.
+  # Capacity caps for pending logins and background auth workers; overflow is rejected immediately.
   pending-login-limit: 4096
   io-workers: 4
   io-queue-capacity: 256
 
 premium:
-  # Local ceiling for uncached name lookups, separate from session handshakes. Upstream limits can
-  # differ by endpoint/address, so this is not a guarantee against HTTP 429. 0 disables this ceiling.
+  # Maximum uncached Mojang name lookups within the window below. 0 disables the local cap.
   directory-limit: 600
   directory-limit-window-minutes: 10
-  # Official Minecraft Services is preferred; legacy Mojang is a bounded fallback. Each real request
-  # counts against directory-limit, and each origin independently honors Retry-After.
-  # inherit = JVM HTTP proxy/default routing; direct = separate Java HTTP client with Proxy.NO_PROXY.
-  # This setting affects ONLY name lookups, not session handshakes or Microsoft sign-in.
+  # Outbound routing for name lookups only: `inherit` uses JVM proxy settings; `direct` bypasses JVM
+  # HTTP proxies. Does not affect Mojang session handshakes or Microsoft sign-in.
   directory-network: "inherit"
-  # Separate local budget for Mojang session handshakes. Matching a public UUID never skips them.
+  # Maximum Mojang session handshakes started across the proxy per minute.
   session-handshakes-per-minute: 60
-  # Minimum delay between session-check attempts from the same address using the same name.
+  # Minimum seconds between session handshake attempts for the same IP and name.
   session-retry-seconds: 5
-  # Only one handshake may be in flight for the same source/name. Incomplete attempts back off
-  # 30 -> 60 -> 120 seconds by default; rejected retries do not extend the deadline.
+  # Cooldown backoff after incomplete or failed session handshakes (doubles up to the max below).
   session-failure-backoff-seconds: 30
   session-failure-max-backoff-seconds: 120
   session-timeout-seconds: 30
 
 post-login:
-  # Where a verified player is sent. Empty means the proxy's own attempt order from velocity.toml.
+  # Target backend server name after authentication. Empty uses the proxy's default server order.
   server: ""
 
 messages:
-  # The catalogue used for players whose own language has no file in `messages/`.
+  # Fallback language when a player's client locale has no matching file in `messages/`.
   locale: "zh_CN"
 
 limbo:
   motd: "KyokouAuth"
-  # Where the player waits. Above the void, so nothing has to be generated underneath them.
+  # Waiting coordinates in the isolated verification world.
   spawn:
     x: 0.5
     y: 64.0
@@ -113,10 +96,9 @@ limbo:
     yaw: 0.0
     pitch: 0.0
   view-distance: 2
-  # Resource key resolved against each protocol's own registry.
+  # Biome resource key resolved per client protocol version (legacy `biome-id` is still read if set).
   biome: "minecraft:plains"
-  # Older biome-id settings remain accepted, interpreted through the original 26.3 registry.
   keep-alive-seconds: 10
   keep-alive-timeout-seconds: 30
-  # How long a proxy connection may take to reach the play state.
+  # Seconds allowed for a connection to finish entering the verification screen.
   join-timeout-seconds: 30

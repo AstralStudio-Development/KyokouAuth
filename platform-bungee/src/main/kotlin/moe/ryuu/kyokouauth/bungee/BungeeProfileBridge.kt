@@ -137,8 +137,9 @@ internal class BungeeProfileBridge(
     }
 
     companion object {
+        private val UNDASHED_UUID = Regex("^(.{8})(.{4})(.{4})(.{4})(.{12})$")
         internal fun offlineId(name: String): UUID = UUID.nameUUIDFromBytes("OfflinePlayer:$name".toByteArray(Charsets.UTF_8))
         private fun parseUuid(value: String): UUID = UUID.fromString(if (value.length == 32)
-            value.replaceFirst(Regex("^(.{8})(.{4})(.{4})(.{4})(.{12})$"), "$1-$2-$3-$4-$5") else value)
+            value.replaceFirst(UNDASHED_UUID, "$1-$2-$3-$4-$5") else value)
     }
 }

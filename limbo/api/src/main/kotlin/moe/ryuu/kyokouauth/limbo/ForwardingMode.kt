@@ -25,9 +25,13 @@ data class TicketIdentity(
 ) {
     init {
         require(connectionId != UUID(0, 0) && uuid != UUID(0, 0))
-        require(name.matches(Regex("[A-Za-z0-9_]{3,16}")))
+        require(VALID_NAME.matches(name))
         require(address.length in 1..64 && address.all { it.isLetterOrDigit() || it in ":.%_-" })
         require(protocolVersion in 767..777)
+    }
+
+    private companion object {
+        val VALID_NAME = Regex("[A-Za-z0-9_]{3,16}")
     }
 }
 
