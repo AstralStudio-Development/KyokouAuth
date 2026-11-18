@@ -1,11 +1,16 @@
 package moe.ryuu.kyokouauth.core.auth
 
+import com.github.benmanes.caffeine.cache.Cache
+import com.github.benmanes.caffeine.cache.Caffeine
+import com.github.benmanes.caffeine.cache.Ticker
 import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonToken
 import moe.ryuu.kyokouauth.core.http.Http
+import moe.ryuu.kyokouauth.core.http.hasRawJsonStringControl
 import moe.ryuu.kyokouauth.core.identity.GameName
 import java.io.IOException
 import java.io.StringReader
+import java.time.Duration
 import java.util.UUID
 
 /** Opaque signed texture property; never an authentication credential. */
@@ -14,34 +19,74 @@ data class ProfileTexture(val value: String, val signature: String)
 data class OfficialJavaProfile(val uuid: UUID, val name: GameName, val texture: ProfileTexture? = null)
 
 /** Deliberately retains no upstream message, body, URL, cause or suppressed parser exception. */
-class OfficialJavaProfileUnavailableException : IOException("Official Java profile is unavailable or invalid")
+class OfficialJavaProfileUnavailableException(
+    val reason: Reason = Reason.INVALID_RESPONSE,
+    val httpStatus: Int? = null,
+    val retryAfterSeconds: Long? = null,
+) : IOException("Official Java profile unavailable: $reason" +
+    (httpStatus?.let { " HTTP=$it" } ?: "") +
+    (retryAfterSeconds?.let { " RetryAfterSeconds=$it" } ?: "")) {
+    enum class Reason { HTTP, NETWORK, INVALID_RESPONSE, INTERRUPTED }
+}
 
 /** Public profile/texture lookup after role authentication. This lookup itself proves no ownership. */
-class OfficialJavaProfileClient(
-    private val request: (String) -> Http.Response = { url ->
-        Http.get(url, readTimeoutMs = 5_000, route = Http.Route.DIRECT)
-    },
+class OfficialJavaProfileClient internal constructor(
+    ticker: Ticker,
+    private val request: (String) -> Http.Response,
 ) {
+    constructor(request: (String) -> Http.Response = { url ->
+        Http.get(url, readTimeoutMs = 5_000, route = Http.Route.DIRECT)
+    }) : this(Ticker.systemTicker(), request)
+
+    private val recentProfiles: Cache<UUID, OfficialJavaProfile> = Caffeine.newBuilder()
+        .maximumSize(128)
+        .expireAfterWrite(Duration.ofSeconds(60))
+        .ticker(ticker)
+        .build()
+
+    /**
+     * Reuses only successful public name/signed-texture metadata for at most 60 seconds from write.
+     * Each caller must separately prove the current subject and freshly verify its account link.
+     * Loading is atomic per UUID; failures are not cached and expired metadata is never a fallback.
+     */
+    fun lookupRecent(uuid: UUID): OfficialJavaProfile = recentProfiles.get(uuid) { lookup(it) }
+
+    /** Always requests a fresh profile, even when [lookupRecent] has usable metadata. */
     fun lookup(uuid: UUID): OfficialJavaProfile {
         if (uuid.version() !in setOf(3, 4) || uuid.variant() != 2) invalid()
+        val id = uuid.toString().replace("-", "")
+        val response = try {
+            request("$ENDPOINT$id?unsigned=false")
+        } catch (failure: Exception) {
+            val reason = when {
+                failure is InterruptedException || failure.cause is InterruptedException || Thread.currentThread().isInterrupted -> {
+                    Thread.currentThread().interrupt()
+                    OfficialJavaProfileUnavailableException.Reason.INTERRUPTED
+                }
+                failure is Http.ResponseTooLargeException || failure is Http.InvalidJsonResponseException ->
+                    OfficialJavaProfileUnavailableException.Reason.INVALID_RESPONSE
+                else -> OfficialJavaProfileUnavailableException.Reason.NETWORK
+            }
+            // Even a request-injected profile exception is rebuilt without its cause/suppressed data.
+            throw OfficialJavaProfileUnavailableException(reason)
+        }
         return try {
-            val id = uuid.toString().replace("-", "")
-            decode(uuid, request("$ENDPOINT$id?unsigned=false"))
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw OfficialJavaProfileUnavailableException()
+            decode(uuid, response)
+        } catch (failure: OfficialJavaProfileUnavailableException) {
+            // Only our own decoder produces these safe classifications; do not erase HTTP details.
+            throw failure
         } catch (_: Exception) {
-            // Rebuild even our own validation exception: no parser/request data or suppressed cause
-            // can escape through the public seam, and no failure is represented as an empty skin.
-            throw OfficialJavaProfileUnavailableException()
+            // Parser failures are distinct from request failures, but never retain parser data.
+            invalid()
         }
     }
 
     private fun decode(uuid: UUID, response: Http.Response): OfficialJavaProfile {
-        if (response.status != 200) invalid()
+        if (response.status != 200) throw OfficialJavaProfileUnavailableException(
+            OfficialJavaProfileUnavailableException.Reason.HTTP, response.status, retryAfterSeconds(response))
         val body = response.body
         if (body.isBlank() || body.length > Http.MAX_RESPONSE_BYTES ||
-            body.toByteArray(Charsets.UTF_8).size > Http.MAX_RESPONSE_BYTES || hasRawStringControl(body)) invalid()
+            body.toByteArray(Charsets.UTF_8).size > Http.MAX_RESPONSE_BYTES || hasRawJsonStringControl(body)) invalid()
         return JsonReader(StringReader(body)).use { reader ->
             reader.isLenient = false
             if (reader.peek() != JsonToken.BEGIN_OBJECT) invalid()
@@ -121,21 +166,12 @@ class OfficialJavaProfileClient(
         return reader.nextString().also { if (it.length !in 1..max) invalid() }
     }
 
-    private fun hasRawStringControl(body: String): Boolean {
-        var quoted = false
-        var escaped = false
-        for (char in body) {
-            if (quoted && char.code < 0x20) return true
-            if (escaped) {
-                escaped = false
-            } else if (quoted && char == '\\') {
-                escaped = true
-            } else if (char == '"') {
-                quoted = !quoted
-            }
-        }
-        return false
-    }
+    /** Only an unambiguous bounded delta-seconds value is diagnostic data, never raw header text. */
+    private fun retryAfterSeconds(response: Http.Response): Long? = response.headers.entries
+        .singleOrNull { it.key.equals("Retry-After", ignoreCase = true) }
+        ?.value?.singleOrNull()?.takeIf { it.length <= 64 }?.trim()
+        ?.takeIf { it.length in 1..19 && it.all { char -> char in '0'..'9' } }
+        ?.toLongOrNull()
 
     private fun invalid(): Nothing = throw OfficialJavaProfileUnavailableException()
 

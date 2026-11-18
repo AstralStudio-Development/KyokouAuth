@@ -1,10 +1,10 @@
 package moe.ryuu.kyokouauth.geyser.avatar;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextColor;
-import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.TextComponent;
 import org.cloudburstmc.nbt.NbtMap;
 import org.cloudburstmc.nbt.NbtType;
 import org.cloudburstmc.protocol.bedrock.data.definitions.SimpleBlockDefinition;
@@ -12,19 +12,24 @@ import org.cloudburstmc.protocol.bedrock.data.inventory.ItemData;
 import org.geysermc.geyser.GeyserImpl;
 import org.geysermc.geyser.api.item.custom.v2.CustomItemDefinition;
 import org.geysermc.geyser.item.Items;
-import org.geysermc.geyser.item.TooltipOptions;
-import org.geysermc.geyser.item.type.Item;
+import org.geysermc.geyser.registry.BlockRegistries;
 import org.geysermc.geyser.registry.Registries;
+import org.geysermc.geyser.registry.java.BuiltInJavaRegistries;
 import org.geysermc.geyser.registry.type.ItemMapping;
 import org.geysermc.geyser.session.GeyserSession;
-import org.geysermc.geyser.translator.item.BedrockItemBuilder;
+import org.geysermc.geyser.session.cache.ComponentCache;
 import org.geysermc.geyser.translator.item.ItemTranslator;
+import org.geysermc.mcprotocollib.protocol.data.game.item.ItemStack;
 import org.geysermc.mcprotocollib.protocol.data.game.entity.player.ResolvableProfile;
 import org.geysermc.mcprotocollib.protocol.data.game.item.component.CustomModelData;
 import org.geysermc.mcprotocollib.protocol.data.game.item.component.DataComponentTypes;
 import org.geysermc.mcprotocollib.protocol.data.game.item.component.DataComponents;
 
-import java.lang.reflect.Proxy;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.inventory.ClientboundContainerSetContentPacket;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
@@ -78,35 +83,80 @@ final class NativeAvatarOracle {
 
     static void styles() throws Exception {
         ready();
+        String source = System.getProperty("kyokou.avatar.selectorPacket");
+        require(source != null, "Native style regression requires the explicit isolated real-Gate selector packet");
+        Path path = Path.of(source);
+        require(path.getFileName().toString().equals("role-selector.bin") && !Files.isSymbolicLink(path) &&
+                Files.size(path) > 0 && Files.size(path) <= 32768, "Unsafe synthetic selector packet");
+        ByteBuf buffer = Unpooled.wrappedBuffer(Files.readAllBytes(path));
+        ClientboundContainerSetContentPacket packet;
+        try {
+            // Decode the exact official serialize() export, not reconstructed components or private packet layouts.
+            packet = new ClientboundContainerSetContentPacket(buffer);
+            require(!buffer.isReadable(), "Trailing bytes after the official selector packet");
+        } finally { buffer.release(); }
+        require(packet.getContainerId() > 0 && packet.getStateId() >= 0 && packet.getItems().length == 63 &&
+                packet.getCarriedItem() == null, "Not a complete isolated native selector GUI");
+        for (int slot = 0; slot < 63; slot++) if (slot != 12 && slot != 14)
+            require(packet.getItems()[slot] == null, "Unexpected item in the isolated selector fixture");
         GeyserSession session = session();
-        Item item = Items.PLAYER_HEAD;
-        ItemMapping mapping = headMapping();
-        Component name = Component.empty().color(NamedTextColor.WHITE).decoration(TextDecoration.ITALIC, false)
-                .append(Component.text("微软角色", TextColor.color(0x22D3EE)))
-                .append(Component.text(" » ", NamedTextColor.GRAY)).append(Component.text("Steve", NamedTextColor.WHITE));
-        Component line = Component.empty().color(NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false)
-                .append(Component.text("点击进入服务器"));
-        DataComponents components = new DataComponents(new HashMap<>());
-        components.put(DataComponentTypes.CUSTOM_NAME, name);
-        components.put(DataComponentTypes.LORE, List.of(line));
-        BedrockItemBuilder nbt = new BedrockItemBuilder();
-        nbt.setCustomName(ItemTranslator.getCustomName(session, components, mapping, 'f', true, false));
-        item.translateComponentsToBedrock(session, components, TooltipOptions.fromComponents(components), nbt);
-        ItemData translated = ItemData.builder().definition(mapping.getBedrockDefinition()).count(1).tag(nbt.build()).build();
-        NbtMap display = translated.getTag().getCompound("display");
-        String actualName = display.getString("Name");
-        List<String> actualLore = display.getList("Lore", NbtType.STRING);
-        equal("微软角色 » Steve", plain(actualName), "Final Bedrock item name differs");
-        equal(List.of("点击进入服务器"), actualLore.stream().map(NativeAvatarOracle::plain).toList(), "Final Bedrock lore differs");
-        noItalic(actualName);
-        noItalic(actualLore.get(0));
-        equal('7', finalColor(actualLore.get(0), '5'), "Lore retained the Bedrock purple default");
-        DataComponents ordinary = new DataComponents(new HashMap<>());
+        var defaults = Items.PLAYER_HEAD.gatherComponents(session.getComponentCache(), null);
+        require(defaults.get(DataComponentTypes.RARITY) != null && defaults.get(DataComponentTypes.ITEM_NAME) != null,
+                "Full translator must gather real registry head defaults, including rarity and item name");
+        List<String> styleFailures = new ArrayList<>();
+        for (int slot : new int[]{12, 14}) {
+            ItemStack input = packet.getItems()[slot];
+            String label = slot == 12 ? "Microsoft role" : "Java role";
+            String roleName = slot == 12 ? "URole" : "JRole";
+            String expectedName = label + " » " + roleName;
+            require(input != null && input.getId() == Items.PLAYER_HEAD.javaId() && input.getAmount() == 1,
+                    "Selector fixture is not the fixed registry player head");
+            var patch = input.getDataComponentsPatch();
+            require(patch != null, "Real selector head has no patch");
+            equal(expectedName, syntheticText(patch.get(DataComponentTypes.CUSTOM_NAME), 'f'), "Fixture custom name is not synthetic role text");
+            var lore = patch.get(DataComponentTypes.LORE);
+            require(lore != null && lore.size() == 1 && syntheticText(lore.get(0), '7').equals("Click to enter the server"),
+                    "Fixture lore is not the isolated enter-server text");
+            var profile = patch.get(DataComponentTypes.PROFILE);
+            require(profile != null && profile.getProfile() != null && roleName.equals(profile.getProfile().getName()),
+                    "Real Java PROFILE is not the synthetic role fixture");
+            var marker = patch.get(DataComponentTypes.CUSTOM_MODEL_DATA);
+            require(marker != null && marker.floats().equals(List.of((float) (slot == 12 ? 0x4B5901 : 0x4B5902))) &&
+                    marker.flags().isEmpty() && marker.strings().isEmpty() && marker.colors().isEmpty(), "Private role CMD changed");
+            System.out.println("KYOKOU_SELECTOR_COMPONENTS slot=" + slot + " Name=" + shape(patch.get(DataComponentTypes.CUSTOM_NAME)) +
+                    " Lore=" + shape(lore.get(0)));
+            var before = new HashMap<>(patch.getDataComponents());
+            // This is the complete native production entry: registry defaults, head/profile, rarity, name/lore and custom mapping.
+            ItemData output = ItemTranslator.translateToBedrock(session, input);
+            require(profile == patch.get(DataComponentTypes.PROFILE), "Complete native translator replaced Java PROFILE");
+            equal(before, patch.getDataComponents(), "Complete native translator mutated GUI components");
+            equal("kyokouauth:role_" + (slot == 12 ? "u" : "j"), output.getDefinition().getIdentifier(), "Complete path lost private CMD mapping");
+            require(output.getBlockDefinition() == null, "Complete custom-avatar path retained a head block definition");
+            NbtMap display = output.getTag().getCompound("display");
+            String actualName = display.getString("Name");
+            List<String> actualLore = display.getList("Lore", NbtType.STRING);
+            equal(expectedName, plain(actualName), "Complete native name text differs");
+            equal(List.of("Click to enter the server"), actualLore.stream().map(NativeAvatarOracle::plain).toList(), "Complete native lore text differs");
+            // Only these previously allowlisted synthetic strings are printed; no PROFILE/skin/credential payload is logged.
+            System.out.println("KYOKOU_SELECTOR_NATIVE slot=" + slot + " defaultRarity=" + defaults.get(DataComponentTypes.RARITY) +
+                    " Name=" + escaped(actualName) + " Lore=" + actualLore.stream().map(NativeAvatarOracle::escaped).toList());
+            String expectedColors = "b".repeat(label.length()) + "f7f" + "f".repeat(roleName.length());
+            try { styled(actualName, expectedName, expectedColors, 'f', true); }
+            catch (AssertionError failure) { styleFailures.add("slot=" + slot + " Name: " + failure.getMessage()); }
+            try { styled(actualLore.get(0), "Click to enter the server", "7".repeat("Click to enter the server".length()), '5', true); }
+            catch (AssertionError failure) { styleFailures.add("slot=" + slot + " Lore: " + failure.getMessage()); }
+        }
+        require(styleFailures.isEmpty(), String.join("; ", styleFailures));
+        // Keep the final section sign explicit: checking only the final color used to miss a purple prefix.
+        rejects("\u00a7r\u00a75x\u00a77y", "xy", "77", '5', true);
+        rejects("\u00a7r\u00a7o\u00a77x", "x", "7", '5', true);
+        var ordinary = new DataComponents(new HashMap<>(packet.getItems()[12].getDataComponentsPatch().getDataComponents()));
+        ordinary.getDataComponents().remove(DataComponentTypes.CUSTOM_MODEL_DATA);
+        ordinary.getDataComponents().remove(DataComponentTypes.CUSTOM_NAME);
         ordinary.put(DataComponentTypes.LORE, List.of(Component.text("ordinary lore")));
-        BedrockItemBuilder original = new BedrockItemBuilder();
-        item.translateComponentsToBedrock(session, ordinary, TooltipOptions.fromComponents(ordinary), original);
-        String ordinaryLore = original.build().getCompound("display").getList("Lore", NbtType.STRING).get(0);
-        equal("ordinary lore", ordinaryLore, "An ordinary item was globally restyled");
+        ItemData original = ItemTranslator.translateToBedrock(session, new ItemStack(Items.PLAYER_HEAD.javaId(), 1, ordinary));
+        equal("ordinary lore", original.getTag().getCompound("display").getList("Lore", NbtType.STRING).get(0), "An ordinary head was globally restyled");
+        require(original.getDefinition() == headMapping().getBedrockDefinition(), "Ordinary PROFILE head acquired the private avatar definition");
     }
 
     private static ItemMapping headMapping() {
@@ -132,10 +182,21 @@ final class NativeAvatarOracle {
         require(language.trySetAccessible(), "Native locale fixture inaccessible"); language.set(localeOnly, "en_us");
         var client = GeyserSession.class.getDeclaredField("clientData");
         require(client.trySetAccessible(), "Native locale container inaccessible"); client.set(session, localeOnly);
+        var nativeEntry = Registries.ITEMS.get().int2ObjectEntrySet().stream()
+                .filter(entry -> entry.getValue().getMapping(Items.PLAYER_HEAD) == headMapping())
+                .findFirst().orElseThrow(() -> new AssertionError("Native item mapping protocol is absent"));
+        session.setItemMappings(nativeEntry.getValue());
+        session.setBlockMappings(BlockRegistries.BLOCKS.forVersion(nativeEntry.getIntKey()));
+        require(session.getBlockMappings() != null, "Matching native block registry is absent");
         var registries = GeyserSession.class.getDeclaredField("javaRegistries");
-        require(registries.trySetAccessible(), "Native predicate fixture inaccessible");
-        if (registries.getType().isInterface()) registries.set(session, Proxy.newProxyInstance(registries.getType().getClassLoader(),
-                new Class<?>[]{registries.getType()}, (proxy, method, args) -> { throw new AssertionError("Predicate read unrelated session registries"); }));
+        require(registries.trySetAccessible(), "Native registries fixture inaccessible");
+        registries.set(session, BuiltInJavaRegistries.PROVIDER);
+        var cache = GeyserSession.class.getDeclaredField("componentCache");
+        require(cache.trySetAccessible(), "Native component cache fixture inaccessible");
+        cache.set(session, new ComponentCache(BuiltInJavaRegistries.PROVIDER));
+        var geyser = GeyserSession.class.getDeclaredField("geyser");
+        require(geyser.trySetAccessible(), "Native lifecycle fixture inaccessible");
+        geyser.set(session, GeyserImpl.getInstance());
         return session;
     }
     private static Object allocate(Class<?> type) throws Exception {
@@ -145,25 +206,62 @@ final class NativeAvatarOracle {
         return unsafe.getMethod("allocateInstance", Class.class).invoke(field.get(null), type);
     }
     private static String plain(String value) { return value.replaceAll("\u00a7.", ""); }
-    private static boolean color(char value) { return "0123456789abcdefgijmnpqstu".indexOf(value) >= 0; }
-    private static void noItalic(String value) {
-        boolean italic = true;
-        for (int index = 0; index < value.length(); index++) {
-            char c = value.charAt(index);
-            if (c == '\u00a7' && index + 1 < value.length()) {
-                char code = value.charAt(++index);
-                if (code == 'r' || color(code)) italic = false;
-                else if (code == 'o') italic = true;
-            } else require(!italic, "Final native inventory text still inherits italic defaults");
-        }
+    private static String text(Component value) {
+        require(value != null, "Missing synthetic GUI text");
+        StringBuilder result = new StringBuilder(value instanceof TextComponent literal ? literal.content() : "");
+        for (Component child : value.children()) result.append(text(child));
+        return result.toString();
     }
-    private static char finalColor(String value, char initial) {
-        char result = initial;
-        for (int index = 0; index + 1 < value.length(); index++) if (value.charAt(index) == '\u00a7') {
-            char code = value.charAt(++index);
-            if (color(code)) result = code;
+    private static String escaped(String value) {
+        StringBuilder result = new StringBuilder();
+        value.codePoints().forEach(point -> {
+            if (point >= 32 && point <= 126 && point != '\\') result.appendCodePoint(point);
+            else result.append(String.format("\\u%04x", point));
+        });
+        return result.toString();
+    }
+    private static String shape(Component component) {
+        return "{text=" + escaped(component instanceof TextComponent literal ? literal.content() : "") +
+                ",color=" + (component.color() == null ? "inherit" : component.color().asHexString()) +
+                ",italic=" + component.decoration(net.kyori.adventure.text.format.TextDecoration.ITALIC) +
+                ",children=" + component.children().stream().map(NativeAvatarOracle::shape).toList() + "}";
+    }
+    private static boolean color(char value) { return "0123456789abcdefgijmnpqstu".indexOf(value) >= 0; }
+    private static String syntheticText(Component component, char baseCode) {
+        String value = text(component);
+        String prefix = "\u00a7r\u00a7" + baseCode;
+        // Both the original red fixture and the corrected exact Floodgate prefix remain replayable.
+        if (value.startsWith(prefix)) value = value.substring(prefix.length());
+        require(value.indexOf('\u00a7') < 0, "Unexpected formatting payload in synthetic source text");
+        return value;
+    }
+    private static void styled(String actual, String expected, String expectedColors, char initialColor, boolean initialItalic) {
+        equal(expected, plain(actual), "Visible synthetic text differs");
+        require(expectedColors.length() == expected.length(), "Invalid oracle color expectation");
+        char activeColor = initialColor;
+        boolean italic = initialItalic;
+        int visible = 0;
+        for (int index = 0; index < actual.length(); index++) {
+            char c = actual.charAt(index);
+            if (c == '\u00a7') {
+                require(index + 1 < actual.length(), "Truncated final native formatting code");
+                char code = actual.charAt(++index);
+                if (code == 'r') { activeColor = 'f'; italic = false; }
+                else if (color(code)) activeColor = code; // Bedrock color codes do not clear decorations.
+                else if (code == 'o') italic = true;
+            } else {
+                require(!italic && activeColor == expectedColors.charAt(visible), "Final native text style differs at visible character " + visible +
+                        ": expected section-" + expectedColors.charAt(visible) + " non-italic, got section-" + activeColor + " italic=" + italic);
+                visible++;
+            }
         }
-        return result;
+        equal(expected.length(), visible, "Final native visible-character coverage differs");
+    }
+    private static void rejects(String raw, String expected, String colors, char initialColor, boolean initialItalic) {
+        boolean rejected = false;
+        try { styled(raw, expected, colors, initialColor, initialItalic); }
+        catch (AssertionError expectedFailure) { rejected = true; }
+        require(rejected, "Final-color-only or color-clears-italic regression escaped the per-character oracle");
     }
     private static void require(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
     private static void equal(Object expected, Object actual, String message) {

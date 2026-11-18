@@ -64,10 +64,7 @@ internal class BungeeProfileBridge(
     override fun apply(pending: PendingConnection, profile: GameProfile) {
         actual(pending)
         check(pending.uniqueId == profile.id && pending.name == profile.name) { "Profile identity differs from actual connection" }
-        val properties = ReflectArray.newInstance(property, profile.properties.size)
-        profile.properties.forEachIndexed { index, item ->
-            ReflectArray.set(properties, index, propertyConstructor.newInstance(item.name, item.value, item.signature.ifEmpty { null }))
-        }
+        val properties = nativeProperties(profile.properties)
         val current = getter.invoke(pending)
         if (current == null) {
             check(!pending.isOnlineMode) { "Online login is missing its authenticated profile" }
@@ -102,14 +99,9 @@ internal class BungeeProfileBridge(
         val expected = checkNotNull(role(pending)) { "Role profile requires the Gate-selected identity" }
         check(expected.id == profile.id && expected.name == profile.name &&
             pending.uniqueId == profile.id && pending.name == profile.name) { "Prepared role differs from native identity" }
-        val properties = ReflectArray.newInstance(property, profile.properties.size)
-        profile.properties.forEachIndexed { index, item ->
-            ReflectArray.set(properties, index, propertyConstructor.newInstance(item.name, item.value, item.signature.ifEmpty { null }))
-        }
+        val properties = nativeProperties(profile.properties)
         field.set(pending, resultConstructor.newInstance(profile.id.toString().replace("-", ""), profile.name, properties))
     }
-
-    fun hasProperty(pending: PendingConnection, name: String): Boolean = read(pending).properties.any { it.name == name }
 
     private fun identity(pending: PendingConnection, profile: Any): Pair<UUID, String> {
         val id = getId.invoke(profile) as String?
@@ -127,6 +119,13 @@ internal class BungeeProfileBridge(
         }
         return expectedId to expectedName
     }
+
+    private fun nativeProperties(properties: List<GameProfile.Property>): Any =
+        ReflectArray.newInstance(property, properties.size).also { values ->
+            properties.forEachIndexed { index, item ->
+                ReflectArray.set(values, index, propertyConstructor.newInstance(item.name, item.value, item.signature.ifEmpty { null }))
+            }
+        }
 
     private fun properties(profile: Any): List<GameProfile.Property> {
         val values = getProperties.invoke(profile) ?: return emptyList()

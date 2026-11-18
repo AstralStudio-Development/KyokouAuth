@@ -3,6 +3,7 @@ package moe.ryuu.kyokouauth.core.auth
 import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonToken
 import moe.ryuu.kyokouauth.core.http.Http
+import moe.ryuu.kyokouauth.core.http.hasRawJsonStringControl
 import moe.ryuu.kyokouauth.core.identity.GameName
 import moe.ryuu.kyokouauth.core.identity.Xuid
 import java.io.StringReader
@@ -29,7 +30,7 @@ object GlobalAccountLinkResponse {
         return try {
             // Gson 2.10's non-lenient reader still accepts raw control characters in strings.
             // Reject those lexically before its structural and escape validation.
-            if (hasRawStringControl(body)) return unavailable("Invalid global account link JSON")
+            if (hasRawJsonStringControl(body)) return unavailable("Invalid global account link JSON")
             JsonReader(StringReader(body)).use { reader ->
                 reader.isLenient = false
                 if (reader.peek() != JsonToken.BEGIN_OBJECT) return unavailable("Invalid global account link JSON")
@@ -76,22 +77,6 @@ object GlobalAccountLinkResponse {
         if (reader.peek() != JsonToken.NUMBER) return null
         val raw = reader.nextString()
         return if (UNSIGNED_INTEGER.matches(raw)) raw.toLongOrNull() else null
-    }
-
-    private fun hasRawStringControl(body: String): Boolean {
-        var quoted = false
-        var escaped = false
-        for (char in body) {
-            if (quoted && char.code < 0x20) return true
-            if (escaped) {
-                escaped = false
-            } else if (quoted && char == '\\') {
-                escaped = true
-            } else if (char == '"') {
-                quoted = !quoted
-            }
-        }
-        return false
     }
 
     private fun unavailable(reason: String) = AccountLinkResult.Unavailable(reason)

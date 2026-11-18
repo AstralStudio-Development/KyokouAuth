@@ -77,7 +77,8 @@ class RoleSelectorProtocolTest {
 
     @Test fun `decoded selector item roots are nonitalic with explicit base colors and preserve template italic children`() {
         val styled = menu.copy(microsoft = menu.microsoft.copy(
-            name = TextComponent("Item name", children = listOf(TextComponent("Explicit italic", italic = true))),
+            name = TextComponent("Item name", children = listOf(TextComponent("Explicit italic", italic = true),
+                TextComponent("Custom hue", color = "#112233"))),
             lore = listOf(TextComponent("Lore line", children = listOf(TextComponent("Lore italic", italic = true)))),
         ))
         val packet = RoleSelectorPackets.content(7, 1, styled)
@@ -100,6 +101,9 @@ class RoleSelectorProtocolTest {
                 val explicit = nodes(root).filterIsInstance<net.kyori.adventure.text.TextComponent>().single { it.content() == text }
                 assertEquals(TextDecoration.State.TRUE, explicit.decoration(TextDecoration.ITALIC))
             }
+            val literals = (nodes(name) + nodes(lore)).filterIsInstance<net.kyori.adventure.text.TextComponent>()
+            assertTrue(literals.all { '\u00a7' !in it.content() }, "Java selector codecs must not invent legacy formatting text")
+            assertEquals(0x112233, literals.single { it.content() == "Custom hue" }.color()?.value(), "Non-default custom colors remain intact")
         } finally { buffer.release() }
     }
 

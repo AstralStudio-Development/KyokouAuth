@@ -2,6 +2,7 @@ package moe.ryuu.kyokouauth.proxy
 
 import moe.ryuu.kyokouauth.core.auth.AuthCoordinator
 import moe.ryuu.kyokouauth.core.auth.DeviceCodeFlow
+import moe.ryuu.kyokouauth.core.auth.OfficialJavaProfileUnavailableException
 import moe.ryuu.kyokouauth.core.auth.XboxLive
 import moe.ryuu.kyokouauth.core.identity.GameName
 import moe.ryuu.kyokouauth.core.identity.Identity
@@ -14,6 +15,7 @@ import moe.ryuu.kyokouauth.limbo.LimboPlayer
 import moe.ryuu.kyokouauth.limbo.RoleSelectorItem
 import moe.ryuu.kyokouauth.limbo.RoleSelectorMenu
 import moe.ryuu.kyokouauth.limbo.RoleAvatarIcon
+import moe.ryuu.kyokouauth.limbo.protocol.TextComponent
 import moe.ryuu.kyokouauth.proxy.avatar.RoleAvatarOffer
 import java.util.concurrent.CompletableFuture
 import java.util.UUID
@@ -591,8 +593,11 @@ class LoginGate constructor(
             finishPremium(player.sessionId, verified = false)
             close(connection)
             connections.remove(player.sessionId, connection)
-            logger.error("Could not authorize {}", player.username, failure)
-            event.result = ResultedEvent.ComponentResult.denied(component("login.internal-error"))
+            val profileUnavailable = failure is OfficialJavaProfileUnavailableException
+            if (profileUnavailable) logger.warn("Public role profile unavailable: {}", failure.message)
+            else logger.error("Could not authorize {}", player.username, failure)
+            event.result = ResultedEvent.ComponentResult.denied(
+                component(if (profileUnavailable) "role-selection.retry" else "login.internal-error", localeOf(player)))
         }
     }
 
@@ -949,10 +954,15 @@ class LoginGate constructor(
         }
         val microsoft = options.roles.single { it.identity is Identity.Microsoft }
         val premium = options.roles.single { it.identity is Identity.Premium }
+        fun itemText(key: String, baseCode: Char, vararg placeholders: Pair<String, String>) =
+            limboText(key, localeOf(connection.player), *placeholders).let { text ->
+                // Geyser's raw item translator ignores an empty root's italic=false; Java stays pure components.
+                if (selection.origin == RoleOrigin.FLOODGATE) TextComponent("\u00a7r\u00a7$baseCode", children = listOf(text)) else text
+            }
         fun item(option: RoleOption, id: String, label: String, icon: RoleAvatarIcon) = RoleSelectorItem(id, option.identity.uuid,
             option.identity.name.value, option.skin?.value, option.skin?.signature,
-            limboText(label, localeOf(connection.player), "name" to option.identity.name.value),
-            listOf(limboText("role-selection.enter", localeOf(connection.player))), avatarIcon = icon.takeIf { avatars })
+            itemText(label, 'f', "name" to option.identity.name.value),
+            listOf(itemText("role-selection.enter", '7')), avatarIcon = icon.takeIf { avatars })
         if (selection.avatarUnavailable) selection.player.sendMessage(limboText("role-selection.avatar-unavailable", localeOf(connection.player)))
         selection.menuVisible = true
         selection.player.openRoleSelector(RoleSelectorMenu(selection.generation,

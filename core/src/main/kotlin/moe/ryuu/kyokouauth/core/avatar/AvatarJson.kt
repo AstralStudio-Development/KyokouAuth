@@ -2,6 +2,7 @@ package moe.ryuu.kyokouauth.core.avatar
 
 import com.google.gson.stream.JsonReader
 import com.google.gson.stream.JsonToken
+import moe.ryuu.kyokouauth.core.http.hasRawJsonStringControl
 import java.io.StringReader
 import java.net.URI
 import java.nio.ByteBuffer
@@ -64,12 +65,7 @@ object AvatarJson {
         if (body.size !in 1..maximum) invalid()
         val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(body)).toString()
-        var quoted = false
-        var escaped = false
-        for (char in text) {
-            if (quoted && char.code < 32) invalid()
-            if (escaped) escaped = false else if (quoted && char == '\\') escaped = true else if (char == '"') quoted = !quoted
-        }
+        if (hasRawJsonStringControl(text)) invalid()
         return JsonReader(StringReader(text)).use { reader ->
             reader.isLenient = false
             var nodes = 0

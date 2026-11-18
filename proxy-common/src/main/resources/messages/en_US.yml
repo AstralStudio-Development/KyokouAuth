@@ -45,10 +45,10 @@ bedrock:
   stale: "<#FACC15>The proof for this Bedrock connection is no longer current. Reconnect to try again."
 
 role-selection:
-  title: "<#22D3EE>Choose a role"
-  microsoft: "<#22D3EE>Microsoft role</#22D3EE> <#8B8B94>»</#8B8B94> <#FFFFFF><name>"
-  premium: "<#22D3EE>Java role</#22D3EE> <#8B8B94>»</#8B8B94> <#FFFFFF><name>"
-  enter: "<#D4D4D8>Click to enter the server"
+  title: "Choose a role"
+  microsoft: "<#22D3EE>Microsoft role</#22D3EE> <gray>»</gray> <#FFFFFF><name>"
+  premium: "<#22D3EE>Java role</#22D3EE> <gray>»</gray> <#FFFFFF><name>"
+  enter: "<gray>Click to enter the server"
   avatar-loading: "<#22D3EE>Loading role avatars..."
   avatar-unavailable: "<#8B8B94>Avatar unavailable"
   independent: "<#8B8B94>Separate role data; nothing is moved or merged"

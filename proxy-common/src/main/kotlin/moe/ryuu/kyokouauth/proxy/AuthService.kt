@@ -100,7 +100,8 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog,
             throw IllegalStateException("Current account association is unavailable")
         }
         val official = (rawLink as? moe.ryuu.kyokouauth.core.auth.AccountLinkResult.Linked)?.let {
-            javaProfiles.lookup(it.profile.uuid)
+            // Only public name/skin metadata may lag by 60s; this connection's proof and link stay fresh.
+            javaProfiles.lookupRecent(it.profile.uuid)
         }
         val link = if (official == null) rawLink else moe.ryuu.kyokouauth.core.auth.AccountLinkResult.Linked(
             moe.ryuu.kyokouauth.core.auth.LinkedJavaProfile(official.uuid, official.name))

@@ -254,7 +254,30 @@ def compile_native_probe(run, args, geyser, evidence):
     evidence["native_probe_sources"] = {path.name: COMMON.digest(path) for path in sources}
 
 
+def selector_packet(args):
+    """Accept only an explicit bounded GUI payload exported by the synthetic role E2E client."""
+    require(args.native_probe or args.selector_packet is None, "--selector-packet requires --native-probe")
+    if not args.native_probe: return None
+    require(args.selector_packet is not None, "--native-probe requires an explicit --selector-packet from this run's isolated role E2E")
+    source = COMMON.public_file(args.selector_packet, 32768)
+    isolated = (ROOT / ".narrafork/role-selection-e2e/runtime").resolve()
+    require(source.name == "role-selector.bin" and source.parent.parent == isolated and
+            re.fullmatch(r"floodgate-u-[a-z0-9-]+-[0-9a-f]{12}", source.parent.name) is not None,
+            "Selector payload must be the explicit floodgate-u isolated E2E export, not user/server data")
+    fixture_path = COMMON.public_file(source.parent / "isolated-role-fixture.json", 32768)
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    require(fixture.get("protocol") == 777 and fixture.get("mode") == "floodgate" and
+            fixture.get("avatars") is True and fixture.get("floodgateMessages") is True and
+            fixture.get("relation") == "synthetic-current-fixture" and
+            fixture.get("texture") == "synthetic-not-official-profile" and
+            fixture.get("realMicrosoftVerified") is False and fixture.get("realBedrockVerified") is False,
+            "Selector export is not the isolated synthetic fixed-protocol fixture")
+    require(source.stat().st_size > 0, "Selector payload is empty")
+    return source
+
+
 def run_smoke(args):
+    selector = selector_packet(args)
     BASE.mkdir(parents=True, exist_ok=True)
     run = BASE / uuid.uuid4().hex
     run.mkdir()
@@ -279,6 +302,12 @@ def run_smoke(args):
                 COMMON.digest(ext / "KyokouAuthAvatar.jar") == artifacts["extension_sha256"],
                 "Public artifacts changed during isolated copy")
         if args.native_probe:
+            captured = run / "role-selector.bin"
+            shutil.copyfile(selector, captured)
+            require(COMMON.digest(captured) == COMMON.digest(selector), "Synthetic selector changed during isolated copy")
+            evidence["selector_packet"] = {"source": str(selector.relative_to(ROOT)), "path": str(captured.relative_to(ROOT)),
+                                           "sha256": COMMON.digest(captured), "bytes": captured.stat().st_size,
+                                           "source_kind": "validated-real-gate-gui-synthetic-e2e"}
             compile_native_probe(run, args, artifacts["geyser"], evidence)
         data = ext / ID
         data.mkdir()
@@ -299,7 +328,9 @@ def run_smoke(args):
                    "-Dfile.encoding=UTF-8", "-Duser.language=en", "-Duser.country=US", f"-Duser.home={run / 'home'}",
                    f"-Djava.io.tmpdir={run / 'tmp'}", "-Dterminal.jline=false", "-Dterminal.ansi=false", "-Dio.netty.eventLoopThreads=2",
                    "-DGeyser.BedrockNetworkThreads=1", f"-Dsun.net.client.defaultConnectTimeout={args.resource_timeout_ms}",
-                   f"-Dsun.net.client.defaultReadTimeout={args.resource_timeout_ms}", "-jar", str(run / "Geyser-Standalone.jar"),
+                   f"-Dsun.net.client.defaultReadTimeout={args.resource_timeout_ms}",
+                   *([f"-Dkyokou.avatar.selectorPacket={run / 'role-selector.bin'}"] if selector else []),
+                   "-jar", str(run / "Geyser-Standalone.jar"),
                    "--nogui", "--config", str(run / "config.yml")]
         evidence["command"] = command
         # Retain only Java and snapshot placeholders; release Geyser/status once, no retry/rebind.
@@ -334,7 +365,9 @@ def run_smoke(args):
                 if args.native_probe:
                     for marker in ("KYOKOU_AVATAR_NATIVE_CUSTOM_PASS", "KYOKOU_AVATAR_NATIVE_STYLES_PASS"):
                         require(final.count(marker) == 1, "Missing/duplicate real native translation probe outcome")
-                    evidence["native_translation_assertions"] = {"production_registry_custom_path": True, "final_itemdata_name_lore_style": True}
+                    evidence["native_translation_assertions"] = {"production_registry_custom_path": True,
+                            "real_gate_gui_payload": True, "complete_native_item_translator": True,
+                            "registry_default_components": True, "every_visible_character_name_lore_style": True}
                 for marker in (READY, DEFINITIONS): require(final.count(marker) == 1, "Duplicate avatar lifecycle marker")
                 if failure is None: evidence["status"] = "passed"
             except Exception as caught: failure = failure or str(caught)
@@ -355,7 +388,8 @@ def main():
     parser.add_argument("--geyser-jar", type=Path, default=ROOT / ".narrafork/floodgate-e2e/deps/Geyser-Standalone-2.12.1-b1303.jar")
     parser.add_argument("--extension-jar", type=Path, default=ROOT / "platform-geyser-avatar/build/libs/KyokouAuth-GeyserAvatar-0.1.0-SNAPSHOT.jar")
     parser.add_argument("--client-assets-jar", type=Path)
-    parser.add_argument("--native-probe", action="store_true", help="run: compile a test-only probe first, then verify real registry translation/ItemData styles after Geyser initialization")
+    parser.add_argument("--native-probe", action="store_true", help="run: compile a test-only probe first, then replay --selector-packet through the complete fixed native translator")
+    parser.add_argument("--selector-packet", type=Path, help="explicit current isolated floodgate-u E2E role-selector.bin; no user config/key/DB is read")
     parser.add_argument("--timeout", type=int, choices=range(10, 91), default=90, metavar="10..90")
     parser.add_argument("--resource-timeout-ms", type=int, choices=range(1000, 30001), default=10000, metavar="1000..30000")
     parser.add_argument("--shutdown-timeout", type=int, choices=range(5, 31), default=20, metavar="5..30")

@@ -45,10 +45,10 @@ bedrock:
   stale: "<#FACC15>当前基岩连接的身份凭证已失效，请重新连接。"
 
 role-selection:
-  title: "<#22D3EE>请选择角色"
-  microsoft: "<#22D3EE>微软角色</#22D3EE> <#8B8B94>»</#8B8B94> <#FFFFFF><name>"
-  premium: "<#22D3EE>正版角色</#22D3EE> <#8B8B94>»</#8B8B94> <#FFFFFF><name>"
-  enter: "<#D4D4D8>点击进入服务器"
+  title: "请选择角色"
+  microsoft: "<#22D3EE>微软角色</#22D3EE> <gray>»</gray> <#FFFFFF><name>"
+  premium: "<#22D3EE>正版角色</#22D3EE> <gray>»</gray> <#FFFFFF><name>"
+  enter: "<gray>点击进入服务器"
   avatar-loading: "<#22D3EE>正在加载角色头像…"
   avatar-unavailable: "<#8B8B94>头像暂不可用"
   independent: "<#8B8B94>两套角色资料独立，不迁移或合并"

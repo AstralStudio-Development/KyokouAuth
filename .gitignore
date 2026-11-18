@@ -1,5 +1,5 @@
-# Local test environment. World, logs, plugin jars and the Geyser download are all disposable -
-# nothing under these directories is needed to build or understand the project.
+# Local deployments and obsolete test runtimes are never versioned: they can contain keys,
+# identities and worlds. Ignored does not mean safe to delete; preserve active instances and backups.
 run-live/
 run-geyser/
 run-lobby/
@@ -24,7 +24,7 @@ hs_err_pid*.log
 replay_pid*.log
 *.log
 
-# Session attachments and generated plans. Not part of the project.
+# Local assistant state, test caches/evidence, private deployments and backups; never publish.
 .narrafork/
 
 # Python helper bytecode is generated test output, not source.

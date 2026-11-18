@@ -490,6 +490,12 @@ class LoginGateContractTest {
         val javaPlayer = java.player(777)
         java.strongMicrosoft(javaPlayer)
         val javaMenu = javaPlayer.limbo.menus.single()
+        fun noLegacy(value: TextComponent): Boolean = '\u00a7' !in value.text && value.children.all(::noLegacy)
+        for (item in listOf(javaMenu.microsoft, javaMenu.premium)) {
+            assertTrue(noLegacy(item.name), "Java names must remain pure components, never literal Geyser legacy codes")
+            assertTrue(item.lore.all(::noLegacy), "Java lore must remain pure components")
+        }
+        assertTrue(noLegacy(javaMenu.title))
         assertEquals(null, javaMenu.microsoft.avatarIcon)
         assertEquals(null, javaMenu.premium.avatarIcon)
         assertEquals(listOf(java.catalogue.parsed("role-selection.enter").toLimbo()), javaMenu.microsoft.lore)
@@ -502,6 +508,12 @@ class LoginGateContractTest {
         disabled.services.runWork()
         assertEquals(null, disabledPlayer.limbo.menus.single().microsoft.avatarIcon)
         assertEquals(null, disabledPlayer.limbo.menus.single().premium.avatarIcon)
+        val disabledMenu = disabledPlayer.limbo.menus.single()
+        for (item in listOf(disabledMenu.microsoft, disabledMenu.premium)) {
+            assertEquals("\u00a7r\u00a7f", item.name.text, "Floodgate reset must also apply when avatars are disabled")
+            assertEquals("\u00a7r\u00a77", item.lore.single().text)
+        }
+        assertTrue(noLegacy(disabledMenu.title), "Geyser item formatting must not change the window title")
         assertEquals(0, disabled.services.avatarPrepareCalls)
 
         val single = Fixture(avatarConfig)
@@ -533,6 +545,10 @@ class LoginGateContractTest {
             val menu = player.limbo.menus.single()
             assertEquals(RoleAvatarIcon.MICROSOFT, menu.microsoft.avatarIcon, failure)
             assertEquals(RoleAvatarIcon.PREMIUM, menu.premium.avatarIcon, failure)
+            for (item in listOf(menu.microsoft, menu.premium)) {
+                assertEquals("\u00a7r\u00a7f", item.name.text, "Avatar Floodgate name lacks explicit native reset: $failure")
+                assertEquals("\u00a7r\u00a77", item.lore.single().text)
+            }
             assertTrue(player.limbo.messages.contains(fixture.catalogue.parsed("role-selection.avatar-unavailable").toLimbo()), failure)
             assertTrue(player.transfers.isEmpty(), failure)
             assertFalse(fixture.gate.isAuthenticated(player), failure)
@@ -809,6 +825,32 @@ class LoginGateContractTest {
             assertEquals(0, fixture.services.grants, failure)
             assertEquals(0, fixture.services.premiumBinds, failure)
         }
+    }
+
+    @Test
+    fun `unavailable public profile at final login stays denied with a retry message rather than internal error`() {
+        val fixture = Fixture(roleConfig)
+        val chooser = fixture.player(777)
+        fixture.strongMicrosoft(chooser)
+        fixture.gate.onRoleSelect(chooser.limbo, chooser.limbo.menus.single().generation, "premium")
+        fixture.services.runWork()
+        val resumed = fixture.player(777)
+        val pre = PreLoginEvent(resumed, "Steve", record.uuid, roleCookie = checkNotNull(chooser.transfers.single().third))
+        fixture.gate.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+        val profile = GameProfileRequestEvent(resumed, GameProfile(record.uuid, "Steve", emptyList()))
+        fixture.gate.onPrepareGameProfile(profile)
+        fixture.gate.onGameProfile(profile)
+        resumed.uniqueId = profile.gameProfile.id
+        resumed.username = profile.gameProfile.name
+        fixture.services.roleFailure = moe.ryuu.kyokouauth.core.auth.OfficialJavaProfileUnavailableException()
+        val login = LoginEvent(resumed)
+        fixture.gate.onLogin(login)
+        assertFalse(login.result.isAllowed)
+        assertEquals("Role unavailable » Reconnect and try again", login.result.reason?.plainText)
+        assertFalse(fixture.gate.isAuthenticated(resumed))
+        assertEquals(0, fixture.services.premiumBinds)
+        fixture.assertBackendDenied(resumed)
     }
 
     @Test

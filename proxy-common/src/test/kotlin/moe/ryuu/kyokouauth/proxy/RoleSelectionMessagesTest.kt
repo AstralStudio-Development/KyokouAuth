@@ -7,6 +7,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class RoleSelectionMessagesTest {
     @TempDir lateinit var directory: Path
@@ -15,6 +16,8 @@ class RoleSelectionMessagesTest {
     fun `selector uses brand labels neutral names and a short action instead of storage jargon`() {
         val messages = MessageCatalogue("zh_CN", directory.toFile()).also { it.load() }
         assertEquals("请选择角色", messages.plain("role-selection.title"))
+        assertTrue(messages.parsed("role-selection.title").spans.all { it.style.colour == null },
+            "Container titles must inherit the native GUI colour rather than a chat brand colour")
         val microsoft = messages.parsed("role-selection.microsoft", "name" to "SampleU")
         val premium = messages.parsed("role-selection.premium", "name" to "SampleJ")
         assertEquals("微软角色 » SampleU", microsoft.plainText)
@@ -23,5 +26,8 @@ class RoleSelectionMessagesTest {
         assertEquals(RichText.Colour.Hex(0x22D3EE), premium.spans.first().style.colour)
         assertFalse(premium.spans.any { it.style.colour == RichText.Colour.Hex(0x4ADE80) }, "Role type is not a success status")
         assertEquals("点击进入服务器", messages.plain("role-selection.enter"))
+        assertEquals(RichText.Colour.Named.GRAY, messages.parsed("role-selection.enter").spans.first().style.colour)
+        assertEquals(RichText.Colour.Named.GRAY, microsoft.spans.single { it.text == "»" }.style.colour)
+        assertEquals(RichText.Colour.Named.GRAY, premium.spans.single { it.text == "»" }.style.colour)
     }
 }

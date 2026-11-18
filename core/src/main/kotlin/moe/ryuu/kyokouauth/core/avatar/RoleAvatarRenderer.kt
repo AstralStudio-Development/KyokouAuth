@@ -9,7 +9,7 @@ import java.util.zip.CRC32
 import javax.imageio.ImageIO
 import javax.imageio.stream.MemoryCacheImageInputStream
 
-/** Fixed 32x32 nearest-neighbour isometric head: top (8,0), front (8,8), left side (16,8). */
+/** Fixed 32x32 nearest-neighbour head: Java inventory orientation, not a pixel-identical vanilla render. */
 object RoleAvatarRenderer {
     private val signature = byteArrayOf(-119, 80, 78, 71, 13, 10, 26, 10)
 
@@ -27,16 +27,19 @@ object RoleAvatarRenderer {
         for (y in 0 until 32) for (x in 0 until 32) {
             val px = x + 0.5
             val py = y + 0.5
-            val topU = (px - 16.0) / 32.0 + py / 16.0
-            val topV = -(px - 16.0) / 32.0 + py / 16.0
-            val frontU = px / 16.0
-            val frontV = (py - 8.0 - frontU * 8.0) / 16.0
-            val sideU = (px - 16.0) / 16.0
-            val sideV = (py - 16.0 + sideU * 8.0) / 16.0
+            // Vanilla template_skull GUI [30,45,0] with skull yaw 180: the player's
+            // right side is on screen LEFT, the front on RIGHT. Top U points up-right
+            // and V down-right; mirroring the old sprite would not preserve these UVs.
+            val topU = px / 32.0 - (py - 8.0) / 16.0
+            val topV = px / 32.0 + (py - 8.0) / 16.0
+            val rightU = px / 16.0
+            val rightV = (py - 8.0 - rightU * 8.0) / 16.0
+            val frontU = (px - 16.0) / 16.0
+            val frontV = (py - 16.0 + frontU * 8.0) / 16.0
             val sample = when {
                 inside(topU, topV) -> pixel(skin, 8, 0, 40, 0, topU, topV)
+                inside(rightU, rightV) -> pixel(skin, 0, 8, 32, 8, rightU, rightV)
                 inside(frontU, frontV) -> pixel(skin, 8, 8, 40, 8, frontU, frontV)
-                inside(sideU, sideV) -> pixel(skin, 16, 8, 48, 8, sideU, sideV)
                 else -> 0
             }
             sprite.setRGB(x, y, sample)

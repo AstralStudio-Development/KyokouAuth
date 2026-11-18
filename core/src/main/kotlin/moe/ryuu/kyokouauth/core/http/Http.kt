@@ -248,3 +248,16 @@ object Http {
 
     private const val USER_AGENT = "KyokouAuth (Minecraft server login plugin)"
 }
+
+/** Pure lexical check shared by strict JSON readers; does not initialize an HTTP client. */
+internal fun hasRawJsonStringControl(body: String): Boolean {
+    var quoted = false
+    var escaped = false
+    for (char in body) {
+        if (quoted && char.code < 0x20) return true
+        if (escaped) escaped = false
+        else if (quoted && char == '\\') escaped = true
+        else if (char == '"') quoted = !quoted
+    }
+    return false
+}

@@ -118,6 +118,7 @@ public final class RoleSelectionClient {
     private final boolean avatars;
     private final String avatarCase;
     private JsonObject avatarSnapshot;
+    private boolean selectorCaptured;
 
     private final Path run;
     private final JsonObject fixture;
@@ -321,7 +322,7 @@ public final class RoleSelectionClient {
             session.connect(true);
         }
 
-        void receive(Session source, Packet packet) {
+        void receive(Session source, Packet packet) throws Exception {
             if (packet instanceof ClientboundCookieRequestPacket request) {
                 require(request.getKey().equals(COOKIE), "Unexpected cookie scope");
                 require(!floodgate, "Native Floodgate proof must not request a Java resumption cookie");
@@ -378,6 +379,7 @@ public final class RoleSelectionClient {
                 for (int slot = 0; slot < content.getItems().length; slot++) {
                     if (slot != 12 && slot != 14) require(content.getItems()[slot] == null, "Unexpected item in isolated role menu");
                 }
+                if (!replay) captureSelector(content);
                 menuState = content.getStateId();
                 menuValidated.set(true); menuReady.countDown();
                 if (!replay && floodgateMessages && formSent.compareAndSet(false, true)) {
@@ -552,6 +554,36 @@ public final class RoleSelectionClient {
         return value.toString();
     }
 
+    private synchronized void captureSelector(ClientboundContainerSetContentPacket content) throws Exception {
+        // Resyncs after rejected clicks are legitimate; retain the first validated menu only.
+        if (selectorCaptured) return;
+        // Only this just-validated, synthetic isolated GUI is exported; never keys, cookies or login packets.
+        Path target = run.resolve("role-selector.bin");
+        require(!Files.exists(target), "Synthetic selector fixture was already captured");
+        ByteBuf buffer = Unpooled.buffer();
+        try {
+            content.serialize(buffer);
+            require(buffer.readableBytes() > 0 && buffer.readableBytes() <= 32768, "Selector fixture exceeds its packet budget");
+            byte[] bytes = new byte[buffer.readableBytes()];
+            buffer.readBytes(bytes);
+            Files.write(target, bytes, StandardOpenOption.CREATE_NEW);
+            selectorCaptured = true;
+            System.out.println("ROLE_CLIENT_SELECTOR_CAPTURE packet=role-selector.bin bytes=" + bytes.length + " source=validated-native-gui");
+        } finally { buffer.release(); }
+    }
+
+    private String selectorPlain(Component component, char baseCode) {
+        String value = plain(component);
+        if (!floodgate) {
+            require(value.indexOf('\u00a7') < 0, "Java selector must remain pure components without literal legacy codes");
+            return value;
+        }
+        String prefix = "\u00a7r\u00a7" + baseCode;
+        require(value.startsWith(prefix) && value.indexOf('\u00a7', prefix.length()) < 0,
+                "Only the known Geyser-bound reset/base prefix is permitted in Floodgate selector text");
+        return value.substring(prefix.length());
+    }
+
     private void validateHead(ItemStack item, boolean microsoft) {
         require(item != null && item.getAmount() == 1 && item.getId() == fixture.get("playerHeadId").getAsInt(), "Expected official player_head registry item");
         var components = item.getDataComponentsPatch();
@@ -561,11 +593,11 @@ public final class RoleSelectionClient {
         GameProfile profile = resolved.getProfile();
         require((microsoft ? U : J).equals(profile.getId()) && (microsoft ? U_NAME : J_NAME).equals(profile.getName()), "Head profile does not match its server-selected role");
         Component name = components.get(DataComponentTypes.CUSTOM_NAME);
-        require(name != null && plain(name).equals((microsoft ? "Microsoft role » " + U_NAME : "Java role » " + J_NAME)), "Role display name differs from the isolated English template");
+        require(name != null && selectorPlain(name, 'f').equals((microsoft ? "Microsoft role » " + U_NAME : "Java role » " + J_NAME)), "Role display name differs from the isolated English template");
         require(name.decoration(TextDecoration.ITALIC) == TextDecoration.State.FALSE && name.color() != null,
             "Role display-name root must explicitly disable italic and supply a base color");
         List<Component> lore = components.get(DataComponentTypes.LORE);
-        require(lore != null && lore.size() == 1 && plain(lore.getFirst()).equals("Click to enter the server"), "Expected exactly one concise enter-server lore line");
+        require(lore != null && lore.size() == 1 && selectorPlain(lore.getFirst(), '7').equals("Click to enter the server"), "Expected exactly one concise enter-server lore line");
         require(lore.getFirst().decoration(TextDecoration.ITALIC) == TextDecoration.State.FALSE && lore.getFirst().color() != null,
             "Role lore root must explicitly disable italic and supply a base color");
         var marker = components.get(DataComponentTypes.CUSTOM_MODEL_DATA);
