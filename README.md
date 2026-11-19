@@ -4,7 +4,7 @@
 
 适用于 Velocity 和 BungeeCord 的离线模式代理。只装在代理端，无需客户端模组或独立登录服。
 
-[安装](#安装指南)　[基岩版](#可选基岩版接入与双角色选择)　[验证大厅](#自定义-limbo-地图与计分板)　[AuthMe 迁移](#旧服-authme-离线档案认领)　[管理命令](#常用管理命令)
+[安装](#安装指南)　[基岩版](#可选基岩版接入与双角色选择)　[验证大厅](#自定义-limbo-地图与计分板)　[AuthMe 迁移](#旧服-authme-离线档案认领)　[管理命令](#常用管理命令)　[常见问题](#常见问题)
 
 ## 登录流程概览
 
@@ -13,7 +13,9 @@
 | **Java 版** | 已在 Mojang 注册的正版名 | 自动走正版会话握手直连，冒名离线连接直接拒绝 |
 | **Java 版** | 未被正版占用的名字 | 进入内置 Limbo 验证空间，在聊天栏打开微软设备码链接绑定 Xbox 身份（XUID）后放行 |
 | **基岩版**（可选） | 未关联账号（仅启用 `bedrock`） | 校验同代理 Floodgate 身份，保留隔离前缀（如 `.`）直接进入，无需设备码 |
-| **基岩版**（可选） | 官方 Global 关联账号（同时启用 `role-selection`） | 弹出原版箱子菜单，在微软角色与正版角色间独立选择进入 |
+| **基岩版**（可选） | 官方 Global 关联账号（同时启用 `role-selection`） | 有两个可用角色时弹出原版箱子菜单；只有一个可用角色时直接进入 |
+
+首次完成微软绑定后，按提示从服务器列表重连一次，新连接会使用绑定后的身份。已有绑定的玩家按[免验设置](#常用配置)决定是否要重新验证。正版名只接受正版会话验证，不会降级到设备码登录。
 
 ## 安装指南
 
@@ -43,11 +45,18 @@ KyokouAuth 必须配合代理转发和下游子服防火墙隔离使用，**严�
 
 ### 2. 首次启动与目标子服
 
-启动代理后会自动生成 `plugins/kyokouauth/config.yml` 与 `messages/` 语言文件，默认使用开箱即用的 SQLite 存储。
+首次启动后，插件会在自己的数据目录生成 `config.yml` 和 `messages/`。Velocity 通常使用 `plugins/kyokouauth/`，BungeeCord 使用 `plugins/KyokouAuth/`。下文的相对路径都以这个数据目录为准。默认用本地 SQLite，不需要另建数据库。
 
-玩家通过验证后会被送往 `post-login.server` 指定的子服；留空则按代理自身的默认服务器顺序连接。
+如果希望玩家**完成 Limbo 验证后**统一进入大厅，在插件的 `config.yml` 中设置子服在代理里注册的名称：
 
-升级前请备份数据库和配置。仅换回旧版 JAR 不会回滚数据库结构。
+```yaml
+post-login:
+  server: "lobby"
+```
+
+留空则使用代理的默认服务器顺序。能够直接登录、不经过 Limbo 的玩家仍走代理的首服路由。
+
+首次开放前，建议用一个正版名和一个未注册的 Java 名分别登录，确认正版能直进、待验证的玩家不能切服。也要从代理以外的网络确认无法直连后端端口。升级前请备份数据库和配置；只换回旧 JAR 不会回滚数据库结构。
 
 ## 可选：基岩版接入与双角色选择
 
@@ -58,8 +67,16 @@ KyokouAuth 必须配合代理转发和下游子服防火墙隔离使用，**严�
 需要由 **Geyser → 同一代理进程内的 Floodgate → KyokouAuth** 组成信任链：
 
 1. 在运行 KyokouAuth 的**同一个代理**上安装对应平台的 Floodgate（适配 2.2.5 b141），下游子服无需安装。
-2. 将 Geyser（目标版本 2.12.1 b1303）指向该代理，配置 `auth-type: floodgate` 并开启 `validate-bedrock-login: true`，配对代理 Floodgate 的 `key.pem`。
-3. 在 `plugins/kyokouauth/config.yml` 中开启：
+2. 将 Geyser（目标版本 2.12.1 b1303）指向该代理，配对代理上 Floodgate 生成的 `key.pem`。在 **Geyser 的配置文件**中设置：
+   ```yaml
+   java:
+     auth-type: floodgate
+   advanced:
+     bedrock:
+       validate-bedrock-login: true
+   ```
+   请勿公开或提交 `key.pem`。
+3. 在 **KyokouAuth 的配置文件**中开启：
    ```yaml
    bedrock:
      enabled: true
@@ -82,12 +99,13 @@ role-selection:
 ```
 
 - **两套角色完全独立**：微软角色（U）使用本服绑定的稳定 UUID；正版角色（J）使用 Mojang 官方 UUID。两个角色的背包、权限、存档互不干扰，不合并数据。
-- **原版箱子菜单**：同时具备两种可用角色时弹出原版菜单（命名牌代表微软角色，钻石代表正版角色）。
-- **重连机制**：若所选角色与当前基岩连接的 UUID 和名字一致则直接进入（0 次重连）；若切换到另一套角色，系统会提示玩家从服务器列表手动重连一次即可进入（无需额外传输插件或端口）。
+- **原版箱子菜单**：命名牌代表微软角色，钻石代表正版角色。关闭菜单不算选择，超时也不会放行。只支持官方 Global 关联；仅在本服做的本地关联不能用于选角。
+- **重连机制**：所选角色与当前连接的 UUID 和名字一致时直接进入；否则按提示在 `hint-ttl-seconds` 内用同一个基岩账号从服务器列表重连一次。默认等待 30 秒，不需要 Transfer 扩展或额外端口。
+- **皮肤**：正版角色使用官方皮肤；微软角色可使用 SkinsRestorer 中为该角色设置的皮肤，未设置时使用默认皮肤。
 
 ## 自定义 Limbo 地图与计分板
 
-将 WorldEdit 导出的 Sponge v2/v3 `.schem` 放置在 `plugins/kyokouauth/` 目录下（与 `config.yml` 同级）。
+将 WorldEdit 导出的 Sponge v2/v3 `.schem` 放到插件数据目录（与 `config.yml` 同级）。地图和计分板可以分别启用：只改出生点就填 `spawn`，只加计分板就开启 `sidebar.enabled`。
 
 在 `config.yml` 的 `limbo:` 节点配置地图位置与固定出生点坐标（x/y/z/yaw/pitch），固定玩家每次进入验证空间的位置：
 
@@ -119,50 +137,67 @@ limbo:
 - **出生点**：在制图世界站到想要的位置，用 F3 记录坐标和朝向。`yaw` 控制左右朝向，`pitch` 为负时抬头、为正时低头。每次进入 Limbo 都用这组坐标和朝向。
 - **计分板**：仅在 Limbo 显示，最多 15 行静态文字。标题、行和 Limbo MOTD 支持 `<#RRGGBB>`。修改后重启代理。
 
-## 配置与语言升级
+## 常用配置
 
-插件在升级后启动时，会自动补齐 `config.yml` 中缺失的新配置项，并补齐 `messages/` 内置语言文件缺失的键位。
-- 补齐前会自动在同目录下保存 `.pre-upgrade.bak` 备份文件。
-- 原有配置值、注释以及服主自定义的语言翻译不会被覆盖。
-- 也可以通过 `/ka reload` 命令热重载语言文件并自动补齐内置词条。
+完整选项见[默认配置模板](proxy-common/src/main/resources/config.yml)。下面是开服后最常调整的几项：
+
+| 想调整什么 | 配置项 | 默认行为 |
+|---|---|---|
+| 微软账号多久重验 | `session.hours`、`session.bind-address` | 验证后 12 小时内同 IP 免验；`hours: 0` 表示每次验证。若代理只能看到多个玩家共用的出口 IP，又希望强制验证，应设为 `0`。 |
+| 允许玩家更换登录名 | `verification.auto-rename` | 同一个微软账号重新验证后，可以绑定到空闲的非正版名；UUID 不变，按 UUID 存储的资料继续可用。 |
+| 设备码登录超时 | `verification.timeout-seconds` | 默认 300 秒；超时后玩家需重新连接。 |
+| 验证期间隐藏、拦截命令 | `verification.blocked-commands` | 默认拦截 `server`。填写不带 `/` 和参数的命令名；`[]` 清空列表，`["*"]` 拦截全部。清空也不会让未验证玩家切服。 |
+| 更换存储 | `database.type` | 默认 SQLite。使用 MySQL、MariaDB 等服务型数据库时，另填地址、库名和凭据。 |
+| 修改玩家提示 | `messages.locale`、`messages/` | 优先匹配玩家客户端语言，找不到时使用配置的默认语言。内置简中和英文，支持 `<#RRGGBB>`、`<newline>` 等标记。 |
+
+### 升级时保留原配置
+
+无需删除 `config.yml` 或语言文件。升级后首次启动会补齐缺失字段，不覆盖已有值、注释和自定义文案。实际修改前，会为对应文件保存同目录的 `.pre-upgrade.bak`。自建语言没有同名内置模板时，缺失文案由内置语言兜底。
+
+修改 `config.yml` 后重启代理；只改 `messages/` 时可执行 `/ka reload`，不需要重启。
 
 ## 旧服 AuthMe 离线档案认领
 
-**Velocity 和 BungeeCord 均支持 AuthMe 旧档认领。** 玩家可将旧档认领到新的 Java 微软角色，不能认领到基岩版或 Java 正版角色。认领后沿用旧存档 UUID，但不会自动把存档文件搬到新子服。
+**Velocity 和 BungeeCord 均支持 AuthMe 旧档认领。** 玩家证明旧账号归自己所有，再完成新的微软验证，即可让新 Java 微软角色沿用旧存档 UUID。基岩版和 Java 正版角色不参与认领。
 
-自助认领支持 AuthMe 默认带盐 SHA256（`$SHA$` 格式）；启用了 TOTP 的账号不能走旧密码自助认领。
+认领不搬运世界或存档文件。新子服仍需由服主恢复旧存档；原版及按 UUID 识别玩家的插件才能沿用原数据，按名字或私有账号表保存的插件需单独核对。旧密码自助认领支持 AuthMe 默认带盐 SHA256（`$SHA$` 格式），不适用于启用了 TOTP 或使用其他哈希格式的账号。
 
 <a name="推荐复制材料后命令扫描无需迁移配置velocity"></a>
 
 ### 迁移步骤
 
-1. **备份旧服并准备文件**：停止旧服写入，将所需文件复制到代理的 `plugins/kyokouauth/migration/inbox/` 目录：
+默认不开启认领。按下面步骤导入即可，**无需修改 `migration.*` 配置或重启代理**。
+
+1. **停写、备份、复制。** 使用同一份一致备份中的 AuthMe 账号库和玩家档案。将下列材料放进插件数据目录：
    ```text
-   plugins/kyokouauth/migration/inbox/
+   migration/inbox/
    ├─ AuthMe/
    │  ├─ config.yml
-   │  └─ <数据库名>.db          # 仅 SQLite，如使用 MySQL/MariaDB 则无需复制 .db
+   │  └─ <数据库名>.db          # 仅 SQLite，保留旧配置指定的文件名
    ├─ playerdata/
-   │  └─ <历史UUID>.dat         # 旧世界玩家存档文件
-   └─ usercache.json            # 可选辅助记录
+   │  └─ <历史UUID>.dat         # 旧世界的实际玩家存档，不是空文件
+   └─ usercache.json            # 可选，取自同一旧服，不能代替 playerdata
    ```
-   若旧服用 MySQL/MariaDB，无需重复填写连接凭据。数据库和当前代理在同一运行环境时，用 `--local-source` 明确确认；旧配置仍指向旧机的 `localhost` 时，改用 `--source-host`（需要时加 `--source-port`）指定实际地址。
-2. **控制台后台扫描**：在代理控制台执行：
+   多个世界可分别放在 `worlds/<原世界名>/playerdata/` 下，避免互相覆盖。SQLite 必须是一致性快照，不要直接复制正在写入的数据库。
+2. **选择来源并扫描。** 旧 AuthMe 配置中的 `DataSource.backend` 必须明确为 SQLite、MySQL 或 MariaDB。插件不会按目录里的 `.db` 猜来源。MySQL/MariaDB 使用复制来的配置，不用重填凭据；远程库须通过 TLS 校验。按实际来源选择一条命令：
    ```text
    ka migration scan
-   ka migration progress
-   ka migration issues
+   ka migration scan --local-source
+   ka migration scan --source-host old-db.example --source-port 3306
    ```
-3. **确认并启用本地快照**：检查异常无误后，使用扫描给出的 token 启用快照（5 分钟内有效）：
-   ```text
-   ka migration confirm <token>
-   ```
-   启用后认领只读本地快照，不再依赖旧数据库。如需停止新认领，可执行 `ka migration disable`。
-4. **玩家在 Limbo 验证旧密码**：玩家以**未被占用的全新名字**进入验证空间，执行私密命令：
+   第一条适用于 SQLite 或已配置远程地址的数据库。第二条只用于确认数据库与当前代理处于同一运行环境；旧机配置里的 `localhost` 不会自动指向旧机。第三条仅覆盖本次连接地址。用 `ka migration progress` 查看进度，`ka migration issues [页码]` 检查缺失档案、重名和冲突。修正材料后可重新扫描；扫描本身不开放认领。
+3. **确认来源并启用。** 确认旧库已停写、账号与档案确实同源后，在 5 分钟内输入 `ka migration confirm <token>`。启用后，认领和重启都只使用本地快照，不再连接旧库。可移走收件材料，但要保留并保护插件生成的 `migration/` 快照；其中含密码哈希，不要公开分享。
+4. **玩家本人认领。** 用一个从未绑定且未被正版占用的 Java 名字进入 Limbo，按提示提交旧身份：
    ```text
    /ka claim authme <旧名字> <旧密码>
    ```
-5. **双重确认与绑定**：旧密码核验通过后，玩家当场完成一次微软设备码登录以证明新身份，经确认后系统原子提交绑定，断开后重新连接即可继承历史离线档案。
+   先确认旧档和新名字，再完成一次新的微软设备码验证，最后确认绑定并重连一次。用 `/ka claim status` 查看状态，或用 `/ka claim cancel` 取消。只在 Limbo 的认领入口输入旧密码；不要发到普通聊天或交给管理员。私密命令不会为离线模式连接增加加密，也无法替玩家清除客户端命令历史。
+
+### 暂停认领与处理异常
+
+`ka migration cancel` 取消扫描或未确认的预检，不影响已启用的快照。`ka migration disable` 持久停止新认领，**不会撤销已认领角色的 UUID**。
+
+缺少可信旧档、出现多重对应或哈希不受支持时，不要按名字推算 UUID，也不要用审批代替所有权核验。确需人工处理的可信个案，可在控制台用 `migration check` / `migration import` 检查并登记，在独立核实账号归属后再用 `migration pending` / `migration approve` 授权当前等待会话。玩家仍须完成自己的微软验证与确认。
 
 ## 常用管理命令
 
@@ -188,9 +223,21 @@ ka migration issues [page]                                  分页查看预检�
 ka migration cancel                                         取消扫描或未确认的预检
 ka migration confirm <token>                                确认预检并正式启用快照
 ka migration disable                                        停用新认领（保留已有绑定）
+ka migration check <batch> <旧名> <实际历史UUID>               只读检查单条旧档
+ka migration import <batch> <旧名> <实际历史UUID>              登记核实过的单条旧档
 ka migration pending                                        查看等待人工核验的会话
-ka migration approve <session> <recordId> verified          人工核验通过授权
+ka migration approve <session> <recordId> verified          为已独立核验的会话授权
 ```
+
+## 常见问题
+
+**验证通过却没进大厅。** 先看客户端是否提示重连；首次绑定或认领需要按提示重连一次。若验证后仍进不了子服，检查 `post-login.server` 是否为代理已注册的名称，以及代理能否连到该子服。不要开放子服公网端口来绕过验证。
+
+**一直收不到微软设备码。** 先看对应的断开或等待提示，再检查代理到微软服务的网络；若提示 Mojang 名字查询失败，检查代理到 Mojang 的网络。`premium.directory-network` 只控制正版名字查询走 JVM 代理还是直连，不影响微软验证。
+
+**放了地图却启动失败。** 确认 `.schem` 和插件配置同级、文件名正确，地图整体位于出生点附近的可视区块内。如果错误指出某个版本缺少方块，可在 WorldEdit 中换成兼容方块，或启用 `unknown-blocks-as-air` 后检查替换效果。
+
+**扫描到了账号，为什么不能认领？** 扫描成功不等于确认启用。先用 `ka migration progress` 查看状态，用 `ka migration issues` 检查档案冲突。已在旧连接里的玩家先重连，再用一个空闲且未被正版占用的 Java 名字进入 Limbo。
 
 ## 兼容性与环境要求
 
