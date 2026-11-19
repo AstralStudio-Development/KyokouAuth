@@ -1,5 +1,6 @@
 package moe.ryuu.kyokouauth.core.text
 
+import moe.ryuu.kyokouauth.core.config.YamlDefaults
 import moe.ryuu.kyokouauth.core.config.YamlDocument
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -11,11 +12,8 @@ import java.util.concurrent.ConcurrentHashMap
  * because an owner who has translated the plugin will otherwise meet half of it in English at
  * exactly the moment a player is being rejected.
  *
- * Files are written out on first start rather than read from inside the jar: an operator who wants to
- * change one line should not have to extract a file first. The bundled copies stay as the source for
- * that extraction and as the fallback for any key an operator's file has not caught up with - the
- * alternative is showing a player the *key*, which is what happens when a translation predates a
- * release.
+ * Bundled languages are written out on first start and get new keys without replacing local translations.
+ * The bundled copies remain the fallback for custom locales and files that cannot be updated.
  *
  * Platforms differ in how a message reaches a player (a chat packet, a kick screen, a title), so this
  * class only resolves and parses. Rendering belongs to the platform.
@@ -47,11 +45,12 @@ class MessageCatalogue(
      */
     private val fixed = ConcurrentHashMap<String, RichText.Parsed>()
 
+    @Synchronized
     fun load() {
         directory.mkdirs()
-
-        extract("en_US")
-        extract(defaultLocale)
+        val installed = directory.listFiles { _, name -> LOCALE_FILE.matches(name) }.orEmpty()
+        val tags = setOf("en_US", "zh_CN", defaultLocale) + installed.map { it.name.removeSuffix(".yml") }
+        tags.forEach(::syncBundled)
 
         bundles.clear()
         directory.listFiles()
@@ -118,17 +117,15 @@ class MessageCatalogue(
         return loaded
     }
 
-    /** Copies the bundled file to disk unless the operator already has one. */
-    private fun extract(tag: String) {
-        val target = File(directory, "$tag.yml")
-        if (target.isFile) return
-
-        val resource = resources.getResourceAsStream("messages/$tag.yml") ?: return
+    private fun syncBundled(tag: String) {
+        val name = "$tag.yml"
+        if (!LOCALE_FILE.matches(name)) return
+        val resource = resources.getResourceAsStream("messages/$name") ?: return
         try {
-            resource.use { target.writeBytes(it.readBytes()) }
-        } catch (_: Throwable) {
-            // A read-only data folder is the operator's to notice, not a reason to fail startup: the
-            // bundled copy is still read directly.
+            YamlDefaults.sync(directory.toPath().resolve(name), resource.use { it.readBytes() })
+        } catch (_: Exception) {
+            // A malformed or unwritable locale must not prevent login; the bundled file remains available.
+            LOG.warning("Could not upgrade $name; keeping the existing file and bundled message fallback")
         }
     }
 
@@ -142,6 +139,11 @@ class MessageCatalogue(
     }.getOrNull()
 
     private fun flatten(bytes: ByteArray): Map<String, String> = YamlDocument.load(bytes)
+
+    private companion object {
+        val LOCALE_FILE = Regex("[A-Za-z0-9_-]{1,32}\\.yml")
+        val LOG = java.util.logging.Logger.getLogger(MessageCatalogue::class.java.name)
+    }
 
     private fun normalise(clientLocale: String): String {
         val parts = clientLocale.split('_')

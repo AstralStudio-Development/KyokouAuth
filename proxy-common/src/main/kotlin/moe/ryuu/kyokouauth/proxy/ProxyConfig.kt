@@ -1,5 +1,6 @@
 package moe.ryuu.kyokouauth.proxy
 
+import moe.ryuu.kyokouauth.core.config.YamlDefaults
 import moe.ryuu.kyokouauth.core.config.YamlDocument
 import moe.ryuu.kyokouauth.core.http.Http
 import moe.ryuu.kyokouauth.core.storage.DatabaseDescriptor
@@ -9,9 +10,7 @@ import moe.ryuu.kyokouauth.limbo.LimboSettings
 import moe.ryuu.kyokouauth.limbo.Schematic
 import java.io.File
 import java.net.URI
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.util.Locale
 
 /** Missing keys retain defaults; explicitly malformed settings never silently disable protection. */
@@ -193,16 +192,13 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
         fun load(dataFolder: File): ProxyConfig {
             check(dataFolder.isDirectory || dataFolder.mkdirs()) { "Cannot create the authentication data directory" }
             val file = File(dataFolder, "config.yml")
-            if (!file.exists()) {
-                val temporary = Files.createTempFile(dataFolder.toPath(), "config-", ".part")
-                try {
-                    val stream = ProxyConfig::class.java.classLoader.getResourceAsStream("config.yml")
-                        ?: error("Missing bundled authentication configuration")
-                    stream.use { input -> Files.newOutputStream(temporary).use(input::copyTo) }
-                    try { Files.move(temporary, file.toPath(), StandardCopyOption.ATOMIC_MOVE) }
-                    catch (_: AtomicMoveNotSupportedException) { Files.move(temporary, file.toPath()) }
-                } finally { Files.deleteIfExists(temporary) }
-            }
+            val defaults = ProxyConfig::class.java.classLoader.getResourceAsStream("config.yml")?.use { it.readBytes() }
+                ?: error("Missing bundled authentication configuration")
+            YamlDefaults.sync(file.toPath(), defaults, mapOf(
+                // Backfilling these canonical keys with the template default would override a legacy setting.
+                "limbo.biome" to "limbo.biome-id",
+                "role-selection.hint-ttl-seconds" to "role-selection.transfer-ttl-seconds",
+            ))
             check(file.isFile) { "Authentication configuration must be a regular file" }
             return ProxyConfig(YamlDocument.load(file), dataFolder)
         }

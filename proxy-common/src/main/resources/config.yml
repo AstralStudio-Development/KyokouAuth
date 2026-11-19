@@ -1,8 +1,7 @@
 # KyokouAuth on Velocity / BungeeCord
 #
-# Settings are loaded once at startup. Missing keys fall back to built-in defaults, and a missing
-# file is created from the plugin jar. `/kyokouauth reload` reloads message files only; changes in
-# this file take effect after restarting the proxy.
+# Settings are loaded at startup. The plugin adds missing settings from the current version without
+# overwriting existing ones. `/kyokouauth reload` reloads messages only; restart the proxy for config changes.
 
 database:
   # sqlite | h2 | mysql | mariadb | postgresql

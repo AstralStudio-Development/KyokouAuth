@@ -227,7 +227,7 @@ ka migration approve <session> <recordId> verified
 
 ## 常用配置与管理命令
 
-配置文件位于 `plugins/kyokouauth/config.yml`（完整默认注释见 [config.yml](proxy-common/src/main/resources/config.yml)）。除语言文件外，修改 `config.yml` 后均需重启代理生效。
+配置文件位于 `plugins/kyokouauth/config.yml`（完整默认注释见 [config.yml](proxy-common/src/main/resources/config.yml)）。升级后正常启动即可补齐缺失配置和内置语言的新字段（也可用 `/ka reload` 补齐内置语言），无需删除旧文件。现有值、注释和自定义文案不会被改写；实际补齐前会保存同目录的 `.pre-upgrade.bak`。自建语言没有同名内置模板时继续使用内置文案兜底。修改 `config.yml` 后需重启代理生效。
 
 ### 关键配置项
 
