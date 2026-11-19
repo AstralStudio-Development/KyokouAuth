@@ -65,6 +65,7 @@ internal class VelocityPorts(private val proxy: ProxyServer) : moe.ryuu.kyokouau
 
     fun commandSource(native: com.velocitypowered.api.command.CommandSource): CommandSource =
         if (native is Player) player(native) else object : CommandSource {
+            override val isConsole get() = native is com.velocitypowered.api.proxy.ConsoleCommandSource
             override fun hasPermission(permission: String) = native.hasPermission(permission)
             override fun sendMessage(message: RichText.Parsed) { native.sendMessage(message.toAdventure()) }
         }

@@ -22,6 +22,8 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.launcher)
+    // Native privacy tests exercise the fixed public proxy implementation, never package it.
+    testRuntimeOnly(files(rootProject.file("run-proxy/velocity.jar")))
 }
 
 tasks.processResources {

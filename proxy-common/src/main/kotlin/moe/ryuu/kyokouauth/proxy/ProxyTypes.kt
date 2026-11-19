@@ -10,6 +10,7 @@ import java.util.concurrent.CompletableFuture
 /** Ports retain exact platform object identity; no native proxy or component types cross here. */
 interface CommandSource {
     val locale: String? get() = null
+    val isConsole: Boolean get() = false
     fun hasPermission(permission: String): Boolean
     fun sendMessage(message: RichText.Parsed)
 }

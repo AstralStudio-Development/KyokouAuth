@@ -61,10 +61,16 @@ class CachedIdentityRepository(private val delegate: IdentityStore) : IdentitySt
      * database, so it cannot drift into holding something the database would have refused.
      */
     override fun claim(identity: Identity, now: Long): ClaimResult =
-        delegate.claim(identity, now).also { invalidate(identity.uuid) }
+        delegate.claim(identity, now).also { result ->
+            invalidate(identity.uuid)
+            if (result is ClaimResult.Bound) invalidate(result.record.uuid)
+        }
 
     override fun claimRenamingMicrosoft(identity: Identity.Microsoft, now: Long): ClaimResult =
-        delegate.claimRenamingMicrosoft(identity, now).also { invalidate(identity.uuid) }
+        delegate.claimRenamingMicrosoft(identity, now).also { result ->
+            invalidate(identity.uuid)
+            if (result is ClaimResult.Bound) invalidate(result.record.uuid)
+        }
 
     override fun rename(uuid: UUID, newName: GameName, now: Long): ClaimResult =
         delegate.rename(uuid, newName, now).also { invalidate(uuid) }

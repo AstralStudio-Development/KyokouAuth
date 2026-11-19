@@ -2,6 +2,7 @@ package moe.ryuu.kyokouauth.core.auth
 
 import moe.ryuu.kyokouauth.core.identity.GameName
 import moe.ryuu.kyokouauth.core.identity.Identity
+import moe.ryuu.kyokouauth.core.identity.Xuid
 import moe.ryuu.kyokouauth.core.storage.BoundIdentity
 import moe.ryuu.kyokouauth.core.storage.IdentityStore
 import moe.ryuu.kyokouauth.core.storage.PlaySession
@@ -27,6 +28,9 @@ class AuthCoordinator(
     private val sessionBindsAddress: Boolean = true,
     private val autoRenameMicrosoft: Boolean = false,
     private val directory: (String) -> MojangDirectory.Lookup = MojangDirectory::lookup,
+    private val microsoftProfile: (Xuid) -> UUID = { xuid ->
+        identities.bySubject(BoundIdentity.Kind.XUID, xuid.value.toString())?.uuid ?: Identity.ofXuid(xuid)
+    },
 ) {
 
     sealed class Decision {
@@ -184,6 +188,9 @@ class AuthCoordinator(
         // A local play-session record can never replace Mojang authentication, even if the
         // directory is throttled. Only XUID identities may use the device-code/session path.
         if (bound.kind == BoundIdentity.Kind.MOJANG) return Decision.MojangSession(bound.uuid)
+        if (microsoftProfile(Xuid(bound.subject.toLong())) != bound.uuid) {
+            return Decision.Reject(RejectReason.INTERNAL_ERROR, "Microsoft profile ownership changed")
+        }
         val session = sessions.find(bound.uuid)
         if (session != null && session.isValidFor(address, now, sessionBindsAddress) && sessionMillis > 0) {
             return Decision.Admit(bound.toIdentity(), bound)
@@ -234,7 +241,7 @@ class AuthCoordinator(
                 )
         }
 
-        return claim(Identity.Microsoft(name, xuid, gamertag))
+        return claim(Identity.Microsoft(name, xuid, gamertag, microsoftProfile(xuid)))
     }
 
     /** Same as [bindMicrosoft], for an identity whose Mojang UUID has just been proven. */

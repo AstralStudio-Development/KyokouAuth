@@ -102,7 +102,7 @@ class KyokouAuthVelocity @Inject constructor(
                     current === container && current.instance.orElse(null) === instance
                 }
             }
-            val auth = AuthService(config, logger.toProxyLog(), skins).also { this.auth = it }
+            val auth = AuthService(config, logger.toProxyLog(), skins, supportsProfileClaims = true).also { this.auth = it }
             val gate = LoginGate(server, config, messages, auth, logger, bedrock::probe).also { this.gate = it }
             server.eventManager.register(this, gate)
             val limbo = LimboServer(

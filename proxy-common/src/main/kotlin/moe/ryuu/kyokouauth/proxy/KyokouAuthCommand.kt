@@ -45,6 +45,11 @@ class KyokouAuthCommand(
     fun hasPermission(source: CommandSource): Boolean = source.hasPermission(PERMISSION)
 
     fun execute(source: CommandSource, args: Array<out String>) {
+        // Player credentials are consumed before this public dispatcher. Never process/echo them here.
+        if (args.firstOrNull()?.equals("claim", ignoreCase = true) == true) {
+            tell(source, "migration.claim-private-only")
+            return
+        }
         if (!hasPermission(source)) return
 
         if (args.isEmpty()) {
@@ -61,6 +66,7 @@ class KyokouAuthCommand(
             "untrust" -> untrust(source, args)
             "status" -> status(source)
             "reload" -> reload(source)
+            "migration" -> migration(source, args)
             else -> tell(source, "command.unknown-subcommand", "name" to args[0])
         }
     }
@@ -80,11 +86,109 @@ class KyokouAuthCommand(
         }
     }
 
+    private fun migration(source: CommandSource, args: Array<out String>) {
+        if (!source.isConsole) { tell(source, "migration.console-only"); return }
+        val operation = args.getOrNull(1)?.lowercase(Locale.ROOT)
+        if (!config.profileClaimsEnabled && operation !in setOf("scan", "confirm", "issues", "progress", "status", "cancel", "disable")) {
+            tell(source, "migration.disabled"); return
+        }
+        when (operation) {
+            "scan" -> {
+                if (args.size != 2) { tell(source, "command.migration-usage"); return }
+                val scan = auth.scanInboxLegacyImport()
+                if (!scan.isCompletedExceptionally) tell(source, "migration.scan-started")
+                scan.migrationAnswer(source) { preview ->
+                    migrationReport(source, preview.report)
+                    tell(source, "migration.scan-confirm", "token" to preview.token)
+                }
+            }
+            "confirm" -> {
+                if (args.size != 3) { tell(source, "command.migration-usage"); return }
+                auth.confirmInboxLegacyImport(args[2]).migrationAnswer(source) { report ->
+                    migrationReport(source, report)
+                    tell(source, "migration.batch-imported", "count" to report.imported.toString())
+                }
+            }
+            "progress", "status" -> {
+                if (args.size != 2) { tell(source, "command.migration-usage"); return }
+                val status = auth.inboxLegacyImportStatus()
+                if (status == null) tell(source, "migration.snapshot-unavailable")
+                else {
+                    val phase = component("migration.phase-${status.phase.name.lowercase(Locale.ROOT)}", null).spans.joinToString("") { it.text }
+                    tell(source, "migration.scan-progress", "phase" to phase, "count" to status.processed.toString(),
+                        "active" to status.active.toString())
+                }
+            }
+            "cancel" -> {
+                if (args.size != 2) { tell(source, "command.migration-usage"); return }
+                tell(source, if (auth.cancelInboxLegacyImport()) "migration.scan-cancelling" else "migration.scan-not-cancellable")
+            }
+            "disable" -> {
+                if (args.size != 2) { tell(source, "command.migration-usage"); return }
+                auth.disableInboxLegacyImport().migrationAnswer(source) { tell(source, "migration.snapshot-disabled") }
+            }
+            "issues" -> {
+                val page = args.getOrNull(2)?.toIntOrNull() ?: if (args.size == 2) 1 else 0
+                if (args.size !in 2..3 || page !in 1..5000) { tell(source, "command.migration-usage"); return }
+                auth.submit { auth.automaticLegacyImportReport() }.answer(source) { preview ->
+                    if (preview == null) tell(source, "migration.scan-required")
+                    else {
+                        val issues = preview.report.issues
+                        val pages = maxOf(1, (issues.size + 19) / 20)
+                        tell(source, "migration.issues-page", "page" to page.toString(), "pages" to pages.toString(), "total" to issues.size.toString())
+                        issues.drop((page - 1) * 20).take(20).forEach { issue ->
+                            val reason = component("migration.issue-${issue.reason.lowercase(Locale.ROOT)}", null)
+                                .spans.joinToString("") { it.text }
+                            tell(source, "migration.issue-entry", "name" to (issue.name ?: "?"), "reason" to reason)
+                        }
+                    }
+                }
+            }
+            "pending" -> {
+                val requests = gate.pendingProfileClaims()
+                if (requests.isEmpty()) tell(source, "migration.pending-empty")
+                else requests.forEach { request -> tell(source, "migration.pending-entry",
+                    "session" to request.sessionId.toString(), "name" to request.loginName.value, "stage" to request.stage.name) }
+            }
+            "check", "import" -> {
+                if (args.size != 5) { tell(source, "command.migration-usage"); return }
+                val profile = runCatching { java.util.UUID.fromString(args[4]) }.getOrNull()
+                if (profile == null) { tell(source, "command.migration-usage"); return }
+                if (args[1].equals("check", ignoreCase = true)) {
+                    auth.submit { auth.preflightLegacyProfile(args[2], args[3], profile) }.answer(source) {
+                        tell(source, "migration.preflight-ok")
+                    }
+                } else {
+                    auth.submit { auth.importLegacyProfile(args[2], args[3], profile) }.answer(source) { record ->
+                        tell(source, "migration.imported", "record" to record.id.toString())
+                    }
+                }
+            }
+            "approve" -> {
+                if (args.size != 5 || args[4] != "verified") { tell(source, "command.migration-usage"); return }
+                val session = runCatching { java.util.UUID.fromString(args[2]) }.getOrNull()
+                val record = runCatching { java.util.UUID.fromString(args[3]) }.getOrNull()
+                if (session == null || record == null) { tell(source, "command.migration-usage"); return }
+                try { gate.approveProfileClaim(session, record).answer(source) { tell(source, "migration.approved") } }
+                catch (_: Exception) { tell(source, "migration.operation-failed") }
+            }
+            else -> tell(source, "command.migration-usage")
+        }
+    }
+
+    private fun migrationReport(source: CommandSource, report: AuthMeAutoMigrationReport) {
+        tell(source, "migration.scan-summary", "total" to report.sourceAccounts.toString(),
+            "matched" to report.matchedProfiles.toString(), "ready" to report.ready.toString(),
+            "existing" to report.alreadyRegistered.toString(), "issues" to report.issues.size.toString(),
+            "invalid" to report.invalidHistoricalFiles.toString())
+    }
+
     // --- subcommands -----------------------------------------------------------------------
 
     private fun usage(source: CommandSource) {
         tell(source, "command.usage-header")
         usages.forEach { tell(source, "command.$it") }
+        if (source.isConsole) tell(source, "command.migration-usage")
     }
 
     private fun status(source: CommandSource) {
@@ -276,6 +380,25 @@ class KyokouAuthCommand(
         }
     }
 
+    private fun <T> CompletableFuture<T>.migrationAnswer(source: CommandSource, action: (T) -> Unit) {
+        whenComplete { result, failure ->
+            if (failure == null) {
+                try { action(result) } catch (unexpected: Exception) {
+                    auth.reportFailure(unexpected)
+                    tell(source, "migration.snapshot-failed")
+                }
+            } else {
+                var cause = failure
+                while ((cause is CompletionException || cause is ExecutionException) && cause.cause != null) cause = cause.cause!!
+                when (cause) {
+                    is java.util.concurrent.CancellationException -> tell(source, "migration.scan-cancelled")
+                    is RejectedExecutionException -> tell(source, "command.busy")
+                    else -> { auth.reportFailure(cause); tell(source, "migration.snapshot-failed") }
+                }
+            }
+        }
+    }
+
     private fun <T> CompletableFuture<T>.answer(source: CommandSource, action: (T) -> Unit) {
         whenComplete { result, failure ->
             if (failure != null) {
@@ -315,6 +438,6 @@ class KyokouAuthCommand(
 
         const val PERMISSION = "kyokouauth.admin"
 
-        private val NAMES = listOf("whois", "session", "verify", "unbind", "rename", "untrust", "status", "reload")
+        private val NAMES = listOf("whois", "session", "verify", "unbind", "rename", "untrust", "status", "reload", "migration")
     }
 }

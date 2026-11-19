@@ -52,6 +52,13 @@ class LoginGate internal constructor(
     internal interface Services : SharedGate.Services
     internal val ports = VelocityPorts(server)
     internal val common = SharedGate(ports, config, messages, services, logger.toProxyLog(), clock)
+    private val privateClaimLock = Any()
+    private var privateClaimsClosed = false
+    private var privateClaims: VelocityClaimCommands? = if (config.profileClaimsEnabled) createClaimShield() else null
+
+    private fun createClaimShield() = VelocityClaimCommands(server.javaClass.classLoader,
+        moe.ryuu.kyokouauth.proxy.PrivateClaimCommands::isSensitive,
+        receive = { player, command -> common.onPrivateClaim(ports.player(player), command) })
 
     internal constructor(server: ProxyServer, config: ProxyConfig, messages: MessageCatalogue, auth: AuthService,
                          logger: Logger, bedrockProbe: (InboundConnection) -> BedrockLogin) :
@@ -60,7 +67,10 @@ class LoginGate internal constructor(
     internal fun activate() = common.activate()
     internal fun deactivate() {
         try { common.deactivate() }
-        finally { roleEvents?.close() }
+        finally {
+            val shield = synchronized(privateClaimLock) { privateClaimsClosed = true; privateClaims }
+            try { shield?.close() } finally { roleEvents?.close() }
+        }
     }
     fun verifyingCount() = common.verifyingCount()
     fun restartVerification(uuid: UUID) = common.restartVerification(uuid)
@@ -123,7 +133,7 @@ class LoginGate internal constructor(
             val port = PortProfile(connection, original, bedrockProbe(event.connection))
             if (preparing) common.onPrepareGameProfile(port) else common.onGameProfile(port)
             if (port.gameProfile === original) return
-            if (common.requiresRoleProfile(connection) &&
+            if (common.requiresMappedProfile(connection) || common.requiresRoleProfile(connection) &&
                 (profile.id != port.gameProfile.id || profile.name != port.gameProfile.name)) {
                 try { VelocityRoleLoginKeys.verify(event.connection, port.gameProfile.id) }
                 catch (_: Exception) {
@@ -135,6 +145,28 @@ class LoginGate internal constructor(
                 GameProfile.Property(it.name, it.value, it.signature)
             })
         }
+
+    /** Install before native login completes, so credentials never become ordinary command events. */
+    @Subscribe(order = PostOrder.FIRST)
+    fun onProtectPrivateClaims(event: LoginEvent): EventTask? {
+        if (!config.profileClaimsEnabled || !event.result.isAllowed) return null
+        val shield = try {
+            synchronized(privateClaimLock) {
+                check(!privateClaimsClosed)
+                privateClaims ?: createClaimShield().also { privateClaims = it }
+            }
+        } catch (_: Throwable) {
+            event.result = ResultedEvent.ComponentResult.denied(messages.parsed("migration.claim-ingress-unavailable").toAdventure())
+            return null
+        }
+        val installed = shield.install(event.player).handle { _, failure ->
+            if (failure != null || !event.player.isActive) {
+                event.result = ResultedEvent.ComponentResult.denied(messages.parsed("migration.claim-ingress-unavailable").toAdventure())
+            } else common.onPrivateClaimIngressReady(event.player.sessionId)
+            Unit
+        }
+        return EventTask.resumeWhenComplete(installed)
+    }
 
     @Subscribe(order = PostOrder.LAST)
     fun onLogin(event: LoginEvent): EventTask? {

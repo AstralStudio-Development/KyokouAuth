@@ -760,6 +760,8 @@ class LoginGateTest {
             assertFalse(bedrock.common.isAuthenticated(bedrock.ports.player(client.player)))
             assertEquals(0, client.requests)
             bedrock.deactivate()
+            // A denied physical connection must not remain an online mock in the next iteration.
+            client.active = false
         }
     }
 

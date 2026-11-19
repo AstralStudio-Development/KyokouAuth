@@ -44,6 +44,12 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
     val pollIntervalSeconds = long("verification.poll-interval-seconds", 5L, 1L..3600L)
     val bedrockEnabled = boolean("bedrock.enabled", false)
     val rolesEnabled = boolean("role-selection.enabled", false)
+    private val configuredProfileClaims = boolean("migration.enabled", false)
+    @Volatile private var snapshotProfileClaims: Boolean? = null
+    val profileClaimsEnabled: Boolean get() = snapshotProfileClaims ?: configuredProfileClaims
+    internal fun snapshotClaimsEnabled(enabled: Boolean) { snapshotProfileClaims = enabled }
+    val migrationFolder = File(dataFolder, "migration").toPath().toAbsolutePath().normalize()
+    val authMeClaims = AuthMeClaimSettings.parse(values, dataFolder, configuredProfileClaims)
     val roleSelectionTimeoutSeconds = long("role-selection.timeout-seconds", 60L, 5L..600L)
     // The old TTL key remains a migration alias; it no longer enables a transfer or cookie flow.
     val roleHintTtlSeconds = if ("role-selection.hint-ttl-seconds" in values)

@@ -6,8 +6,8 @@ KyokouAuth 是运行在离线模式（`online-mode=false`）Velocity / BungeeCor
 
 ## 模块边界
 
-- **`core`**：零平台依赖的认证协调、身份模型、官方关联解析、JDBC 存储（schema v3）与富文本解析。
-- **`proxy-common`**：唯一持有连接准入权的状态机 `LoginGate`、单次设备码会话 `VerificationSession`、有界认证 IO 池、限流器、配置校验与管理命令。
+- **`core`**：零平台依赖的认证协调、身份模型、官方关联解析、独立 AuthMe 只读验证、受控旧档认领存储、JDBC 存储（schema v5，向下保留 v1～v4 不可变历史迁移；v5 为 claim grant 增加 `proof_method`）与富文本解析。
+- **`proxy-common`**：唯一持有连接准入权的状态机 `LoginGate`、单次设备码会话 `VerificationSession`、连接级旧档认领流程 `ProfileClaimFlow`、有界认证 IO 池、限流器、配置校验与管理命令。
 - **`platform-velocity` / `platform-bungee`**：仅适配各自原生事件、GameProfile 属性、组件转换、私有 Limbo 目标与后端转发，不承载独立认证规则。
 - **`limbo/`**：物理收拢 `api`（纯 JDK 契约）、`runtime`（单份共享基础库，Netty 4.2 由宿主代理提供）、`text/{legacy,json,nbt}`（三套协议分族文本库）、`protocols/{767..777}`（11 个正式版稀疏 Codec 与官方注册表数据）及 `engine-src` 共享引擎源码；Gradle 逻辑子项目名保持 `:limbo-protocol-767` 等不变，单平台产物硬上限 20 MiB（目标 10 MiB）。
 
@@ -23,9 +23,17 @@ KyokouAuth 是运行在离线模式（`online-mode=false`）Velocity / BungeeCor
 
 3. **主体、关联与双角色隔离（U / J Separation）**
    `bedrock.enabled` 与 `role-selection.enabled` 独立且默认 `false`；关闭角色选择时仅接纳未关联且保留隔离前缀的 Floodgate 玩家（不写 Java 名字绑定表、不签发 IP 免验）。开启角色选择后仅面向具备当前强 Floodgate XUID 证明的基岩连接核验官方 Global API（空体、限流或矛盾均视为 `Unavailable` 拒绝，不接纳本地关联；Java 客户端不开放跨角色菜单）：
-   - **微软角色（U）**：`UUID(0, XUID)` 与本服当前离线名（独立于 Xbox Gamertag）。
-   - **正版角色（J）**：官方关联返回的 Mojang UUID 与按该 UUID 查询的官方名字/正版纹理（首次 J 仅在实际选中准入后建档）。
+   - **微软角色（U）**：默认派生 `UUID(0, XUID)` 与本服当前离线名（独立于 Xbox Gamertag）；若该 XUID 在 Velocity 上通过连接级认领继承了旧服离线档案，则持久使用已认领的历史离线 `Profile UUID`（仅限 Java `U`，基岩选角与 BungeeCord 不开放跨档案映射）。
+   - **正版角色（J）**：官方关联返回的 Mojang UUID 与按该 UUID 查询的官方名字/正版纹理（首次 J 仅在实际选中准入后建档；绝不改写为其他历史 UUID）。
    - 两套角色资料完全独立，不合并/迁移存档，同一 J 关联多个 XUID 时不互授各自 U，普通 Mojang 登录与 IP 免验也不反向授予另一角色权限。数据库 schema v3 的 `kyokouauth_account_link` 仅记录核验元数据，不含令牌或可复用授权，旧 v2 链接不导入授权。
+
+7. **认证主体与持久档案分离及旧档认领边界（Schema v5）**
+   - **已接线的玩家流程**：仅支持 **Velocity 代理上的旧 AuthMe 离线档 → Java 微软角色（U）**；Floodgate 与 BungeeCord 不开放旧档认领。正常入口无需 `migration.*` 配置：复制同源停写备份的 `AuthMe/config.yml`、SQLite 文件（如适用）及实际 `playerdata` 到插件 `migration/inbox/`，`migration scan` 在独立单线程执行器只读旧来源并写本地暂存快照，`progress/cancel` 查看与取消，`issues [page]` 查看异常，一次性 `confirm <token>` 后启用持久本地快照并批量登记真实历史 v3 UUID；`check` / `import <batch> <oldName> <actualHistoricalUuid-v3>` 仅保留为单条异常入口，不能按名字或 AuthMe 可选 UUID 字段猜测。新且空闲非正版名的临时 Java U 在当前私有 Limbo 的 `OFFER` / `WAITING_OLD` 阶段，可用 `/ka claim authme <旧名字> <旧密码>` 提交旧证明（同 `/kyokouauth`，支持命名空间；另有 `claim status` / `claim cancel`）。正常快照流程固定使用 `authme-inbox` 批次，必须命中当前快照名字/UUID 允许清单及唯一 `AVAILABLE` 候选；导入本身不是身份凭证；历史匹配仅读取收件目录中的实际玩家 NBT 与受存档支持的缓存关系，存档内 UUID 必须与文件名相同，多重对应全部排除，不改写世界或源库。原人工独立核验后控制台 `approve <session> <recordId> verified` 路径保留。两种旧证明都严格绑定当前会话，后续仍为首次确认、同连接全新 Microsoft/Xbox 设备码证明、二次确认与原子提交，再提示普通重连一次。映射永久生效；`migration disable` 持久停止新认领但不撤销既有历史 Profile UUID。旧 `migration.*` 静态配置只保留为显式人工/直接来源入口，默认关闭。
+   - **只读来源与审计**：`AuthService` 已接入 `core` AuthMe 验证器；收件流程自动读取旧配置的连接凭据和库表字段，不强制重复输入 SQL 账号；源端只读事务不等于账号权限被降级。每次 scan 仅建立一次旧来源连接，有界流式读取/256 行批写到本地 SQLite，最多 100000 行，导出单事务失败清理；只保留必要受支持哈希，不保留 SQL 凭据/TOTP 秘密/明文密码。导出后关闭旧库，确认与玩家核验只访问本地，重启也不重连来源。扫描不启用或登记候选；一次确认在预检完成后 5 分钟内有效，核对暂存快照/历史记录/目标状态变化后才继续。候选按 256 条短事务写入，避免长期占用目标库；全部完成才原子切换快照指针，失败不替换当前快照，已写但未启用的候选可重扫幂等续做且不能越过当前快照允许清单。冻结/同源备份前提由控制台确认明确承担，不会自动停服锁库。来源只支持 SQLite 一致性快照、MySQL/MariaDB 只读访问；仅支持官方默认 16 位小写十六进制盐的 `$SHA$` / `SHA256`，TOTP 非空或未知哈希拒绝，需管理员独立核验。远程来源强制数据库 TLS 校验与有界超时，连接凭证不是玩家旧密码；具体默认配置及操作步骤见 [README](README.md#推荐复制材料后命令扫描无需迁移配置velocity)。数据库仍是 schema v5，保留 v1～v4，来源授权的 `proof_method` 为 `AUTHME_PASSWORD` 并记录审计。没有 HTTP 认领监听、网页或证书配置。
+   - **私密入口与边界**：本地快照支持运行时启用；只有当前连接成功安装固定 Velocity 4.3.1 前置 channel guard 后，原生适配器才向公共 gate 标记精确 session 受保护。未受保护的旧连接不会临时得到认领入口，新连接安装失败则拒绝登录；私密命令不经过普通管理 dispatcher、`CommandExecuteEvent`、Brigadier 回显、后端转发或公共补全事件，也不要求管理权限。只处理 dedicated unsigned / 受支持 Legacy 敏感命令；签名/LastSeen 格式保守断开，不改写或剥离签名。轻量解析后进入有界 authIO，单连接一个进行中、账号 5 次/10min、来源地址 20 次/10min、本地验密并发 4；接管的密码 CharArray 各路径清零，不记录或回显密码/哈希，错误不披露账号存在性细节。关闭模块先关闭绑定原通道，关闭完成前 guard 仍拒绝入站。此功能不增加 offline Minecraft 传输加密，不承诺端到端或运营者绝对不可见，也不防更早原始包记录器、恶意 root/替换插件或客户端本地历史/截屏。
+   - **原生 Floodgate 不选角入口**：若当前 XUID 已映射到历史档案，拒绝这次登录，不回退到默认 `UUID(0, XUID)`；此检查不授予基岩连接使用历史档案的权限。
+   - **迁移边界**：只认领旧 AuthMe 离线档到 Java 微软角色（U），不支持跨到正版角色（J）。
+   - **验收与发布边界**：构造来源账号、微软响应及模块/隔离测试不是真实 AuthMe/Microsoft 账号授权验收；尚无自愿提供的真实测试号，真人授权未验收，项目尚未部署生产。不承诺按名字或私有表存储的任意第三方插件通用兼容。
 
 4. **低重连落定与短期选择意图（0/1 Ordinary Reconnect）**
    基岩选角不发送原生 Transfer 包、不使用 Cookie、不修改已构造原生 `Player` 的 UUID/名字，也不篡改 Floodgate SDK 内部状态或关闭 `floodgate:*` 消息来源检查：
@@ -43,11 +51,12 @@ KyokouAuth 是运行在离线模式（`online-mode=false`）Velocity / BungeeCor
 
 ### 身份与角色
 
-- **Identity（角色身份）**：玩家在服务端使用的稳定角色标识（当前名字 + 稳定 UUID），分为 `Microsoft`（U）与 `Premium`（J）两个独立命名空间。*避免混称：账号、账户、用户。*
-- **Authenticated Subject（已认证主体）**：当前连接已通过强证明确认的持有者——由设备码/Xbox 或绑定当前通道的 Floodgate 证明的 **XUID**，或由 Mojang 握手证明的 **Mojang UUID**。
+- **Identity（角色身份）**：玩家在服务端使用的稳定角色标识（当前名字 + 持久 **Profile UUID**），分为 `Microsoft`（U）与 `Premium`（J）两个独立命名空间。*避免混称：账号、账户、用户。*
+- **Authenticated Subject（认证主体）**：当前连接已通过强证明确认的持有者——由设备码/Xbox 或绑定当前通道的 Floodgate 证明的 **XUID**，或由 Mojang 握手证明的 **Mojang UUID**。认证主体回答“当前是谁在登录”，与下游存档使用的 **Persistent Profile（持久档案）** 概念分离。
+- **Persistent Profile / Profile UUID（持久档案标识）**：下游服务端用于索引原版玩家存档的稳定 `GameProfile` UUID。对于 `J` 恒等于其 **Mojang UUID**；对于新建 `U` 默认为 `UUID(0, XUID)`，而对于在 Velocity 上完成旧档认领的 Java `U`，持久保持为所认领的历史离线 v3 UUID（关闭 `migration.enabled` 后亦不回退）。
 - **Role（可选角色）**：主体获准使用的独立服务端档案（U 或 J）。关联只授予当次选择资格，不改变 UUID 或合并存档。
 - **Account Link（官方账户关联）**：向官方 Global 接口实时核验的关联结果（`Linked` / `NotLinked` / `Unavailable`），未知错误一律按 `Unavailable` 拒绝。
-- **XUID**：微软 Xbox 账户的稳定 64 位整数标识，不随 Gamertag 改变，派生 U 的 `UUID(0, XUID)`。*避免混称：Xbox ID、玩家 ID。*
+- **XUID**：微软 Xbox 账户的稳定 64 位整数标识，不随 Gamertag 改变，新建 U 时默认派生 `UUID(0, XUID)`。*避免混称：Xbox ID、玩家 ID。*
 - **Mojang UUID**：Java 正版角色的稳定 UUID。公开查询只能获取名字与纹理，不能证明连接持有者。*避免混称：正版 UUID、官方 UUID。*
 - **Bound Identity（绑定记录）**：数据库中稳定主体/UUID 与本服当前名字的持久映射，本身不是登录凭证。*避免混称：已注册、已登录。*
 - **Provisional Identity（临时身份）**：首次设备码验证尚未取得 XUID 前，仅用于将连接送入 Limbo 的一次性身份，验证结束后即丢弃。*避免混称：临时 UUID、临时账号。*
@@ -63,6 +72,9 @@ KyokouAuth 是运行在离线模式（`online-mode=false`）Velocity / BungeeCor
 - **First Bind（首次建档）**：已验证角色首次写入 **Bound Identity**。若原生 `Player` 创建时仍为临时身份或与所选角色 UUID/名字不同，须通过一次新连接以稳定身份落定。
 - **Name / Name Reservation（名字与名字独占）**：可变的游戏登录名。同一当前名字至多归属一个 **Identity**；Mojang 正版持有的名字不可被微软角色占用或覆盖；`verification.auto-rename` 开启时同一 XUID 可通过新验证原子迁移到空闲非正版名字。
 - **Role Icon（角色图标）**：基岩选角菜单使用的原版物品图标（U 为 `NAME_TAG`，J 为 `DIAMOND`），仅作选项展示，不代表实时皮肤头像。
+- **Legacy Profile Record（受控旧档记录）**：`migration check` 只读核对批次、旧名及实际历史 v3 `Profile UUID` 与当前库的兼容性，不导入、不预留，也不查 AuthMe 或磁盘。`migration import` 在写入时重检；两者都拒绝同一旧名（忽略大小写、跨批次）对应不同 UUID。Schema v4 的旧名 `name_key` 唯一约束阻止并发登记绕过检查。导入记录只是候选源档案，不能代替旧身份强证明（只读 AuthMe 密码核验或管理员独立人工核验）。
+- **Claim（连接级双重认领）**：仅面向 Velocity 上的 `AuthMe -> Java U`：新且空闲非正版名的临时 Java U 在当前私有 Limbo 提交旧身份强证明，来源为已启用的私密 AuthMe 密码入口，或保留的控制台人工独立核验授权。两者都签发绑定精确会话的短期授权；玩家首次确认源档案后，仍须当场完成全新 Microsoft/Xbox 设备码证明并二次确认，再在数据库原子绑定 `XUID`（认证主体）与历史 `Profile UUID`（持久档案），提示普通重连一次生效。认领中取消、超时或冲突均失败断开，绝不降级原地新建。
+- **Data Continuity（原版 UUID 资料连续性）**：已认领的 Java `U` 继续以同一历史 `Profile UUID` 进入下游子服，从而延续原版及严格按 `GameProfile` UUID 索引的玩家数据（不承诺按名字或私有表索引的任意第三方插件通用兼容）。发生 UUID 或主体冲突时立即拒绝并保持人工处理。
 
 ## 关键实体关系
 

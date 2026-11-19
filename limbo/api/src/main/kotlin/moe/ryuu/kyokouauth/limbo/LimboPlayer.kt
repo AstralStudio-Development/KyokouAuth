@@ -52,6 +52,9 @@ interface LimboPlayer {
         throw UnsupportedOperationException("This Limbo engine does not support role selection")
     }
 
+    /** Opens a server-authoritative confirm/cancel dialog via the existing two-slot container menu. */
+    fun openConfirmation(menu: ConfirmationMenu) = openRoleSelector(menu.toRoleSelectorMenu())
+
     /** Invalidates any current selector without selecting a role. Safe for legacy player fakes. */
     fun closeRoleSelector() = Unit
 

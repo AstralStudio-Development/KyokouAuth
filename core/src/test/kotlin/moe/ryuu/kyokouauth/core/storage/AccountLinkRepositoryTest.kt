@@ -179,7 +179,7 @@ class AccountLinkRepositoryTest {
     private fun assertLegacyUnchanged(dialect: Dialect, hasOldLink: Boolean) {
         val migrations = mutableListOf<Int>()
         val db = Database(descriptor(dialect), onMigrated = migrations::add).also { database = it }
-        assertEquals(if (hasOldLink) listOf(3) else listOf(2, 3), migrations)
+        assertEquals(if (hasOldLink) listOf(3, 4, 5) else listOf(2, 3, 4, 5), migrations)
         val identities = IdentityRepository(db)
         val bound = BoundIdentity(UUID(0L, 1001L), GameName.parseOrThrow("OldRole"), BoundIdentity.Kind.XUID, "1001", "OldTag", 12L, 34L)
         assertEquals(bound, identities.byUuid(bound.uuid))

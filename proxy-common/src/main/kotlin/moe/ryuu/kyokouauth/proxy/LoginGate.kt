@@ -58,6 +58,16 @@ class LoginGate constructor(
         fun begin(): DeviceCodeFlow.Challenge
         fun poll(challenge: DeviceCodeFlow.Challenge): DeviceCodeFlow.PollResult
         fun exchange(accessToken: String): XboxLive.XstsToken
+        fun permitsMappedProfile(record: BoundIdentity): Boolean = record.kind != BoundIdentity.Kind.XUID ||
+            record.uuid == Identity.ofXuid(Xuid(record.subject.toLong()))
+        fun approveLegacyProfile(recordId: UUID, session: UUID, name: GameName): ProfileClaimFlow.PreparedClaim =
+            error("Legacy profile approval is unavailable")
+        fun authMeClaimsAvailable(): Boolean = false
+        fun proveAuthMeProfile(legacyName: GameName, password: CharArray, session: UUID, name: GameName,
+                              current: () -> Boolean): ProfileClaimFlow.PreparedClaim? { password.fill('\u0000'); return null }
+        fun commitLegacyProfile(token: ProfileClaimFlow.ClaimToken, session: UUID, name: GameName, xuid: Xuid, gamertag: String,
+                                current: () -> Boolean): BoundIdentity =
+            error("Legacy profile claims are unavailable")
         /** Missing integration is an error, never an empty or implicitly authorized role list. */
         fun roleOptions(xuid: Xuid, gamertag: String, fallbackBedrockName: String?): RoleOptions =
             error("Role resolution is unavailable")
@@ -120,6 +130,8 @@ class LoginGate constructor(
         @Volatile var privateSelectedAuthorization: SelectedRoleAuthorization? = null
         // Presentation only while an async native property update is pending; never grants access.
         @Volatile var applyingRoleProfile: RoleOption? = null
+        @Volatile var claimProfileUuid: UUID? = null
+        @Volatile var claimTargetUuid: UUID? = null
     }
 
     private val premiumHandshakes = PremiumHandshakeGuard(
@@ -138,6 +150,140 @@ class LoginGate constructor(
     /** Covers both UUID and case-insensitive name before native Player registration can displace anyone. */
     private val roleAdmissionLock = Any()
     private val roleReservations = HashMap<UUID, RoleReference>()
+    private val oldProofAccounts = moe.ryuu.kyokouauth.core.auth.ConnectionLimiter(5, 600_000L, clock)
+    private val oldProofAddresses = moe.ryuu.kyokouauth.core.auth.ConnectionLimiter(20, 600_000L, clock)
+    private val protectedClaimSessions = ConcurrentHashMap.newKeySet<UUID>()
+    private val claims: ProfileClaimFlow = ProfileClaimFlow(messages,
+        object : ProfileClaimFlow.Services {
+            override fun submit(task: () -> Unit) = services.submit(task)
+            override fun schedule(delayMillis: Long, task: () -> Unit) = services.schedule(delayMillis, task)
+            override fun authMeProofAvailable() = services.authMeClaimsAvailable()
+            override fun approve(recordId: UUID, session: UUID, name: GameName): ProfileClaimFlow.PreparedClaim {
+                check(ready) { "Gate is unavailable" }
+                val prepared = services.approveLegacyProfile(recordId, session, name)
+                val connection = checkNotNull(connections[session]) { "Claim connection closed" }
+                synchronized(connection) {
+                    check(ready && current(connection) && connection.access == Access.HELD) { "Claim connection closed" }
+                    synchronized(roleAdmissionLock) {
+                        check(!roleOccupiedLocked(prepared.profileUuid, name.value, session)) { "Legacy profile is online or reserved" }
+                        connection.claimProfileUuid = prepared.profileUuid
+                    }
+                }
+                return prepared
+            }
+            override fun proveAuthMe(legacyName: GameName, password: CharArray, session: UUID, name: GameName,
+                                     current: () -> Boolean): ProfileClaimFlow.PreparedClaim? {
+                val prepared = services.proveAuthMeProfile(legacyName, password, session, name, current) ?: return null
+                val connection = checkNotNull(connections[session]) { "Claim connection closed" }
+                synchronized(connection) {
+                    check(ready && current() && this@LoginGate.current(connection) && connection.access == Access.HELD) { "Claim connection closed" }
+                    synchronized(roleAdmissionLock) {
+                        check(!roleOccupiedLocked(prepared.profileUuid, name.value, session)) { "Legacy profile is online or reserved" }
+                        connection.claimProfileUuid = prepared.profileUuid
+                    }
+                }
+                return prepared
+            }
+            override fun commit(token: ProfileClaimFlow.ClaimToken, session: UUID, name: GameName, xuid: Xuid, gamertag: String): BoundIdentity {
+                val connection = checkNotNull(connections[session]) { "Claim connection closed" }
+                synchronized(connection) {
+                    check(ready && current(connection) && connection.access == Access.HELD && connection.pending.provisional &&
+                        connection.pending.bedrock == null && connection.pending.name == name) { "Claim is no longer current" }
+                    val profile = checkNotNull(connection.claimProfileUuid) { "Claim source is missing" }
+                    val target = Identity.ofXuid(xuid)
+                    synchronized(roleAdmissionLock) {
+                        check(!roleOccupiedLocked(profile, name.value, session) &&
+                            !roleOccupiedLocked(target, name.value, session)) { "Claim source or target is online or reserved" }
+                        connection.claimTargetUuid = target
+                    }
+                }
+                return services.commitLegacyProfile(token, session, name, xuid, gamertag) {
+                    ready && current(connection) && connection.access == Access.HELD &&
+                        connections[session] === connection && claims.isActive(session) == true
+                }
+            }
+        }, object : ProfileClaimFlow.Callbacks {
+            override fun startVerification(player: Player, limbo: LimboPlayer) {
+                val connection = connectionOf(player) ?: return
+                synchronized(connection) {
+                    if (!ready || !current(connection) || connection.access != Access.HELD || connection.limboPlayer !== limbo) return
+                    val state = verification(connection, limbo, localeOf(player))
+                    connection.verification = state
+                    state.enqueueStart()
+                }
+            }
+            override fun claimed(player: Player, limbo: LimboPlayer, record: BoundIdentity) {
+                val connection = connectionOf(player) ?: return
+                synchronized(connection) {
+                    if (!ready || !current(connection) || connection.access != Access.HELD || connection.limboPlayer !== limbo) return
+                    check(record.kind == BoundIdentity.Kind.XUID && record.name == connection.pending.name)
+                    close(connection)
+                    player.disconnect(component("verification.reconnect", localeOf(player)))
+                }
+            }
+            override fun failed(player: Player, limbo: LimboPlayer, key: String) {
+                val connection = connectionOf(player) ?: return
+                synchronized(connection) {
+                    if (current(connection) && connection.access == Access.HELD && connection.limboPlayer === limbo) roleFailure(connection, key)
+                }
+            }
+        }, maxEntries = config.pendingLoginLimit, clock = clock)
+
+    /** Native adapters call this only after the pre-dispatch guard is installed for this connection. */
+    fun onPrivateClaimIngressReady(session: UUID) { if (ready) protectedClaimSessions.add(session) }
+
+    fun pendingProfileClaims(): List<ProfileClaimFlow.PendingClaim> = claims.pending()
+    fun approveProfileClaim(session: UUID, record: UUID): java.util.concurrent.CompletableFuture<Unit> {
+        check(config.profileClaimsEnabled) { "Profile claims are disabled" }
+        return claims.authorize(session, record)
+    }
+
+    /** Called only by a native, pre-dispatch sensitive-packet interceptor; never logs raw input. */
+    fun onPrivateClaim(player: Player, command: String) {
+        val input = PrivateClaimCommands.parse(command) ?: return
+        fun reply(key: String, vararg values: Pair<String, String>) {
+            runCatching { player.sendMessage(component(key, localeOf(player), *values)) }
+        }
+        try {
+            if (input.action == PrivateClaimCommands.Action.USAGE) { reply("migration.claim-usage"); return }
+            val connection = connectionOf(player)
+            val limbo = connection?.let { captured -> synchronized(captured) {
+                captured.limboPlayer?.takeIf { ready && current(captured) && captured.access == Access.HELD &&
+                    captured.pending.provisional && captured.pending.bedrock == null }
+            } }
+            if (connection == null || limbo == null || claims.hasActive(player, limbo) != true) {
+                reply("migration.claim-not-waiting"); return
+            }
+            when (input.action) {
+                PrivateClaimCommands.Action.STATUS -> {
+                    val pending = claims.pending().singleOrNull { it.sessionId == player.sessionId }
+                    reply("migration.claim-status", "stage" to (pending?.stage?.name ?: "CLOSED"))
+                }
+                PrivateClaimCommands.Action.CANCEL -> {
+                    if (!claims.cancel(player, limbo)) reply("migration.claim-busy")
+                }
+                PrivateClaimCommands.Action.AUTHME -> {
+                    if (!services.authMeClaimsAvailable()) { reply("migration.claim-unavailable"); return }
+                    val legacy = checkNotNull(input.legacyName)
+                    if (!oldProofAddresses.allow(limitKey(player.remoteAddress.address)) || !oldProofAccounts.allow(legacy.key)) {
+                        reply("migration.claim-limited"); return
+                    }
+                    val password = checkNotNull(input.takePassword())
+                    claims.proveAuthMe(player, limbo, legacy, password).whenComplete { proven, failure ->
+                        if (ready && current(connection) && connection.access == Access.HELD && connection.limboPlayer === limbo &&
+                            claims.hasActive(player, limbo)) {
+                            reply(when { failure != null -> "migration.claim-unavailable"
+                                proven == true -> "migration.claim-proven"
+                                else -> "migration.claim-rejected" })
+                        }
+                    }
+                }
+                PrivateClaimCommands.Action.USAGE -> Unit
+            }
+        } catch (_: Exception) {
+            reply("migration.claim-unavailable")
+        } finally { input.close() }
+    }
 
     /** Armed only after the listener and the registered limbo are both ready. */
     @Volatile private var ready = false
@@ -146,6 +292,8 @@ class LoginGate constructor(
 
     fun deactivate() {
         ready = false
+        claims.close()
+        protectedClaimSessions.clear()
         roleHints.close()
         synchronized(roleAdmissionLock) { roleReservations.clear() }
         synchronized(premiumWatches) {
@@ -247,18 +395,21 @@ class LoginGate constructor(
             val decision = if (config.rolesEnabled) {
                 AuthCoordinator.Decision.Verify(profileRole?.identity?.uuid ?: proof.uniqueId,
                     AuthCoordinator.Reason.SESSION_EXPIRED, selected == null, profileRole?.existing)
-            } else AuthCoordinator.Decision.VerifiedBedrock(proof.identity as? Identity.Microsoft
-                ?: error("Linked Bedrock requires role selection"))
+            } else {
+                val identity = proof.identity as? Identity.Microsoft ?: error("Linked Bedrock requires role selection")
+                check(services.permitsMappedProfile(BoundIdentity.of(identity, clock()))) {
+                    "Native Bedrock cannot use a mapped Microsoft profile"
+                }
+                AuthCoordinator.Decision.VerifiedBedrock(identity)
+            }
             val state = Pending(event.connection, proof.identity.name, addressOf(event.connection), decision,
                 clock(), proof, config.rolesEnabled, selected, profileRole)
             val stored = synchronized(roleAdmissionLock) {
-                if (config.rolesEnabled) {
-                    check(!roleOccupied(state.profileUuid, state.profileName, event.connection.sessionId)) { "Role is already online or reserved" }
-                }
+                check(!roleOccupiedLocked(state.profileUuid, state.profileName, event.connection.sessionId)) { "Role is already online or reserved" }
                 synchronized(pendingLock) {
                     if (ready && event.connection.isActive && proof.isCurrent() && pending.size < config.pendingLoginLimit) {
                         pending[event.connection.sessionId] = state
-                        if (config.rolesEnabled) roleReservations[event.connection.sessionId] = RoleReference(
+                        roleReservations[event.connection.sessionId] = RoleReference(
                             if (profileRole?.identity is Identity.Premium) BoundIdentity.Kind.MOJANG else BoundIdentity.Kind.XUID,
                             state.profileUuid, state.profileName)
                         true
@@ -300,6 +451,22 @@ class LoginGate constructor(
         if (decision is AuthCoordinator.Decision.VerifiedBedrock) {
             event.result = denied("bedrock.invalid-identity")
             return // A stored-state decision can never stand in for the native channel proof.
+        }
+        val bound = when (decision) {
+            is AuthCoordinator.Decision.Admit -> decision.bound
+            is AuthCoordinator.Decision.Verify -> decision.existing
+            else -> null
+        }
+        if (bound != null) {
+            val permitted = try { services.permitsMappedProfile(bound) } catch (failure: Exception) {
+                logger.error("Could not verify profile ownership for {}", name, failure)
+                event.result = denied("login.internal-error")
+                return
+            }
+            if (!permitted) {
+                event.result = denied("migration.disabled")
+                return
+            }
         }
         if (decision is AuthCoordinator.Decision.MojangSession) {
             // A UUID mismatch is useful only for refusal. Matching this public UUID proves nothing:
@@ -419,6 +586,16 @@ class LoginGate constructor(
     fun requiresRoleProfile(connection: InboundConnection): Boolean =
         pending[connection.sessionId]?.roles == true || connections[connection.sessionId]?.pending?.roles == true
 
+    fun requiresMappedProfile(connection: InboundConnection): Boolean {
+        val state = pending[connection.sessionId] ?: connections[connection.sessionId]?.pending ?: return false
+        val record = when (val decision = state.decision) {
+            is AuthCoordinator.Decision.Admit -> decision.bound
+            is AuthCoordinator.Decision.Verify -> decision.existing
+            else -> null
+        } ?: return false
+        return record.kind == BoundIdentity.Kind.XUID && record.uuid != Identity.ofXuid(Xuid(record.subject.toLong()))
+    }
+
     /** Pure snapshot for native late-profile guards: never performs IO or changes an identity. */
     fun currentRoleProfile(connection: InboundConnection): GameProfile? {
         val beforeLogin = pending[connection.sessionId]
@@ -531,6 +708,9 @@ class LoginGate constructor(
                 is AuthCoordinator.Decision.VerifiedBedrock -> {
                     check(pending.bedrock != null && !player.isOnlineMode && player.uniqueId == decision.identity.uuid &&
                         pending.bedrock.isCurrent()) { "Native Bedrock profile or proof changed" }
+                    check(services.permitsMappedProfile(BoundIdentity.of(decision.identity, clock()))) {
+                        "Native Bedrock profile ownership changed"
+                    }
                     connection.access = Access.AUTHENTICATED
                 }
                 is AuthCoordinator.Decision.MojangSession -> {
@@ -629,7 +809,7 @@ class LoginGate constructor(
         fun matches(otherUuid: UUID, otherName: String) = otherUuid == uuid || otherName.equals(name, ignoreCase = true)
         return server.allPlayers.any { it.isActive && it.sessionId != session && matches(it.uniqueId, it.username) } ||
             connections.values.any { it.player.sessionId != session && current(it) && it.access != Access.CLOSED &&
-                matches(it.player.uniqueId, it.player.username) } ||
+                (matches(it.player.uniqueId, it.player.username) || it.claimProfileUuid == uuid || it.claimTargetUuid == uuid) } ||
             roleReservations.any { (owner, role) -> owner != session && matches(role.uuid, role.name) }
     }
 
@@ -714,6 +894,7 @@ class LoginGate constructor(
 
     fun onDisconnect(event: DisconnectEvent) {
         val player = event.player
+        protectedClaimSessions.remove(player.sessionId)
         val connection = connectionOf(player) ?: return
         pending.remove(player.sessionId, connection.pending)
         finishPremium(player.sessionId, verified = false)
@@ -749,6 +930,11 @@ class LoginGate constructor(
             if (connection.pending.roles && connection.pending.bedrock != null) {
                 val proof = connection.pending.bedrock
                 startRoleSelection(connection, player, proof.xuid, proof.gamertag)
+                return
+            }
+            if (config.profileClaimsEnabled && connection.player.sessionId in protectedClaimSessions &&
+                connection.pending.provisional && connection.pending.bedrock == null) {
+                claims.open(connection.player, player, connection.pending.name)
                 return
             }
             val state = verification(connection, player, localeOf(connection.player))
@@ -820,7 +1006,17 @@ class LoginGate constructor(
 
     /** Account binding and final authorization belong to the gate, never to the device-code module. */
     private fun complete(connection: Connection, state: VerificationSession, xsts: XboxLive.XstsToken) {
-        synchronized(connection) { if (!state.beforeDeadline()) return }
+        synchronized(connection) {
+            if (!state.beforeDeadline()) return
+            if (connection.claimProfileUuid != null) {
+                state.cancel()
+                connection.verification = null
+                if (!claims.verified(connection.player, state.player, Xuid(xsts.xuid), xsts.gamertag)) {
+                    roleFailure(connection, "migration.failed")
+                }
+                return
+            }
+        }
         // Binding may re-check the name directory; leave and timeout must remain able to invalidate
         // the connection while that request is in flight. Only the final session grant is serialized.
         val outcome = try {
@@ -955,6 +1151,7 @@ class LoginGate constructor(
     }
 
     override fun onRoleSelect(player: LimboPlayer, generation: UUID, optionId: String) {
+        if (claims.select(player, generation, optionId) == true) return
         val connection = connections[player.connectionId] ?: return
         synchronized(connection) {
             val selection = connection.selection ?: return
@@ -1103,6 +1300,7 @@ class LoginGate constructor(
     }
 
     private fun close(connection: Connection) = synchronized(connection) {
+        claims.close(connection.player.sessionId)
         connection.access = Access.CLOSED
         connection.privateSelectedAuthorization = null
         connection.applyingRoleProfile = null
@@ -1300,6 +1498,15 @@ class LoginGate constructor(
             override fun begin() = DeviceCodeFlow.begin()
             override fun poll(challenge: DeviceCodeFlow.Challenge) = DeviceCodeFlow.poll(challenge)
             override fun exchange(accessToken: String) = XboxLive.exchange(accessToken, XboxLive.RELYING_PARTY_PROFILE)
+            override fun permitsMappedProfile(record: BoundIdentity) = auth.permitsMappedProfile(record)
+            override fun approveLegacyProfile(recordId: UUID, session: UUID, name: GameName) =
+                auth.approveLegacyProfile(recordId, session, name)
+            override fun authMeClaimsAvailable() = auth.authMeClaimsAvailable()
+            override fun proveAuthMeProfile(legacyName: GameName, password: CharArray, session: UUID, name: GameName,
+                                            current: () -> Boolean) = auth.proveAuthMeProfile(legacyName, password, session, name, current)
+            override fun commitLegacyProfile(token: ProfileClaimFlow.ClaimToken, session: UUID, name: GameName, xuid: Xuid, gamertag: String,
+                                             current: () -> Boolean) =
+                auth.commitLegacyProfile(token, session, name, xuid, gamertag, current)
             override fun roleOptions(xuid: Xuid, gamertag: String, fallbackBedrockName: String?) =
                 auth.roleOptions(xuid, gamertag, fallbackBedrockName)
         }

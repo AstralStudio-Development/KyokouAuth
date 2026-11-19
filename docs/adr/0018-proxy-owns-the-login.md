@@ -65,6 +65,26 @@ KyokouAuth 从「Paper 后端上的 Bukkit 插件」迁移为「Velocity / Bunge
   - **双角色且选中角色与当前原生 `Player` 的 UUID 和名字完全一致**：点击时重验并在原连接更新可信纹理属性放行，**0 次重连**。
   - **双角色且选中不同 UUID 或名字**：记录有界短时（`role-selection.hint-ttl-seconds`，默认 30 秒；兼容旧键 `transfer-ttl-seconds`）的一次性服务端选择意图，关闭菜单提示玩家手动重连一次（**至多 1 次普通回连**）。该意图不是登录凭证，新连接仍须携带全新的有效 Floodgate 证明并通过关联、角色与在线占用重验后方可消费；已在线角色优先受保护，绝不被新连接顶掉。
 
+## 旧服离线档案认领桥接（Schema v5）
+
+在代理接管认证后，旧离线模式（AuthMe）服务器迁入时面临“新认证主体（XUID）如何延续旧离线 v3 `Profile UUID` 下游原版存档”的问题。本架构将**认证主体（Authenticated Subject）**与**持久档案（Persistent Profile UUID）**显式解耦。只认领旧 AuthMe 离线档到 Java 微软角色（U），不支持跨到正版角色（J）。
+
+### 已实现路径：Velocity `AuthMe -> Java U` 连接级双重认领
+
+- **显式受控边界**：仅在 **Velocity** 对临时 **Java 微软验证角色（U）** 开放；BungeeCord、Floodgate 与正版角色（J）不开放旧档认领。默认不启用，管理员把同源停写备份中的 AuthMe 配置、SQLite 文件（如适用）与实际玩家 NBT/可选名字缓存复制到 `migration/inbox/`，无需填写 `migration.*`。`scan` 写本地未启用快照，`confirm` 才持久启用；缺失或多重对应排除并报告。不按名字/AuthMe 可选 UUID 列猜测，不修改世界/源库，不信任旧 IP/免验记录；旧静态配置与单条命令仅留作显式人工/直接来源入口。
+- **来源证明已接玩家入口**：私有 Limbo 内的 `/ka claim authme <旧名字> <旧密码>`（以及 `status/cancel`、别名与命名空间形式）仍走前置 channel，不要求管理权限。正常入口从 `authme-inbox` 批次中唯一 `AVAILABLE` 记录及当前本地快照名字/UUID 允许清单共同选取旧档。每次认领仅读本地快照；输入密码不持久化，快照不保存旧 SQL 凭据或 TOTP 秘密。暂停新认领使用持久的 `migration disable`，不撤销旧映射。
+- **一次性导入与本地持久化**：导入来源限 SQLite 一致性快照、MySQL/MariaDB；连接信息/表列直接读取复制来的 AuthMe 配置并核对实际结构，不强制重复输入 SQL 账号。源端始终只读、远程 TLS 校验身份、connect/socket 超时有界；专用 SELECT 账号可选加固，但只读事务不等于账号被降权。一个独立后台任务建立一个旧来源连接，按 256 行流式批写本地 SQLite，最多 100000 行，导出事务失败回滚清理。导出后关闭来源，后续确认/认领/重启不访问旧库。候选登记按 256 条短事务释放目标库连接/锁，全部处理成功后才原子替换快照指针；失败保留旧启用状态，尚未启用的元数据可重扫幂等续做且不能越过当前允许清单。仅支持官方默认 16 位小写十六进制盐的 `$SHA$` / `SHA256`；TOTP、未知哈希和冲突仍拒绝。没有 HTTP 认领服务。完整操作见 [README](../../README.md#推荐复制材料后命令扫描无需迁移配置velocity)。
+- **双凭证同会话绑定与双重确认**：
+  1. 管理员复制已停写的同源材料，`ka migration scan` 后台准备，`progress/cancel` 查看或取消，`issues [page]` 查看异常。确认停写/同源前提后，预检完成起 5 分钟内一次 `confirm <token>` 重新核对本地快照、历史记录和目标状态并启用；不重连旧库，不自动锁库，不把候选登记当作账号归属证明；
+  2. 玩家以全新的空闲非正版名首次连接，持临时 Java U 身份进入私有 Limbo，认领提示 `OFFER` 或选择认领后的 `WAITING_OLD` 均允许提交自助来源证明；
+  3. 自助来源核验通过后，仅向当前精确连接签发短期源授权，以 `AUTHME_PASSWORD` 写入证明方法与审计；原人工独立核验路径继续保留：管理员通过 `ka migration pending` 找到等待会话，独立核实旧号归属后执行 `ka migration approve <session> <recordId> verified`，承担人工核验审计责任；
+  4. 玩家经既有原版 `ConfirmationMenu` 首次确认旧档名与新登录名，随后在同一连接完成全新的 Microsoft/Xbox 设备码证明取得正 XUID，再第二次确认旧档名、新名字与 Xbox 代号；
+  5. 数据库仍为 **schema v5**（历史 v1～v4 迁移保持不变；v4 新增 `kyokouauth_legacy_profile`、`kyokouauth_profile_owner`、`kyokouauth_claim_grant`、`kyokouauth_profile_claim_audit`，v5 为 claim grant 增加 `proof_method`）。同一事务消费短期授权并持久化 `XUID -> 历史 Profile UUID` 归属与名字绑定，断开提示普通重连一次。认领中取消、超时、来源失败或冲突均失败关闭，不静默新建默认 `UUID(0, XUID)` 角色。
+- **输入隐私与有界执行**：支持本地快照运行时启用。新连接只有成功安装固定且校验过的 Velocity 4.3.1 管线后，原生适配器才向公共 gate 标记精确 session 已受保护；旧的未保护连接不会临时收到认领入口，安装失败即拒绝登录。敏感命令在 `CommandExecuteEvent`、Brigadier 错误回显、后端转发和公共补全事件前消费，只交轻量解析与有界 authIO。仅接纳 dedicated unsigned / 受支持 Legacy；签名/LastSeen 敏感格式保守断开，不改写或剥离签名。关闭模块先关闭原通道，在实际关闭前保留 guard。每连接一个进行中，账号 5 次/10min、来源地址 20 次/10min，本地验密并发 4，扫描使用独立单线程且不占登录队列；接管的密码 CharArray 各路径清零，不记录/回显密码或哈希，错误不披露账号存在性细节。
+- **隐私承诺的界限**：常规命令/补全事件 spy 收不到旧密码；不承诺防更早原始包记录器、恶意 root/替换插件、客户端本地历史或截屏。该入口不为 offline Minecraft 连接增加传输加密，不是端到端或运营者绝对不可见方案。
+- **持久性与插件范围**：认领提交后，XUID 对应的持久 `Profile UUID` 永久保持为所认领的历史 UUID；`migration disable` 持久停止新认领但不撤销既有映射。仅保证原版及严格以 `GameProfile` UUID 为主键的数据延续，不承诺按名字或私有账号表存储的任意第三方插件通用兼容。
+- **验收与发布边界**：构造的来源账号/微软响应、模块回归与测试 bootstrap 调用实际生产类，都不是真实 AuthMe/Microsoft 账号授权验收，也不是生产授权。当前没有自愿提供的真实测试号，真人授权尚未验收；项目尚未部署生产，生产库迁移、重启或部署不在本地验证授权范围内。
+
 ## 外部参考来源
 
 - **[FG-SETUP]**：Floodgate 代理部署、`auth-type: floodgate`、`key.pem` 信任链与后端转发边界 — <https://geysermc.org/wiki/floodgate/setup/>

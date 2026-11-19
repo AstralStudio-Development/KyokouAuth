@@ -14,17 +14,22 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Owns blocking authentication work, persistence and only the driver selected by configuration. */
-class AuthService(config: ProxyConfig, private val logger: ProxyLog,
-                  private val roleSkins: RoleSkinService = RoleSkinService()) : AutoCloseable {
+class AuthService(private val config: ProxyConfig, private val logger: ProxyLog,
+                  private val roleSkins: RoleSkinService = RoleSkinService(),
+                  private val supportsProfileClaims: Boolean = false) : AutoCloseable {
     private val drivers = DriverLibrary(config.librariesFolder, config.driverRepository, config.autoDownloadDriver) { logger.info(it) }
     private val database: Database
     private val tasks: AuthTasks
     private val maintenance: ScheduledFuture<*>
     private val closed = AtomicBoolean(false)
+    private var authMeSource: moe.ryuu.kyokouauth.core.authme.AuthMeLegacyVerifier? = null
+    private var authMeMigration: AuthMeMigrationService? = null
+    private var authMeInbox: AuthMeInboxMigration? = null
     val identities: CachedIdentityRepository
     val sessions: SessionRepository
     val limiter: ConnectionLimiter
     val auth: AuthCoordinator
+    val profileClaims: moe.ryuu.kyokouauth.core.storage.ProfileClaimRepository
     private val roleLinks by lazy { moe.ryuu.kyokouauth.core.storage.AccountLinkRepository(database) }
     private val roleResolver by lazy { moe.ryuu.kyokouauth.core.auth.RoleResolver(identities) }
     private val roleLinkClient = RoleLinkClient { url ->
@@ -47,10 +52,31 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog,
             opened = storage
             database = storage
             identities = CachedIdentityRepository(IdentityRepository(storage))
+            profileClaims = moe.ryuu.kyokouauth.core.storage.ProfileClaimRepository(storage,
+                onProfileChanged = identities::invalidate)
+            check(!config.profileClaimsEnabled || supportsProfileClaims) { "Profile claims require the supported Velocity Java adapter" }
+            if (supportsProfileClaims) authMeInbox = AuthMeInboxMigration(config.migrationFolder, profileClaims,
+                drivers::classLoader, config::snapshotClaimsEnabled)
+            config.authMeClaims?.let { claims ->
+                drivers.prepare(claims.source.dialect)
+                authMeSource = moe.ryuu.kyokouauth.core.authme.AuthMeLegacyVerifier(claims.source, drivers.classLoader(claims.source.dialect))
+                if (claims.automaticDiscovery) authMeMigration = AuthMeMigrationService(claims, checkNotNull(authMeSource), profileClaims)
+            }
             sessions = SessionRepository(storage)
             limiter = ConnectionLimiter(config.connectionsPerMinute)
             auth = AuthCoordinator(identities, sessions, sessionMillis = config.sessionHours * MILLIS_PER_HOUR,
-                sessionBindsAddress = config.sessionBindsAddress, autoRenameMicrosoft = config.autoRenameMicrosoft)
+                sessionBindsAddress = config.sessionBindsAddress, autoRenameMicrosoft = config.autoRenameMicrosoft,
+                microsoftProfile = { xuid ->
+                    val original = moe.ryuu.kyokouauth.core.identity.Identity.ofXuid(xuid)
+                    val mapped = profileClaims.resolveMicrosoftProfile(xuid)
+                    val stored = identities.bySubject(moe.ryuu.kyokouauth.core.storage.BoundIdentity.Kind.XUID, xuid.value.toString())
+                    check(stored == null || stored.uuid == (mapped ?: original)) { "Microsoft profile ownership is inconsistent" }
+                    val profile = mapped ?: original
+                    check(supportsProfileClaims || profile == original) {
+                        "Mapped Microsoft profiles are unsupported on this proxy"
+                    }
+                    profile
+                })
             val runner = AuthTasks(logger, config.ioWorkers, config.ioQueueCapacity)
             started = runner
             tasks = runner
@@ -59,14 +85,125 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog,
                 catch (_: RejectedExecutionException) { logger.warn("Session maintenance skipped: authentication workers are busy or closed") }
             }
         } catch (failure: Throwable) {
-            listOfNotNull<AutoCloseable>(started, roleSkins, opened, drivers).forEach { resource ->
+            listOfNotNull<AutoCloseable>(authMeInbox, started, authMeSource, roleSkins, opened, drivers).forEach { resource ->
                 try { resource.close() } catch (closing: Throwable) { failure.addSuppressed(closing) }
             }
             throw failure
         }
     }
 
-    /** Call only after this connection has proved its XUID, and only on the bounded IO executor. */
+    fun permitsMappedProfile(record: moe.ryuu.kyokouauth.core.storage.BoundIdentity): Boolean {
+        check(!closed.get()) { "Authentication is unavailable" }
+        if (record.kind == moe.ryuu.kyokouauth.core.storage.BoundIdentity.Kind.MOJANG) {
+            return record.uuid == java.util.UUID.fromString(record.subject)
+        }
+        val xuid = moe.ryuu.kyokouauth.core.identity.Xuid(record.subject.toLong())
+        val original = moe.ryuu.kyokouauth.core.identity.Identity.ofXuid(xuid)
+        val expected = profileClaims.resolveMicrosoftProfile(xuid) ?: original
+        return record.uuid == expected && (supportsProfileClaims || expected == original)
+    }
+
+    fun preflightLegacyProfile(batch: String, name: String, profileUuid: java.util.UUID) {
+        check(config.profileClaimsEnabled && supportsProfileClaims && !closed.get()) { "Profile claims are unavailable" }
+        profileClaims.preflightLegacy(batch, name, profileUuid)
+    }
+
+    fun importLegacyProfile(batch: String, name: String, profileUuid: java.util.UUID): moe.ryuu.kyokouauth.core.storage.LegacyProfile {
+        check(config.profileClaimsEnabled && supportsProfileClaims && !closed.get()) { "Profile claims are unavailable" }
+        return profileClaims.importLegacy(batch, name, profileUuid)
+    }
+
+    /** Import work has its own single-worker executor and never occupies the authentication queue. */
+    fun scanInboxLegacyImport(): CompletableFuture<AuthMeMigrationPreview> {
+        if (!supportsProfileClaims || closed.get()) return CompletableFuture.failedFuture(IllegalStateException("Profile claims are unavailable"))
+        return checkNotNull(authMeInbox).scan()
+    }
+
+    fun inboxLegacyImportStatus(): AuthMeImportStatus? = authMeInbox?.status()
+    fun cancelInboxLegacyImport(): Boolean = authMeInbox?.cancel() ?: false
+    fun disableInboxLegacyImport(): CompletableFuture<Unit> {
+        if (!supportsProfileClaims || closed.get()) return CompletableFuture.failedFuture(IllegalStateException("Profile claims are unavailable"))
+        return checkNotNull(authMeInbox).disable()
+    }
+
+    fun previewAutomaticLegacyImport(): AuthMeMigrationPreview {
+        check(config.profileClaimsEnabled && supportsProfileClaims && !closed.get()) { "Profile claims are unavailable" }
+        return checkNotNull(authMeMigration) { "Configure an old AuthMe server-folder first" }.preview()
+    }
+
+    fun automaticLegacyImportReport(): AuthMeMigrationPreview? {
+        check(supportsProfileClaims && !closed.get()) { "Profile claims are unavailable" }
+        return authMeInbox?.report() ?: authMeMigration?.report()
+    }
+
+    fun confirmInboxLegacyImport(token: String): CompletableFuture<AuthMeAutoMigrationReport> {
+        if (!supportsProfileClaims || closed.get()) return CompletableFuture.failedFuture(IllegalStateException("Profile claims are unavailable"))
+        return checkNotNull(authMeInbox).confirm(token)
+    }
+
+    fun importAutomaticLegacyProfiles(token: String): AuthMeAutoMigrationReport {
+        check(config.profileClaimsEnabled && supportsProfileClaims && !closed.get()) { "Profile claims are unavailable" }
+        return checkNotNull(authMeMigration) { "Configure an old AuthMe server-folder first" }.confirm(token)
+    }
+
+    fun approveLegacyProfile(recordId: java.util.UUID, session: java.util.UUID, name: moe.ryuu.kyokouauth.core.identity.GameName): ProfileClaimFlow.PreparedClaim {
+        check(config.profileClaimsEnabled && supportsProfileClaims && !closed.get()) { "Profile claims are unavailable" }
+        val record = checkNotNull(profileClaims.byId(recordId)) { "Legacy profile not found" }
+        val grant = profileClaims.issue(recordId, session, name)
+        return ProfileClaimFlow.PreparedClaim(grant.token, record.id,
+            moe.ryuu.kyokouauth.core.identity.GameName.parseOrThrow(record.legacyName), record.profileUuid, grant.expiresAt)
+    }
+
+    fun authMeClaimsAvailable(): Boolean {
+        if (closed.get() || !supportsProfileClaims || !config.profileClaimsEnabled) return false
+        val inbox = authMeInbox
+        return if (inbox?.hasLocalState() == true) inbox.available() else authMeSource != null
+    }
+
+    /** Must run on bounded auth IO, and only for a live private-ingress request. Owns password. */
+    fun proveAuthMeProfile(legacyName: moe.ryuu.kyokouauth.core.identity.GameName, password: CharArray,
+                          session: java.util.UUID, name: moe.ryuu.kyokouauth.core.identity.GameName,
+                          current: () -> Boolean): ProfileClaimFlow.PreparedClaim? {
+        try {
+            if (!authMeClaimsAvailable() || !current()) return null
+            val inbox = authMeInbox?.takeIf { it.hasLocalState() }
+            val batch = if (inbox != null) "authme-inbox" else checkNotNull(config.authMeClaims).batch
+            val source = profileClaims.listByLegacyName(legacyName.value).singleOrNull()?.takeIf {
+                it.batch == batch && it.source == "authme" && it.status == moe.ryuu.kyokouauth.core.storage.LegacyProfile.Status.AVAILABLE
+            } ?: return null
+            val issue = {
+                profileClaims.issue(source.id, session, name,
+                    proofMethod = moe.ryuu.kyokouauth.core.storage.LegacyProofMethod.AUTHME_PASSWORD)
+            }
+            val grant = if (inbox != null) {
+                inbox.verifyAndUse(legacyName, source.profileUuid, password,
+                    current = { current() && !closed.get() }, verified = issue) ?: return null
+            } else {
+                when (checkNotNull(authMeSource).verify(legacyName, password)) {
+                    moe.ryuu.kyokouauth.core.authme.AuthMeVerification.VERIFIED -> Unit
+                    moe.ryuu.kyokouauth.core.authme.AuthMeVerification.UNAVAILABLE -> error("Legacy source unavailable")
+                    else -> return null
+                }
+                if (!current() || closed.get()) return null
+                issue()
+            }
+            return ProfileClaimFlow.PreparedClaim(grant.token, source.id,
+                moe.ryuu.kyokouauth.core.identity.GameName.parseOrThrow(source.legacyName), source.profileUuid, grant.expiresAt)
+        } catch (_: Exception) {
+            throw IllegalStateException("Legacy source unavailable")
+        } finally { password.fill('\u0000') }
+    }
+
+    fun commitLegacyProfile(token: ProfileClaimFlow.ClaimToken, session: java.util.UUID, name: moe.ryuu.kyokouauth.core.identity.GameName,
+                            xuid: moe.ryuu.kyokouauth.core.identity.Xuid, gamertag: String,
+                            current: () -> Boolean): moe.ryuu.kyokouauth.core.storage.BoundIdentity {
+        check(config.profileClaimsEnabled && supportsProfileClaims && !closed.get()) { "Profile claims are unavailable" }
+        check(MojangDirectory.lookup(name.key) is MojangDirectory.Lookup.Free) { "Claim target name is unavailable" }
+        check(current()) { "Claim connection closed during name validation" }
+        return profileClaims.commit(token.value, session, name, xuid, gamertag, current = current)
+    }
+
+    /** Call only after this connection has proved its Xuid, and only on the bounded IO executor. */
     fun roleOptions(xuid: moe.ryuu.kyokouauth.core.identity.Xuid, gamertag: String,
                     fallbackBedrockName: String?): RoleOptions {
         check(!closed.get()) { "Authentication is unavailable" }
@@ -126,7 +263,7 @@ class AuthService(config: ProxyConfig, private val logger: ProxyLog,
         if (!closed.compareAndSet(false, true)) return
         maintenance.cancel(false)
         var failure: Throwable? = null
-        listOfNotNull<AutoCloseable>(tasks, roleSkins, database, drivers).forEach { resource ->
+        listOfNotNull<AutoCloseable>(authMeInbox, tasks, authMeSource, roleSkins, database, drivers).forEach { resource ->
             try { resource.close() } catch (closing: Throwable) {
                 if (failure == null) failure = closing else failure.addSuppressed(closing)
             }

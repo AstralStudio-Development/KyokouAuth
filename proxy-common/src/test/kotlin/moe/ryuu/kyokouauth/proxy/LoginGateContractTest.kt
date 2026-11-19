@@ -31,6 +31,252 @@ import kotlin.test.assertTrue
 
 class LoginGateContractTest {
     @Test
+    fun `runtime snapshot activation never offers old passwords to an existing unprotected connection`() {
+        val fixture = Fixture(roleConfig)
+        fixture.services.privateAuthMeEnabled = true
+        fixture.services.decision = AuthCoordinator.Decision.Verify(AuthCoordinator.provisionalUuid(record.name),
+            AuthCoordinator.Reason.FIRST_BIND, true, null)
+        val oldConnection = fixture.player(777)
+        fixture.login(oldConnection)
+        fixture.config.snapshotClaimsEnabled(true)
+        fixture.gate.onJoin(oldConnection.limbo)
+        fixture.services.runWork()
+        assertTrue(fixture.gate.pendingProfileClaims().isEmpty())
+        assertEquals(1, fixture.services.beginCalls)
+        fixture.gate.onDisconnect(DisconnectEvent(oldConnection))
+        val protectedConnection = fixture.player(777)
+        fixture.login(protectedConnection)
+        fixture.gate.onJoin(protectedConnection.limbo)
+        assertEquals(ProfileClaimFlow.Stage.OFFER, fixture.gate.pendingProfileClaims().single().stage)
+        fixture.assertBackendDenied(protectedConnection)
+    }
+
+    @Test
+    fun `private claim command proves the old account without a public command or an early backend grant`() {
+        val fixture = Fixture(roleConfig + ("migration.enabled" to "true"))
+        fixture.services.privateAuthMeEnabled = true
+        fixture.services.decision = AuthCoordinator.Decision.Verify(AuthCoordinator.provisionalUuid(record.name),
+            AuthCoordinator.Reason.FIRST_BIND, true, null)
+        val player = fixture.player(777)
+        fixture.login(player)
+        fixture.gate.onJoin(player.limbo)
+        val source = UUID.randomUUID()
+        fixture.services.legacyPrepared = ProfileClaimFlow.PreparedClaim("server-only-grant", source,
+            GameName.parseOrThrow("OldSteve"), AuthCoordinator.provisionalUuid(GameName.parseOrThrow("OldSteve")), fixture.now + 600_000)
+        fixture.gate.onPrivateClaim(player, "/ka claim authme OldSteve PRIVATE_PASSWORD_SENTINEL")
+        assertEquals(0, fixture.services.privateProofs)
+        fixture.services.runWork()
+        assertEquals(1, fixture.services.privateProofs)
+        assertEquals(ProfileClaimFlow.Stage.CONFIRM_OLD, fixture.gate.pendingProfileClaims().single().stage)
+        assertEquals(0, fixture.services.beginCalls)
+        assertEquals(0, fixture.services.bindCalls)
+        assertEquals(0, fixture.services.legacyCommits)
+        fixture.assertBackendDenied(player)
+        assertTrue(fixture.logs.none { it.contains("PRIVATE_PASSWORD_SENTINEL") })
+        assertTrue(player.limbo.messages.none { it.toString().contains("PRIVATE_PASSWORD_SENTINEL") })
+        fixture.gate.onPrivateClaim(player, "/ka claim status")
+        fixture.gate.onPrivateClaim(player, "/ka claim cancel")
+        assertTrue(player.disconnects.isNotEmpty())
+        assertTrue(fixture.gate.pendingProfileClaims().isEmpty())
+    }
+
+    @Test
+    fun `private wrong proof is rate limited across account casing and never falls back or echoes input`() {
+        val fixture = Fixture(roleConfig + ("migration.enabled" to "true"))
+        fixture.services.privateAuthMeEnabled = true
+        fixture.services.decision = AuthCoordinator.Decision.Verify(AuthCoordinator.provisionalUuid(record.name),
+            AuthCoordinator.Reason.FIRST_BIND, true, null)
+        val player = fixture.player(777)
+        fixture.login(player)
+        fixture.gate.onJoin(player.limbo)
+        repeat(7) { index ->
+            fixture.gate.onPrivateClaim(player, "/ka claim authme ${if (index % 2 == 0) "OldSteve" else "oldsteve"} PRIVATE_BAD_RATE_SENTINEL")
+            fixture.services.runWork()
+        }
+        assertEquals(5, fixture.services.privateProofs)
+        assertEquals(ProfileClaimFlow.Stage.WAITING_OLD, fixture.gate.pendingProfileClaims().single().stage)
+        assertEquals(0, fixture.services.beginCalls)
+        assertEquals(0, fixture.services.bindCalls)
+        assertEquals(0, fixture.services.legacyCommits)
+        assertTrue(fixture.logs.none { it.contains("PRIVATE_BAD_RATE_SENTINEL") })
+        assertTrue(player.messages.none { it.toString().contains("PRIVATE_BAD_RATE_SENTINEL") })
+        fixture.assertBackendDenied(player)
+    }
+
+    @Test
+    fun `authenticated players cannot use private claim input to switch or overwrite their profile`() {
+        val fixture = Fixture(roleConfig + ("migration.enabled" to "true"))
+        fixture.services.privateAuthMeEnabled = true
+        fixture.services.decision = AuthCoordinator.Decision.Admit(record.toIdentity(), record)
+        val player = fixture.player(777)
+        fixture.login(player)
+        assertTrue(fixture.gate.isAuthenticated(player))
+        fixture.gate.onPrivateClaim(player, "/ka claim authme OldSteve PRIVATE_ONLINE_SENTINEL")
+        fixture.services.runWork()
+        assertEquals(0, fixture.services.privateProofs)
+        assertEquals(0, fixture.services.legacyCommits)
+        assertTrue(fixture.gate.isAuthenticated(player))
+        assertTrue(player.disconnects.isEmpty())
+        assertTrue(player.messages.none { it.toString().contains("PRIVATE_ONLINE_SENTINEL") })
+    }
+
+    @Test
+    fun `legacy data is bound only after manual old proof fresh Microsoft proof and two confirmations`() {
+        val fixture = Fixture(roleConfig + ("migration.enabled" to "true"))
+        fixture.services.decision = AuthCoordinator.Decision.Verify(AuthCoordinator.provisionalUuid(record.name),
+            AuthCoordinator.Reason.FIRST_BIND, true, null)
+        fixture.services.mappedProfilesAllowed = true
+        val player = fixture.player(777)
+        fixture.login(player)
+        fixture.gate.onJoin(player.limbo)
+        assertEquals(0, fixture.services.beginCalls)
+        val offer = player.limbo.menus.last()
+        fixture.gate.onRoleSelect(player.limbo, offer.generation, "confirm")
+        val request = fixture.gate.pendingProfileClaims().single()
+        assertEquals(ProfileClaimFlow.Stage.WAITING_OLD, request.stage)
+        val legacyId = UUID.randomUUID()
+        val legacyUuid = AuthCoordinator.provisionalUuid(GameName.parseOrThrow("OldSteve"))
+        fixture.services.legacyPrepared = ProfileClaimFlow.PreparedClaim("server-only-grant", legacyId,
+            GameName.parseOrThrow("OldSteve"), legacyUuid, fixture.now + 600_000)
+        val approval = fixture.gate.approveProfileClaim(player.sessionId, legacyId)
+        fixture.services.runWork()
+        approval.join()
+        assertEquals(0, fixture.services.beginCalls)
+        fixture.gate.onRoleSelect(player.limbo, player.limbo.menus.last().generation, "confirm")
+        fixture.services.runWork()
+        assertEquals(1, fixture.services.beginCalls)
+        fixture.services.pollResult = DeviceCodeFlow.PollResult.Authorized("fresh-test-proof", null, 300)
+        fixture.services.advanceBy(1000)
+        assertEquals(ProfileClaimFlow.Stage.CONFIRM_BIND, fixture.gate.pendingProfileClaims().single().stage)
+        assertEquals(0, fixture.services.bindCalls)
+        assertEquals(0, fixture.services.legacyCommits)
+        fixture.assertBackendDenied(player)
+        val finalMenu = player.limbo.menus.last()
+        fixture.gate.onRoleSelect(player.limbo, finalMenu.generation, "confirm")
+        fixture.gate.onRoleSelect(player.limbo, finalMenu.generation, "confirm")
+        fixture.services.runWork()
+        assertEquals(1, fixture.services.legacyCommits)
+        assertEquals(legacyUuid, fixture.services.legacyCommitted?.uuid)
+        assertFalse(fixture.gate.isAuthenticated(player))
+        assertTrue(player.requests.isEmpty())
+        assertTrue(player.disconnects.isNotEmpty())
+        assertEquals(0, fixture.services.grants)
+    }
+
+    @Test
+    fun `legacy claim refuses an online target and reserves its default UUID during commit`() {
+        for (alreadyOnline in listOf(false, true)) {
+            val fixture = Fixture(mapOf("bedrock.enabled" to "true", "migration.enabled" to "true"))
+            val provisional = AuthCoordinator.provisionalUuid(record.name)
+            fixture.services.decision = AuthCoordinator.Decision.Verify(provisional,
+                AuthCoordinator.Reason.FIRST_BIND, true, null)
+            val claimant = fixture.player(777).apply { uniqueId = provisional }
+            fixture.login(claimant)
+            fixture.gate.onJoin(claimant.limbo)
+            fixture.gate.onRoleSelect(claimant.limbo, claimant.limbo.menus.last().generation, "confirm")
+            val legacyId = UUID.randomUUID()
+            fixture.services.legacyPrepared = ProfileClaimFlow.PreparedClaim("server-only-grant", legacyId,
+                GameName.parseOrThrow("OldSteve"), AuthCoordinator.provisionalUuid(GameName.parseOrThrow("OldSteve")),
+                fixture.now + 600_000)
+            val approval = fixture.gate.approveProfileClaim(claimant.sessionId, legacyId)
+            fixture.services.runWork()
+            approval.join()
+            fixture.gate.onRoleSelect(claimant.limbo, claimant.limbo.menus.last().generation, "confirm")
+            fixture.services.runWork()
+            fixture.services.pollResult = DeviceCodeFlow.PollResult.Authorized("fresh-test-proof", null, 300)
+            fixture.services.advanceBy(1000)
+            val proof = BedrockProof.create(Xuid(1L), record.uuid, ".Steve", "Steve", ".", Any()) { true }
+            var nativeAdmitted = false
+            var target: FakePlayer? = null
+            fun nativeLogin() {
+                val player = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
+                target = player
+                val pre = PreLoginEvent(player, player.username, player.uniqueId, BedrockLogin.Verified(proof))
+                fixture.gate.onPreLogin(pre)
+                if (pre.result.isAllowed) {
+                    val login = LoginEvent(player, BedrockLogin.Verified(proof))
+                    fixture.gate.onLogin(login)
+                    nativeAdmitted = login.result.isAllowed
+                }
+            }
+            if (alreadyOnline) nativeLogin() else fixture.services.duringLegacyCommit = ::nativeLogin
+            fixture.gate.onRoleSelect(claimant.limbo, claimant.limbo.menus.last().generation, "confirm")
+            fixture.services.runWork()
+            assertEquals(if (alreadyOnline) 0 else 1, fixture.services.legacyCommits)
+            assertEquals(alreadyOnline, nativeAdmitted)
+            assertFalse(fixture.gate.isAuthenticated(claimant))
+            assertTrue(claimant.disconnects.isNotEmpty())
+            assertTrue(checkNotNull(target).disconnects.isEmpty())
+            assertEquals(alreadyOnline, fixture.gate.isAuthenticated(target))
+            assertEquals(0, fixture.services.bindCalls)
+            assertEquals(0, fixture.services.grants)
+            fixture.assertBackendDenied(claimant)
+        }
+    }
+
+    @Test
+    fun `native Bedrock cannot return to default profile after Microsoft ownership was mapped`() {
+        val fixture = Fixture(mapOf("bedrock.enabled" to "true"))
+        fixture.services.persistentMicrosoftProfile = UUID.fromString("529a5f64-5822-330d-a962-8e02fa0e0716")
+        val proof = BedrockProof.create(Xuid(1L), record.uuid, ".Steve", "Steve", ".", Any()) { true }
+        val player = fixture.player(777).apply { uniqueId = proof.uniqueId; username = proof.username }
+        val pre = PreLoginEvent(player, player.username, player.uniqueId, BedrockLogin.Verified(proof))
+        fixture.gate.onPreLogin(pre)
+        assertFalse(pre.result.isAllowed)
+        assertFalse(fixture.gate.isAuthenticated(player))
+        assertEquals(0, fixture.services.beginCalls)
+        assertEquals(0, fixture.services.bindCalls)
+        fixture.assertBackendDenied(player)
+    }
+
+    @Test
+    fun `ownership lookup failure refuses Java and native Bedrock rather than retaining default allow`() {
+        for (bedrock in listOf(false, true)) {
+            val fixture = Fixture(mapOf("bedrock.enabled" to "true"))
+            fixture.services.profileLookupFailure = IllegalStateException("controlled ownership read failure")
+            fixture.services.decision = AuthCoordinator.Decision.Admit(record.toIdentity(), record)
+            val player = fixture.player(777)
+            val proof = BedrockProof.create(Xuid(1L), record.uuid, ".Steve", "Steve", ".", Any()) { true }
+            if (bedrock) { player.uniqueId = proof.uniqueId; player.username = proof.username }
+            val pre = PreLoginEvent(player, player.username, player.uniqueId,
+                if (bedrock) BedrockLogin.Verified(proof) else BedrockLogin.Java)
+            fixture.gate.onPreLogin(pre)
+            assertFalse(pre.result.isAllowed)
+            fixture.assertBackendDenied(player)
+        }
+    }
+
+    @Test
+    fun `unsupported adapter refuses a mapped Microsoft login even with an ordinary trusted session`() {
+        val fixture = Fixture()
+        val saved = record.copy(uuid = AuthCoordinator.provisionalUuid(GameName.parseOrThrow("Legacy")))
+        fixture.services.decision = AuthCoordinator.Decision.Admit(saved.toIdentity(), saved)
+        val player = fixture.player(777)
+        val pre = PreLoginEvent(player, player.username, null)
+        fixture.gate.onPreLogin(pre)
+        assertFalse(pre.result.isAllowed)
+        assertFalse(fixture.gate.isAuthenticated(player))
+        fixture.assertBackendDenied(player)
+    }
+
+    @Test
+    fun `mapped Microsoft login keeps the saved profile on a supporting adapter without re-opening migration`() {
+        val fixture = Fixture(roleConfig + ("migration.enabled" to "true"))
+        val saved = record.copy(uuid = AuthCoordinator.provisionalUuid(GameName.parseOrThrow("Legacy")))
+        fixture.services.mappedProfilesAllowed = true
+        fixture.services.decision = AuthCoordinator.Decision.Admit(saved.toIdentity(), saved)
+        val player = fixture.player(777)
+        fixture.login(player)
+        assertEquals(saved.uuid, player.uniqueId)
+        assertTrue(fixture.gate.isAuthenticated(player))
+        assertTrue(fixture.gate.requiresMappedProfile(player))
+        assertTrue(fixture.gate.pendingProfileClaims().isEmpty())
+        val attempt = ServerPreConnectEvent(player, fixture.lobby)
+        fixture.gate.onPreConnect(attempt)
+        assertSame(fixture.lobby, attempt.result.server.orElse(null))
+    }
+
+    @Test
     fun `parallel throttled logins share one warning per minute without being admitted`() {
         val fixture = Fixture()
         val now = java.util.concurrent.atomic.AtomicLong(1_000_000L)
@@ -1729,9 +1975,10 @@ class LoginGateContractTest {
         }
         val services = MemoryServices { now }
         val catalogue = MessageCatalogue("en_US", File("unused-contract-messages"))
-        val gate = LoginGate(proxy, ProxyConfig(
+        val config = ProxyConfig(
             (if (fastPolling) mapOf("verification.poll-interval-seconds" to "1") else emptyMap()) + values,
-            File("unused-contract-config")),
+            File("unused-contract-config"))
+        val gate = LoginGate(proxy, config,
             catalogue, services, ProxyLog { _, message, _ ->
                 logs += message
                 duringLog(message)
@@ -1760,6 +2007,8 @@ class LoginGateContractTest {
                 player.username = profile.gameProfile.name
                 player.properties = profile.gameProfile.properties
             }
+            // This fixture models successful native ingress installation before the shared login event.
+            if (config.profileClaimsEnabled) gate.onPrivateClaimIngressReady(player.sessionId)
             return LoginEvent(player, bedrock)
         }
 
@@ -1829,6 +2078,39 @@ class LoginGateContractTest {
             var roleCalls = 0
             var premiumBinds = 0
             var roleFailure: Exception? = null
+            var mappedProfilesAllowed = false
+            var persistentMicrosoftProfile: UUID? = null
+            var profileLookupFailure: Exception? = null
+            var legacyPrepared: ProfileClaimFlow.PreparedClaim? = null
+            var privateAuthMeEnabled = false
+            var privateProofs = 0
+            var legacyCommits = 0
+            var legacyCommitted: BoundIdentity? = null
+            var duringLegacyCommit: () -> Unit = {}
+            override fun permitsMappedProfile(record: BoundIdentity): Boolean {
+                profileLookupFailure?.let { throw it }
+                if (record.kind == BoundIdentity.Kind.XUID && persistentMicrosoftProfile != null &&
+                    record.uuid != persistentMicrosoftProfile) return false
+                return mappedProfilesAllowed || record.kind != BoundIdentity.Kind.XUID ||
+                    record.uuid == Identity.ofXuid(Xuid(record.subject.toLong()))
+            }
+            override fun approveLegacyProfile(recordId: UUID, session: UUID, name: GameName): ProfileClaimFlow.PreparedClaim =
+                checkNotNull(legacyPrepared).also { check(it.recordId == recordId) }
+            override fun authMeClaimsAvailable() = privateAuthMeEnabled
+            override fun proveAuthMeProfile(legacyName: GameName, password: CharArray, session: UUID, name: GameName,
+                                            current: () -> Boolean): ProfileClaimFlow.PreparedClaim? {
+                check(current())
+                privateProofs++
+                return legacyPrepared?.takeIf { it.legacyName.key == legacyName.key }
+            }
+            override fun commitLegacyProfile(token: ProfileClaimFlow.ClaimToken, session: UUID, name: GameName, xuid: Xuid, gamertag: String,
+                                             current: () -> Boolean): BoundIdentity {
+                check(current() && token == checkNotNull(legacyPrepared).token)
+                duringLegacyCommit()
+                legacyCommits++
+                return BoundIdentity(checkNotNull(legacyPrepared).profileUuid, name, BoundIdentity.Kind.XUID,
+                    xuid.value.toString(), gamertag, clock(), clock()).also { legacyCommitted = it }
+            }
             var duringRoles: () -> Unit = {}
             var options = RoleOptions(listOf(RoleOption(record.toIdentity(), record, null)), null)
             var allow = true

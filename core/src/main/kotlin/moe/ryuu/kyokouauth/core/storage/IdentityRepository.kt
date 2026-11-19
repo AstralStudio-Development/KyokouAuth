@@ -25,7 +25,7 @@ data class BoundIdentity(
 
     fun toIdentity(): Identity = when (kind) {
         Kind.MOJANG -> Identity.Premium(name, uuid)
-        Kind.XUID -> Identity.Microsoft(name, Xuid(subject.toLong()), gamertag.orEmpty())
+        Kind.XUID -> Identity.Microsoft(name, Xuid(subject.toLong()), gamertag.orEmpty(), uuid)
     }
 
     companion object {
@@ -114,14 +114,56 @@ class IdentityRepository(private val database: Database) : IdentityStore {
         claim(identity, now, allowNameChange = true)
 
     private fun claim(identity: Identity, now: Long, allowNameChange: Boolean): ClaimResult = database.transaction { connection ->
-        val existing = byUuidUnsafe(connection, identity.uuid)
-        if (allowNameChange && existing != null && (existing.kind != BoundIdentity.Kind.XUID ||
-                existing.subject != (identity as Identity.Microsoft).xuid.value.toString())) {
-            return@transaction ClaimResult.NameTaken(existing)
+        val (kind, subject) = subjectOf(identity)
+        val existingBySubject = bySubjectUnsafe(connection, kind, subject)
+        if (existingBySubject != null && existingBySubject.uuid != identity.uuid) {
+            throw IllegalArgumentException(
+                "identity ($kind, $subject) is bound to profile ${existingBySubject.uuid}, cannot claim with ${identity.uuid}",
+            )
         }
-        val changingName = existing != null && existing.name.key != identity.name.key
+        val rawUuidForSubject = findIdentityRow(connection, kind, subject)
+        if (rawUuidForSubject != null && rawUuidForSubject != identity.uuid.toString()) {
+            throw IllegalArgumentException(
+                "identity ($kind, $subject) row exists under $rawUuidForSubject, cannot claim with ${identity.uuid}",
+            )
+        }
+
+        val ownerBySubject = findOwnerBySubject(connection, kind, subject)
+        if (ownerBySubject != null && ownerBySubject != identity.uuid.toString()) {
+            throw IllegalArgumentException(
+                "identity ($kind, $subject) owns profile $ownerBySubject, cannot claim with ${identity.uuid}",
+            )
+        }
+
+        require(identity !is Identity.Microsoft || identity.uuid == Identity.ofXuid(identity.xuid) || ownerBySubject != null) {
+            "A mapped Microsoft profile requires a committed ownership record"
+        }
+        val ownerByProfile = findOwnerByProfile(connection, identity.uuid)
+        if (ownerByProfile != null && ownerByProfile != (kind to subject)) {
+            throw IllegalArgumentException(
+                "profile ${identity.uuid} is exclusively owned by (${ownerByProfile.first}, ${ownerByProfile.second})",
+            )
+        }
+
+        val existing = byUuidUnsafe(connection, identity.uuid)
+        if (existing != null && (existing.kind != kind || existing.subject != subject)) {
+            if (allowNameChange) {
+                return@transaction ClaimResult.NameTaken(existing)
+            }
+            throw IllegalArgumentException(
+                "profile ${identity.uuid} is already bound to (${existing.kind}, ${existing.subject})",
+            )
+        }
+        val rawSubjectAtUuid = findSubjectAtUuid(connection, identity.uuid)
+        if (rawSubjectAtUuid != null && rawSubjectAtUuid != (kind to subject)) {
+            throw IllegalArgumentException(
+                "profile ${identity.uuid} row belongs to (${rawSubjectAtUuid.first}, ${rawSubjectAtUuid.second})",
+            )
+        }
+        val effectiveExisting = existing ?: existingBySubject
+        val changingName = effectiveExisting != null && effectiveExisting.name.key != identity.name.key
         if (changingName && !allowNameChange) {
-            return@transaction ClaimResult.IdentityAlreadyNamed(existing)
+            return@transaction ClaimResult.IdentityAlreadyNamed(effectiveExisting)
         }
 
         val holderUuid = findNameOwner(connection, identity.name.key)
@@ -132,12 +174,12 @@ class IdentityRepository(private val database: Database) : IdentityStore {
             )
         }
 
-        val record = BoundIdentity.of(identity, now, existing)
+        val record = BoundIdentity.of(identity, now, effectiveExisting)
 
         upsertIdentity(connection, record)
         upsertName(connection, record)
 
-        ClaimResult.Bound(record, existing?.name?.takeIf { changingName })
+        ClaimResult.Bound(record, effectiveExisting?.name?.takeIf { changingName })
     }
 
     /** Records that this identity was seen, without changing anything else. */
@@ -153,8 +195,18 @@ class IdentityRepository(private val database: Database) : IdentityStore {
         }
     }
 
-    /** Admin-only. Removes both rows; the player will have to bind again on next join. */
+    /**
+     * Admin-only. Removes the name, identity, and any play session for [uuid], while leaving
+     * `kyokouauth_profile_owner` intact so a mapped identity retains exclusive profile ownership and
+     * must re-prove itself on next join.
+     */
     override fun unbind(uuid: UUID): Boolean = database.transaction { connection ->
+        connection.prepareStatement(
+            "DELETE FROM ${Schema.SESSION} WHERE player_uuid = ?",
+        ).use { statement ->
+            statement.setString(1, uuid.toString())
+            statement.executeUpdate()
+        }
         val removedName = connection.prepareStatement(
             "DELETE FROM ${Schema.NAME} WHERE player_uuid = ?",
         ).use { statement ->
@@ -204,19 +256,55 @@ class IdentityRepository(private val database: Database) : IdentityStore {
         }
     }
 
-    private fun findIdentityRow(connection: Connection, identity: Identity): String? {
-        val (kind, subject) = when (identity) {
-            is Identity.Premium -> BoundIdentity.Kind.MOJANG to identity.mojangUuid.toString()
-            is Identity.Microsoft -> BoundIdentity.Kind.XUID to identity.xuid.value.toString()
-        }
-        return connection.prepareStatement(
+    private fun subjectOf(identity: Identity): Pair<BoundIdentity.Kind, String> = when (identity) {
+        is Identity.Premium -> BoundIdentity.Kind.MOJANG to identity.mojangUuid.toString()
+        is Identity.Microsoft -> BoundIdentity.Kind.XUID to identity.xuid.value.toString()
+    }
+
+    private fun findIdentityRow(connection: Connection, kind: BoundIdentity.Kind, subject: String): String? =
+        connection.prepareStatement(
             "SELECT player_uuid FROM ${Schema.IDENTITY} WHERE kind = ? AND subject = ?",
         ).use { statement ->
             statement.setString(1, kind.name)
             statement.setString(2, subject)
             statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
         }
-    }
+
+    private fun findSubjectAtUuid(connection: Connection, uuid: UUID): Pair<BoundIdentity.Kind, String>? =
+        connection.prepareStatement(
+            "SELECT kind, subject FROM ${Schema.IDENTITY} WHERE player_uuid = ?",
+        ).use { statement ->
+            statement.setString(1, uuid.toString())
+            statement.executeQuery().use { rows ->
+                if (rows.next()) BoundIdentity.Kind.valueOf(rows.getString(1)) to rows.getString(2) else null
+            }
+        }
+
+    private fun bySubjectUnsafe(connection: Connection, kind: BoundIdentity.Kind, subject: String): BoundIdentity? =
+        connection.prepareStatement("$SELECT WHERE i.kind = ? AND i.subject = ?").use { statement ->
+            statement.setString(1, kind.name)
+            statement.setString(2, subject)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.toBoundIdentity() else null }
+        }
+
+    private fun findOwnerBySubject(connection: Connection, kind: BoundIdentity.Kind, subject: String): String? =
+        connection.prepareStatement(
+            "SELECT profile_uuid FROM ${Schema.PROFILE_OWNER} WHERE kind = ? AND subject = ?",
+        ).use { statement ->
+            statement.setString(1, kind.name)
+            statement.setString(2, subject)
+            statement.executeQuery().use { rows -> if (rows.next()) rows.getString(1) else null }
+        }
+
+    private fun findOwnerByProfile(connection: Connection, uuid: UUID): Pair<BoundIdentity.Kind, String>? =
+        connection.prepareStatement(
+            "SELECT kind, subject FROM ${Schema.PROFILE_OWNER} WHERE profile_uuid = ?",
+        ).use { statement ->
+            statement.setString(1, uuid.toString())
+            statement.executeQuery().use { rows ->
+                if (rows.next()) BoundIdentity.Kind.valueOf(rows.getString(1)) to rows.getString(2) else null
+            }
+        }
 
     private fun findNameOwner(connection: Connection, nameKey: String): String? =
         connection.prepareStatement(

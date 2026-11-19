@@ -9,7 +9,8 @@ import java.util.UUID
  *  - [Premium]   proven by a Mojang handshake, carries the real Mojang UUID and skin.
  *  - [Microsoft] proven by a device code or connection-verified Floodgate, carries an Xbox XUID.
  *
- * The identity of a Microsoft player is derived, never stored as a separate fact: see [uuid].
+ * Microsoft authentication uses the XUID; the server profile may be a separately owned legacy UUID.
+ * Unmapped identities keep the original XUID-derived profile by default.
  */
 sealed class Identity {
 
@@ -29,9 +30,16 @@ sealed class Identity {
         override val name: GameName,
         val xuid: Xuid,
         val gamertag: String,
+        val profileUuid: UUID = ofXuid(xuid),
     ) : Identity() {
+        init {
+            // XUID zero was historically accepted with the default UUID; preserve that behaviour.
+            require(profileUuid == ofXuid(xuid) || profileUuid != UUID(0L, 0L)) {
+                "a mapped profile UUID must not be zero"
+            }
+        }
 
-        override val uuid: UUID get() = ofXuid(xuid)
+        override val uuid: UUID get() = profileUuid
     }
 
     companion object {
