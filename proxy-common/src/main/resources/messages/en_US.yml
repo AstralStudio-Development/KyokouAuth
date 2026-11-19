@@ -100,6 +100,17 @@ command:
   internal-error: "<#F87171>Command failed; check the console log"
 
 migration:
+  last-failure: "<#FACC15>Last failure: <#D4D4D8><reason>"
+  failure-missing_inbox_config: "<#FACC15>The copied configuration is missing or not a regular file.<#D4D4D8> Copy the old AuthMe config to migration/inbox/AuthMe/config.yml and run ka migration scan; no KyokouAuth configuration is needed."
+  failure-invalid_source_config: "<#FACC15>The copied AuthMe configuration could not be recognized.<#D4D4D8> Check the complete source config and supported SQLite/MySQL/MariaDB and SHA256 settings. Do not guess fields or send credentials to chat."
+  failure-source_unavailable: "<#FACC15>Could not read the old source or export its snapshot.<#D4D4D8> Check database files, a consistent stopped source, read-only access, drivers, connectivity/TLS and the account limit."
+  failure-preflight_failed: "<#FACC15>Local preflight or staging failed.<#D4D4D8> Check playerdata/cache format, scan limits, disk space and directory access. The active snapshot is unchanged."
+  failure-invalid_confirmation: "<#FACC15>No matching current confirmation token, or the preview expired.<#D4D4D8> Run scan again, review issues and confirm using its new token."
+  failure-snapshot_invalid: "<#FACC15>The unconfirmed snapshot failed integrity validation.<#D4D4D8> It was not activated. Run scan again and do not edit generated snapshot files."
+  failure-target_import_failed: "<#FACC15>Candidate registration failed, or historical/target state changed after preflight.<#D4D4D8> Scan and confirm again; equal existing batch entries are recognized idempotently."
+  failure-activation_failed: "<#FACC15>Could not change the local snapshot state.<#D4D4D8> Check disk space, directory access and file locks before retrying. Do not delete the active snapshot."
+  failure-no_active_snapshot: "<#FACC15>No local migration snapshot has been activated; there is nothing to disable.<#D4D4D8> Normal login is unaffected. Copy materials and scan when migration is needed."
+  failure-operation_failed: "<#F87171>Unclassified migration failure.<#D4D4D8> Check the safe console error code. Do not publish database passwords, hashes or source configuration."
   scan-started: "<#22D3EE>Background scan started.<#D4D4D8> Reading migration/inbox; use ka migration progress or ka migration cancel. The old source is read-only and any active snapshot is unchanged."
   scan-progress: "<#22D3EE>Migration: <phase><#D4D4D8>, <count> source rows processed; local claims active: <active>."
   scan-cancelling: "<#FACC15>Cancellation requested; the running read will finish safely and clean its stage. The active snapshot is unchanged."

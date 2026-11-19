@@ -62,6 +62,7 @@ class AuthMeInboxMigration(
     @Volatile private var localState = false
     @Volatile private var phase = AuthMeImportPhase.IDLE
     @Volatile private var processed = 0
+    @Volatile private var lastFailure: AuthMeImportFailure? = null
 
     init {
         try {
@@ -97,7 +98,7 @@ class AuthMeInboxMigration(
     fun available(): Boolean = !closed.get() && enabled && active != null
     fun status(): AuthMeImportStatus = synchronized(lock) {
         expirePendingLocked()
-        AuthMeImportStatus(phase, processed, available())
+        AuthMeImportStatus(phase, processed, available(), lastFailure)
     }
     fun report(): AuthMeMigrationPreview? = synchronized(lock) {
         expirePendingLocked()
@@ -107,11 +108,16 @@ class AuthMeInboxMigration(
     fun scan(): CompletableFuture<AuthMeMigrationPreview> = launch(AuthMeImportPhase.SCANNING_SOURCE) { running ->
         discardPending()
         drainCleanup()
+        val copiedConfig = folder.resolve("inbox/AuthMe/config.yml")
+        running.failure = AuthMeImportFailure.MISSING_INBOX_CONFIG
+        check(Files.isRegularFile(copiedConfig, NOFOLLOW_LINKS))
+        running.failure = AuthMeImportFailure.INVALID_SOURCE_CONFIG
+        val source = AuthMeConfigReader.read(copiedConfig)
+        running.failure = AuthMeImportFailure.SOURCE_UNAVAILABLE
         val directory = folder.resolve("staging").resolve(UUID.randomUUID().toString())
         secureDirectory(directory)
         var localVerifier: AuthMeLegacyVerifier? = null
         try {
-            val source = AuthMeConfigReader.read(folder.resolve("inbox/AuthMe/config.yml"))
             checkCurrent(running)
             val sourceLoader = driverLoader(source.dialect)
             val sqliteLoader = driverLoader(Dialect.SQLITE)
@@ -123,6 +129,7 @@ class AuthMeInboxMigration(
             // From this point on the old database is closed and no credentials are retained by the job.
             checkCurrent(running)
             phase = AuthMeImportPhase.MATCHING_PROFILES
+            running.failure = AuthMeImportFailure.PREFLIGHT_FAILED
             val canonical = AuthMeSourceConfig(Dialect.SQLITE, databaseFile.toAbsolutePath().toString(), charsetName = source.charsetName)
             val verifier = AuthMeLegacyVerifier(canonical, sqliteLoader)
             localVerifier = verifier
@@ -158,6 +165,7 @@ class AuthMeInboxMigration(
     }
 
     fun confirm(token: String): CompletableFuture<AuthMeAutoMigrationReport> = launch(AuthMeImportPhase.ACTIVATING) { running ->
+        running.failure = AuthMeImportFailure.INVALID_CONFIRMATION
         val staged = synchronized(lock) {
             expirePendingLocked()
             val value = checkNotNull(pending) { "Run a migration scan first" }
@@ -169,16 +177,19 @@ class AuthMeInboxMigration(
         var promoted: Path? = null
         var published = false
         try {
+            running.failure = AuthMeImportFailure.SNAPSHOT_INVALID
             validateManifest(staged.directory)
             checkCurrent(running)
             // Confirmation rechecks only the frozen local snapshot and historical metadata, never the old DB.
             // Short target transactions release its shared pool/SQLite lock between chunks.
             // A failed activation may leave inert candidates; the fixed batch makes a rescan idempotent,
             // and only the active snapshot's own name/UUID allow-list can ever issue a claim grant.
+            running.failure = AuthMeImportFailure.TARGET_IMPORT_FAILED
             val report = staged.planner.confirm(token, transactionSize = 256,
                 stillCurrent = { current(running) }, progress = { processed = it })
             checkCurrent(running)
             staged.verifier.close()
+            running.failure = AuthMeImportFailure.ACTIVATION_FAILED
             val finalDirectory = folder.resolve("snapshots").resolve(staged.directory.fileName)
             Files.move(staged.directory, finalDirectory, ATOMIC_MOVE)
             promoted = finalDirectory
@@ -222,12 +233,15 @@ class AuthMeInboxMigration(
         // preview as well as the running job, so a successful cancel never leaves a usable token.
         takePendingLocked()?.let(::retire)
         phase = AuthMeImportPhase.CANCELLED
+        lastFailure = null
         requestCleanupLocked()
         true
     }
 
-    fun disable(): CompletableFuture<Unit> = launch(AuthMeImportPhase.DISABLING) {
+    fun disable(): CompletableFuture<Unit> = launch(AuthMeImportPhase.DISABLING) { running ->
+        running.failure = AuthMeImportFailure.NO_ACTIVE_SNAPSHOT
         val id = checkNotNull(selectedSnapshotId) { "No local snapshot has been activated" }
+        running.failure = AuthMeImportFailure.ACTIVATION_FAILED
         proofLifecycle.write {
             synchronized(lock) {
                 writePointer(id, false)
@@ -272,6 +286,7 @@ class AuthMeInboxMigration(
             job = running
             phase = start
             processed = 0
+            lastFailure = null
             try {
                 executor.execute {
                     var outcome = runCatching { checkCurrent(running); action(running) }
@@ -280,12 +295,17 @@ class AuthMeInboxMigration(
                         if (start == AuthMeImportPhase.SCANNING_SOURCE && !current(running))
                             outcome = Result.failure(CancellationException("Migration cancelled"))
                         if (job === running) job = null
-                        if (outcome.isFailure) phase = if (running.cancelled.get() || closed.get())
-                            AuthMeImportPhase.CANCELLED else AuthMeImportPhase.FAILED
+                        if (outcome.isFailure) {
+                            val cancelled = running.cancelled.get() || closed.get()
+                            lastFailure = if (cancelled) null else running.failure
+                            phase = if (cancelled) AuthMeImportPhase.CANCELLED else AuthMeImportPhase.FAILED
+                        }
                     }
                     outcome.fold(future::complete) {
+                        // Only a closed set of stage codes crosses this boundary, never raw YAML,
+                        // JDBC, filesystem messages or their causes, which can contain credentials.
                         future.completeExceptionally(if (running.cancelled.get() || closed.get()) CancellationException("Migration cancelled")
-                        else IllegalStateException("AuthMe migration failed; inspect the inbox, source access and snapshot limits"))
+                        else AuthMeImportException(running.failure))
                     }
                 }
             } catch (_: RejectedExecutionException) {
@@ -325,7 +345,10 @@ class AuthMeInboxMigration(
         val staged = pending ?: return false
         if (closed.get() || nowMillis() < staged.preview.expiresAt) return false
         takePendingLocked()?.let(::retire)
-        if (job == null) phase = AuthMeImportPhase.EXPIRED
+        if (job == null) {
+            phase = AuthMeImportPhase.EXPIRED
+            lastFailure = null
+        }
         requestCleanupLocked()
         return true
     }
@@ -432,7 +455,8 @@ class AuthMeInboxMigration(
         active?.verifier?.close()
     }
 
-    private class Job(val cancelled: AtomicBoolean = AtomicBoolean())
+    private class Job(val cancelled: AtomicBoolean = AtomicBoolean(),
+                      var failure: AuthMeImportFailure = AuthMeImportFailure.OPERATION_FAILED)
     private class Staged(val directory: Path, val verifier: AuthMeLegacyVerifier,
                          val planner: AuthMeMigrationService, val preview: AuthMeMigrationPreview)
     private class LocalSnapshot(val directory: Path, val profiles: Map<String, UUID>, val verifier: AuthMeLegacyVerifier)
@@ -443,4 +467,14 @@ class AuthMeInboxMigration(
 }
 
 enum class AuthMeImportPhase { IDLE, SCANNING_SOURCE, MATCHING_PROFILES, READY, ACTIVATING, ACTIVE, DISABLING, DISABLED, CANCELLED, EXPIRED, FAILED }
-data class AuthMeImportStatus(val phase: AuthMeImportPhase, val processed: Int, val active: Boolean)
+data class AuthMeImportStatus(val phase: AuthMeImportPhase, val processed: Int, val active: Boolean,
+                              val failure: AuthMeImportFailure? = null)
+
+/** Stable, non-sensitive administrator diagnostics; source values and causes are never retained. */
+enum class AuthMeImportFailure {
+    MISSING_INBOX_CONFIG, INVALID_SOURCE_CONFIG, SOURCE_UNAVAILABLE, PREFLIGHT_FAILED,
+    INVALID_CONFIRMATION, SNAPSHOT_INVALID, TARGET_IMPORT_FAILED, ACTIVATION_FAILED,
+    NO_ACTIVE_SNAPSHOT, OPERATION_FAILED,
+}
+class AuthMeImportException(val reason: AuthMeImportFailure) :
+    IllegalStateException("AuthMe migration failed: ${reason.name}")

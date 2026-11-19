@@ -22,6 +22,41 @@ class AuthMeMigrationCommandTest {
     private val hash = "\$SHA\$11aa0706173d7272\$dbba96681c2ae4e0bfdf226d70fbbc5e4ee3d8071faa613bc533fe8a64817d10"
 
     @Test
+    fun `empty inbox gives the operator a missing-file action and retains that safe reason in progress`() {
+        val config = ProxyConfig(mapOf("database.type" to "h2", "database.database" to folder.resolve("identities").toString(),
+            "database.auto-download-driver" to "false"), folder.toFile())
+        val messages = MessageCatalogue("en_US", folder.resolve("messages").toFile()).also { it.load() }
+        val server = object : ProxyServer {
+            override fun getServer(name: String) = Optional.empty<RegisteredServer>()
+            override fun getPlayer(name: String) = Optional.empty<Player>()
+            override fun getPlayer(uuid: UUID) = Optional.empty<Player>()
+            override val allPlayers = emptyList<Player>()
+            override val configuration = object : ProxyConfiguration { override val attemptConnectionOrder = emptyList<String>() }
+        }
+        val replies = LinkedBlockingQueue<String>()
+        val source = object : CommandSource {
+            override val isConsole = true
+            override fun hasPermission(permission: String) = true
+            override fun sendMessage(message: RichText.Parsed) { replies.add(message.spans.joinToString("") { it.text }) }
+        }
+        val logger = ProxyLog { _, _, _ -> }
+        fun reply() = assertNotNull(replies.poll(5, TimeUnit.SECONDS))
+        AuthService(config, logger, supportsProfileClaims = true).use { auth ->
+            val command = KyokouAuthCommand(server, config, messages, auth, LoginGate(server, config, messages, auth, logger)) {}
+            command.execute(source, arrayOf("migration", "scan"))
+            val first = reply()
+            val failure = if (first.contains("Background scan started")) reply() else first
+            assertTrue(failure.contains("migration/inbox/AuthMe/config.yml"), failure)
+            assertFalse(failure.contains("Migration did not complete"), failure)
+            assertEquals(AuthMeImportFailure.MISSING_INBOX_CONFIG, auth.inboxLegacyImportStatus()?.failure)
+            command.execute(source, arrayOf("migration", "progress"))
+            assertTrue(reply().contains("operation failed"))
+            assertTrue(reply().contains("migration/inbox/AuthMe/config.yml"))
+            assertFalse(auth.authMeClaimsAvailable())
+        }
+    }
+
+    @Test
     fun `console migrates a fixed inbox without migration config and claims use only the persistent local snapshot`() {
         val oldServer = folder.resolve("migration/inbox")
         val oldAuthMe = Files.createDirectories(oldServer.resolve("AuthMe"))

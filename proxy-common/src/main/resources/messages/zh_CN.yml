@@ -99,6 +99,17 @@ command:
   internal-error: "<#F87171>执行失败，请查看控制台日志"
 
 migration:
+  last-failure: "<#FACC15>本轮失败原因：<#D4D4D8><reason>"
+  failure-missing_inbox_config: "<#FACC15>收件配置缺失或不是普通文件。<#D4D4D8>请把旧 AuthMe 的配置复制到 migration/inbox/AuthMe/config.yml，再执行 ka migration scan；无需修改本插件配置。"
+  failure-invalid_source_config: "<#FACC15>无法识别复制来的 AuthMe 配置。<#D4D4D8>请核对是否为完整旧配置及受支持的 SQLite/MySQL/MariaDB、SHA256 设置；不要手工猜测字段或把凭据发到聊天。"
+  failure-source_unavailable: "<#FACC15>旧来源读取或快照导出失败。<#D4D4D8>请检查数据库文件是否存在且已停写一致、只读访问、驱动、连接/TLS 和账号数量上限。"
+  failure-preflight_failed: "<#FACC15>本地预检或暂存写入失败。<#D4D4D8>请检查玩家档案/缓存格式、扫描上限、磁盘与目录权限；原启用快照不变。"
+  failure-invalid_confirmation: "<#FACC15>没有匹配的有效确认 token，或预检已过期。<#D4D4D8>请重新 scan，检查 issues 后使用本次给出的 token 确认。"
+  failure-snapshot_invalid: "<#FACC15>未启用快照的完整性校验失败。<#D4D4D8>本次不会启用，请重新 scan；不要修改生成的快照文件。"
+  failure-target_import_failed: "<#FACC15>目标登记未完成，或预检后的历史/目标状态已变化。<#D4D4D8>请重扫后确认；已登记的同批候选会幂等识别。"
+  failure-activation_failed: "<#FACC15>本地快照启停或切换未完成。<#D4D4D8>请检查磁盘空间、目录权限和文件占用后重试；不要删除当前有效快照。"
+  failure-no_active_snapshot: "<#FACC15>尚未启用过本地迁移快照，无需停用。<#D4D4D8>普通登录不受影响；需要迁移时先复制材料并 scan。"
+  failure-operation_failed: "<#F87171>迁移操作遇到未分类错误。<#D4D4D8>请查看控制台安全错误码；不要公开数据库密码、哈希或源配置。"
   scan-started: "<#22D3EE>后台扫描已启动。<#D4D4D8>从 migration/inbox 读取复制材料；用 ka migration progress 查看进度、ka migration cancel 取消。旧库只读，当前可用快照不受影响。"
   scan-progress: "<#22D3EE>迁移状态：<phase><#D4D4D8>，本轮已读取 <count> 条；本地认领启用：<active>。"
   scan-cancelling: "<#FACC15>已请求取消扫描/预检；正在结束的读取会安全清理临时文件，原启用快照不变。"

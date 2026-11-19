@@ -117,6 +117,10 @@ class KyokouAuthCommand(
                     val phase = component("migration.phase-${status.phase.name.lowercase(Locale.ROOT)}", null).spans.joinToString("") { it.text }
                     tell(source, "migration.scan-progress", "phase" to phase, "count" to status.processed.toString(),
                         "active" to status.active.toString())
+                    status.failure?.let { failure ->
+                        val reason = component("migration.failure-${failure.name.lowercase(Locale.ROOT)}", null).spans.joinToString("") { it.text }
+                        tell(source, "migration.last-failure", "reason" to reason)
+                    }
                 }
             }
             "cancel" -> {
@@ -393,6 +397,10 @@ class KyokouAuthCommand(
                 when (cause) {
                     is java.util.concurrent.CancellationException -> tell(source, "migration.scan-cancelled")
                     is RejectedExecutionException -> tell(source, "command.busy")
+                    is AuthMeImportException -> {
+                        if (cause.reason == AuthMeImportFailure.OPERATION_FAILED) auth.reportFailure(cause)
+                        tell(source, "migration.failure-${cause.reason.name.lowercase(Locale.ROOT)}")
+                    }
                     else -> { auth.reportFailure(cause); tell(source, "migration.snapshot-failed") }
                 }
             }

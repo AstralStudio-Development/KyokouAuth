@@ -326,6 +326,116 @@ class AuthMeInboxMigrationTest {
         }
     }
 
+    @Test
+    fun `missing copied configuration reports an actionable safe reason instead of a generic failure`() {
+        val migrationRoot = root.resolve("migration")
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            AuthMeInboxMigration(migrationRoot, ProfileClaimRepository(db), { null }, {}).use { migration ->
+                val failed = assertFailsWith<java.util.concurrent.ExecutionException> { migration.scan().get(5, TimeUnit.SECONDS) }
+                assertEquals("AuthMe migration failed: MISSING_INBOX_CONFIG", failed.cause?.message)
+                assertNull(failed.cause?.cause)
+                assertEquals(AuthMeImportPhase.FAILED, migration.status().phase)
+                assertFalse(migration.available())
+                Files.list(migrationRoot.resolve("staging")).use { assertEquals(0L, it.count()) }
+            }
+        }
+    }
+
+    @Test
+    fun `invalid source configuration is classified without retaining its private values`() {
+        val migrationRoot = root.resolve("migration")
+        val source = prepareInbox(migrationRoot)
+        Files.writeString(source.parent.resolve("config.yml"), "DataSource:\n  backend: PRIVATE_INVALID_CONFIG_SENTINEL\n")
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            AuthMeInboxMigration(migrationRoot, ProfileClaimRepository(db), { null }, {}).use { migration ->
+                val failed = assertFailsWith<java.util.concurrent.ExecutionException> { migration.scan().get(5, TimeUnit.SECONDS) }
+                val safe = assertIs<AuthMeImportException>(failed.cause)
+                assertEquals(AuthMeImportFailure.INVALID_SOURCE_CONFIG, safe.reason)
+                assertNull(safe.cause)
+                assertFalse(safe.toString().contains("PRIVATE_INVALID_CONFIG_SENTINEL"))
+                assertEquals(safe.reason, migration.status().failure)
+                Files.list(migrationRoot.resolve("staging")).use { assertEquals(0L, it.count()) }
+            }
+        }
+    }
+
+    @Test
+    fun `driver failures expose only the safe source stage and erase the original secret-bearing cause`() {
+        val migrationRoot = root.resolve("migration")
+        prepareInbox(migrationRoot)
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            AuthMeInboxMigration(migrationRoot, ProfileClaimRepository(db), {
+                throw IllegalStateException("jdbc:mysql://private:PRIVATE_SQL_PASSWORD_SENTINEL@database/source")
+            }, {}).use { migration ->
+                val failed = assertFailsWith<java.util.concurrent.ExecutionException> { migration.scan().get(5, TimeUnit.SECONDS) }
+                val safe = assertIs<AuthMeImportException>(failed.cause)
+                assertEquals(AuthMeImportFailure.SOURCE_UNAVAILABLE, safe.reason)
+                assertNull(safe.cause)
+                assertFalse(safe.toString().contains("PRIVATE_SQL_PASSWORD_SENTINEL"))
+                assertFalse(migration.status().toString().contains("PRIVATE_SQL_PASSWORD_SENTINEL"))
+                assertEquals(safe.reason, migration.status().failure)
+                Files.list(migrationRoot.resolve("staging")).use { assertEquals(0L, it.count()) }
+            }
+        }
+    }
+
+    @Test
+    fun `invalid confirmation is classified without consuming the valid preview and success clears the reason`() {
+        val migrationRoot = root.resolve("migration")
+        prepareInbox(migrationRoot)
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            AuthMeInboxMigration(migrationRoot, ProfileClaimRepository(db), { null }, {}).use { migration ->
+                val preview = migration.scan().get(5, TimeUnit.SECONDS)
+                val failed = assertFailsWith<java.util.concurrent.ExecutionException> {
+                    migration.confirm("PRIVATE_CONFIRM_TOKEN_SENTINEL").get(5, TimeUnit.SECONDS)
+                }
+                val safe = assertIs<AuthMeImportException>(failed.cause)
+                assertEquals(AuthMeImportFailure.INVALID_CONFIRMATION, safe.reason)
+                assertFalse(safe.toString().contains("PRIVATE_CONFIRM_TOKEN_SENTINEL"))
+                assertNull(safe.cause)
+                assertEquals(preview.token, migration.report()?.token)
+                assertEquals(1, migration.confirm(preview.token).get(5, TimeUnit.SECONDS).imported)
+                assertTrue(migration.available())
+                assertNull(migration.status().failure)
+            }
+        }
+    }
+
+    @Test
+    fun `corrupt unconfirmed snapshot reports integrity failure while the old active proof remains valid`() {
+        val migrationRoot = root.resolve("migration")
+        prepareInbox(migrationRoot)
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            AuthMeInboxMigration(migrationRoot, ProfileClaimRepository(db), { null }, {}).use { migration ->
+                val first = migration.scan().get(5, TimeUnit.SECONDS)
+                migration.confirm(first.token).get(5, TimeUnit.SECONDS)
+                val replacement = migration.scan().get(5, TimeUnit.SECONDS)
+                val stage = Files.list(migrationRoot.resolve("staging")).use { it.findFirst().orElseThrow() }
+                Files.writeString(stage.resolve("authme.db"), "PRIVATE_CORRUPT_SNAPSHOT_SENTINEL")
+                val failed = assertFailsWith<java.util.concurrent.ExecutionException> { migration.confirm(replacement.token).get(5, TimeUnit.SECONDS) }
+                val safe = assertIs<AuthMeImportException>(failed.cause)
+                assertEquals(AuthMeImportFailure.SNAPSHOT_INVALID, safe.reason)
+                assertNull(safe.cause)
+                assertFalse(safe.toString().contains("PRIVATE_CORRUPT_SNAPSHOT_SENTINEL"))
+                assertTrue(migration.status().active)
+                assertEquals(safe.reason, migration.status().failure)
+                assertEquals(AuthMeVerification.VERIFIED, migration.verify(name, old, "password".toCharArray()) { true })
+            }
+        }
+    }
+
+    @Test
+    fun `disabling before any local activation reports that normal login requires no migration action`() {
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            AuthMeInboxMigration(root.resolve("migration"), ProfileClaimRepository(db), { null }, {}).use { migration ->
+                val failed = assertFailsWith<java.util.concurrent.ExecutionException> { migration.disable().get(5, TimeUnit.SECONDS) }
+                assertEquals(AuthMeImportFailure.NO_ACTIVE_SNAPSHOT, assertIs<AuthMeImportException>(failed.cause).reason)
+                assertFalse(migration.hasLocalState())
+                assertFalse(migration.available())
+            }
+        }
+    }
+
     private fun prepareInbox(migrationRoot: Path): Path {
         val inbox = migrationRoot.resolve("inbox")
         val authme = Files.createDirectories(inbox.resolve("AuthMe"))
