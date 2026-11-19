@@ -11,6 +11,10 @@ import moe.ryuu.kyokouauth.core.text.MessageCatalogue
 import moe.ryuu.kyokouauth.limbo.*
 import moe.ryuu.kyokouauth.limbo.protocol.TextComponent
 import moe.ryuu.kyokouauth.proxy.LoginGate
+import moe.ryuu.kyokouauth.proxy.PrivateClaimCommands
+import moe.ryuu.kyokouauth.proxy.ProfileClaimFlow
+import net.md_5.bungee.api.event.ChatEvent
+import net.md_5.bungee.api.event.TabCompleteEvent
 import moe.ryuu.kyokouauth.proxy.ProxyConfig
 import moe.ryuu.kyokouauth.proxy.ProxyLog
 import net.md_5.bungee.api.event.PreLoginEvent
@@ -34,6 +38,9 @@ class BungeeE2ePlugin : Plugin(), Listener {
     private val scenario = System.getProperty("kyokou.e2e.scenario", "held")
     private val stable = UUID(0L, 2535412345678901L)
     private val trusted = AtomicBoolean(false)
+    private val claimsScenario = scenario == "claim-authme"
+    private val historical = UUID.fromString("529a5f64-5822-330d-a962-8e02fa0e0716")
+    private var privateClaims: BungeeClaimCommands? = null
     private val javaWrites = AtomicInteger()
     private val io = Executors.newFixedThreadPool(2)
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
@@ -63,8 +70,13 @@ class BungeeE2ePlugin : Plugin(), Listener {
             val config = ProxyConfig(mapOf("post-login.server" to "backend",
                 "bedrock.enabled" to (bedrockScenario && scenario != "bedrock-disabled").toString(), "limbo.keep-alive-seconds" to "2",
                 "limbo.keep-alive-timeout-seconds" to "10", "limbo.join-timeout-seconds" to "5",
+                "migration.enabled" to claimsScenario.toString(),
                 "verification.poll-interval-seconds" to "1", "verification.blocked-commands" to
                     if (scenario == "commands") "server\n${BungeeE2eCommandProbe.PROBE}" else "server"), dataFolder)
+            if (claimsScenario) {
+                val languages = File(dataFolder, "messages").apply { mkdirs() }
+                File(languages, "en_US.yml").writeText("migration:\n  offer-title: CLAIM_OFFER\n  confirm-old-title: CLAIM_SOURCE\n  confirm-bind-title: CLAIM_BIND\n  claim-rejected: CLAIM_BAD_PROOF\nverification:\n  reconnect: CLAIM_RECONNECT\n")
+            }
             val messages = MessageCatalogue("en_US", File(dataFolder, "messages")).also { it.load() }
             val log = ProxyLog { severity, message, error ->
                 logger.log(if (severity == ProxyLog.Level.INFO) java.util.logging.Level.INFO else java.util.logging.Level.WARNING, message, error)
@@ -75,7 +87,9 @@ class BungeeE2ePlugin : Plugin(), Listener {
                 override fun allow(key: String) = true
                 override fun decide(name: GameName, address: String): AuthCoordinator.Decision {
                     javaOnly("decide")
-                    val identity = Identity.Microsoft(name, Xuid(stable.leastSignificantBits), "Controlled profile")
+                    if (claimsScenario && !trusted.get()) return AuthCoordinator.Decision.Verify(
+                        AuthCoordinator.provisionalUuid(name), AuthCoordinator.Reason.FIRST_BIND, true, null)
+                    val identity = Identity.Microsoft(name, Xuid(stable.leastSignificantBits), "Controlled profile", if (claimsScenario) historical else stable)
                     val record = BoundIdentity.of(identity, 1L)
                     if (scenario == "trusted" || trusted.get()) return AuthCoordinator.Decision.Admit(identity, record)
                     return AuthCoordinator.Decision.Verify(if (scenario == "first-bind") AuthCoordinator.provisionalUuid(name) else stable,
@@ -103,14 +117,29 @@ class BungeeE2ePlugin : Plugin(), Listener {
                         "https://microsoft.com/link?otc=E2E-CODE", 300, 1, "test-only-no-network")
                 }
                 override fun poll(challenge: DeviceCodeFlow.Challenge): DeviceCodeFlow.PollResult =
-                    if (scenario in setOf("stable", "first-bind") ||
+                    if (scenario in setOf("stable", "first-bind", "claim-authme") ||
                         (scenario == "commands" && commandProbe?.mayAuthorize() == true)) DeviceCodeFlow.PollResult.Authorized("synthetic", null, 300)
                     else DeviceCodeFlow.PollResult.Pending
-                override fun exchange(accessToken: String) = XboxLive.XstsToken("synthetic", stable.leastSignificantBits, "Controlled profile", "synthetic")
+                override fun exchange(accessToken: String) = XboxLive.XstsToken("synthetic", stable.leastSignificantBits,
+                    if (claimsScenario) "SyntheticMappedXbox" else "Controlled profile", "synthetic")
+                override fun authMeClaimsAvailable() = claimsScenario
+                override fun permitsMappedProfile(record: BoundIdentity) = claimsScenario && record.uuid == historical || super.permitsMappedProfile(record)
+                override fun proveAuthMeProfile(legacyName: GameName, password: CharArray, session: UUID, name: GameName,
+                                                current: () -> Boolean): ProfileClaimFlow.PreparedClaim? = try {
+                    check(claimsScenario && current() && legacyName.value == "OldSteve")
+                    if (!password.contentEquals("PassWord1".toCharArray())) null else ProfileClaimFlow.PreparedClaim(
+                        ProfileClaimFlow.ClaimToken(session.toString()), historical, legacyName, historical, System.currentTimeMillis() + 30_000L)
+                } finally { password.fill('\u0000') }
+                override fun commitLegacyProfile(token: ProfileClaimFlow.ClaimToken, session: UUID, name: GameName, xuid: Xuid,
+                                                 gamertag: String, current: () -> Boolean): BoundIdentity {
+                    check(claimsScenario && current() && token.value == session.toString() && trusted.compareAndSet(false, true))
+                    return BoundIdentity.of(Identity.Microsoft(name, xuid, gamertag, historical), 1L)
+                }
             }
             gate = LoginGate(platform, config, messages, services, log)
+            privateClaims = BungeeClaimCommands(javaClass.classLoader, gate::onPrivateClaim)
             adapter = BungeeLoginGate(this, platform, profiles, BungeeTickets(platform, profiles, authority), gate,
-                log, services::submit, services::schedule, { accepting }, bedrock = { player ->
+                log, services::submit, services::schedule, { accepting }, privateClaims = privateClaims, bedrock = { player ->
                     floodgate.probe(player).also { result ->
                         if (bedrockScenario) {
                             logger.info("BUNGEE_E2E_BEDROCK_SAMPLE result=${result.javaClass.simpleName}")
@@ -159,6 +188,9 @@ class BungeeE2ePlugin : Plugin(), Listener {
                         frontend.disconnect(unavailable().toBungee())
                     }, 1, TimeUnit.SECONDS)
                 }
+                override fun onRoleSelect(player: LimboPlayer, generation: UUID, optionId: String) {
+                    synchronized(handles) { handles[player] }?.let { gate.onRoleSelect(it, generation, optionId) }
+                }
                 override fun onLeave(player: LimboPlayer) {
                     synchronized(handles) { handles.remove(player) }?.let(gate::onLeave)
                     logger.info("BUNGEE_E2E_LEFT ${player.name}")
@@ -202,10 +234,20 @@ class BungeeE2ePlugin : Plugin(), Listener {
     fun refuse(event: PreLoginEvent) { if (!accepting) { event.isCancelled = true; event.reason = unavailable().toBungee() } }
     @EventHandler(priority = EventPriority.HIGHEST)
     fun refuse(event: ServerConnectEvent) { if (!accepting) { event.isCancelled = true; event.player.disconnect(unavailable().toBungee()) } }
+    @EventHandler(priority = EventPriority.LOWEST)
+    fun observePrivateCommand(event: ChatEvent) {
+        if (claimsScenario && PrivateClaimCommands.isSensitive(event.message)) logger.severe("BUNGEE_E2E_PRIVATE_LEAK_CHAT")
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    fun observePrivateCompletion(event: TabCompleteEvent) {
+        if (claimsScenario && PrivateClaimCommands.isSensitive(event.cursor)) logger.severe("BUNGEE_E2E_PRIVATE_LEAK_TAB")
+    }
     override fun onDisable() {
         accepting = false
         commandProbe?.close(); commandProbe = null
         if (::adapter.isInitialized) adapter.close()
+        privateClaims?.close(); privateClaims = null
         floodgate?.close(); floodgate = null
         bedrockProbe?.close(); bedrockProbe = null
         commandGuard?.close(); commandGuard = null

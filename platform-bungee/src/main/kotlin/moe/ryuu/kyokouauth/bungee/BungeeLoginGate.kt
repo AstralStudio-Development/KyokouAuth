@@ -54,6 +54,7 @@ internal class BungeeLoginGate(
     private val watchClosed: (BungeePlayer, () -> Unit) -> AutoCloseable =
         BungeeFloodgateChannels(BungeeLoginGate::class.java.classLoader)::watchClosed,
     private val prepareRole: ((BungeePlayer, GameProfile) -> Unit)? = null,
+    private val privateClaims: BungeeClaimCommands? = null,
 ) : Listener {
     private data class Work(val player: BungeePlayer, val cancel: () -> Unit)
     private val intents = ConcurrentHashMap<BungeeIntent, Work>()
@@ -81,6 +82,18 @@ internal class BungeeLoginGate(
             event.reason = unavailable().toBungee()
             abandon(player)
             logger.warn("Bungee native proof read failed", failure)
+            return
+        }
+        // A later runtime snapshot activation cannot expose inputs on a previously unguarded frontend.
+        try {
+            privateClaims?.let {
+                it.install(player)
+                gate.onPrivateClaimIngressReady(player.sessionId)
+            }
+        } catch (_: Exception) {
+            event.isCancelled = true
+            event.reason = unavailable().toBungee()
+            abandon(player)
             return
         }
         event.registerIntent(plugin)

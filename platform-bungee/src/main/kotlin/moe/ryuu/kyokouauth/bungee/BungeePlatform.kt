@@ -209,6 +209,7 @@ internal class BungeePlatform(val proxy: NativeProxy) : ProxyServer {
         override val attemptConnectionOrder: List<String> get() = proxy.config.listeners.flatMap { it.serverPriority }.distinct()
     }
     fun source(sender: CommandSender): CommandSource = (sender as? ProxiedPlayer)?.let(::find) ?: object : CommandSource {
+        override val isConsole get() = sender === proxy.console
         override fun hasPermission(permission: String) = sender.hasPermission(permission)
         override fun sendMessage(message: RichText.Parsed) { sender.sendMessage(message.toBungee()) }
     }

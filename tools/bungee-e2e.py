@@ -498,10 +498,31 @@ def vanilla(args, run, backend, reconnect=False):
                 process.kill(); process.wait(timeout=5)
 
 
+def profile_claim(args, run, backend):
+    """Use the fixed SDK, synthetic proof only, and observe the real Bungee backend handshake."""
+    upstream = (ROOT / 'limbo/protocols/777/build/generated/limbo-codec/tool-classpath.txt').read_text(encoding='utf-8').strip()
+    classes = run / 'claim-client-classes'
+    classes.mkdir(exist_ok=True)
+    subprocess.run([str(args.jdk / 'bin/javac.exe'), '-encoding', 'UTF-8', '-cp', upstream,
+                    '-d', str(classes), str(ROOT / 'tools/ProfileMappingClient.java')], check=True, timeout=45)
+    name = 'NewSteve'
+    provisional = uuid.UUID(bytes=hashlib.md5(('OfflinePlayer:' + name).encode()).digest(), version=3)
+    command = [str(args.jdk / 'bin/java.exe'), '-Xmx128M', '-XX:ActiveProcessorCount=2', '-cp',
+               os.pathsep.join([str(classes), upstream]), 'ProfileMappingClient', str(args.port), name, str(provisional), 'authme']
+    subprocess.run(command, cwd=run, check=True, timeout=args.timeout)
+    if backend.events:
+        raise RuntimeError('Unverified claimant reached the real backend')
+    probe(args.port, name)
+    text = (run / 'console.log').read_text(encoding='utf-8', errors='replace')
+    if any(marker in text for marker in ('BUNGEE_E2E_PRIVATE_LEAK_', 'PRIVATE_BAD_E2E_PASSWORD', 'PassWord1')):
+        raise RuntimeError('Private proof leaked to ordinary events or logs')
+    return 'Bungee private claim and ordinary reconnect'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["prepare", "startup", "network"])
-    parser.add_argument("--scenario", default="production", choices=["production", "unavailable", "held", "trusted", "first-bind", "stable", "server", "commands", "tcp-refused", "login-kick", "join-timeout"])
+    parser.add_argument("--scenario", default="production", choices=["production", "unavailable", "held", "trusted", "first-bind", "stable", "server", "commands", "tcp-refused", "login-kick", "join-timeout", "claim-authme"])
     parser.add_argument("--port", type=int, default=25679)
     parser.add_argument("--jdk", type=Path, default=Path("C:/Program Files/Zulu/zulu-25"))
     parser.add_argument("--minecraft", type=Path, default=Path(os.environ.get("APPDATA", ".")) / ".minecraft")
@@ -533,6 +554,8 @@ def main():
                     if probe(args.port) != "rejected":
                         raise RuntimeError("Failed startup did not reject LOGIN")
                 result = "production startup/shutdown" if args.scenario != "unavailable" else "ip_forward failure remains closed"
+            elif args.scenario == 'claim-authme':
+                result = profile_claim(args, run, backend)
             elif args.client:
                 if args.observer:
                     subprocess.run([sys.executable, str(ROOT / "tools/limbo-e2e.py"), "--version", args.version,
@@ -558,14 +581,15 @@ def main():
                     parser.error("this scenario requires --client; synthetic packets cannot prove Limbo READY")
                 probe(args.port, timeout=14)
                 result = "synthetic native event/forwarding " + args.scenario
-            if args.scenario in ("trusted", "stable", "first-bind", "commands"):
+            if args.scenario in ("trusted", "stable", "first-bind", "commands", "claim-authme"):
                 deadline = time.monotonic() + 8
                 while not backend.events and time.monotonic() < deadline:
                     time.sleep(0.1)
                 if not backend.events or "error" in backend.events[0]:
                     raise RuntimeError("No real backend legacy-forwarding handshake was captured")
                 for event in backend.events:
-                    if uuid.UUID(event["forwarded_uuid"]) != STABLE or uuid.UUID(event["login_uuid"]) != STABLE:
+                    expected = uuid.UUID('529a5f64-5822-330d-a962-8e02fa0e0716') if args.scenario == 'claim-authme' else STABLE
+                    if uuid.UUID(event["forwarded_uuid"]) != expected or uuid.UUID(event["login_uuid"]) != expected:
                         raise RuntimeError("Stable backend identity differs from core-approved identity")
                     if "kyokouauth:private-ticket" in (event["property_names"] or []):
                         raise RuntimeError("Private ticket leaked to a real backend")
@@ -587,7 +611,7 @@ def main():
                     "connected_after_ready_seconds": 12, "complete_test_url_received": True,
                     "title_count": 1, "backend_handshakes": 0}, indent=2), encoding="utf-8")
             detail = ("real Paper UUID confirmed via native console; properties not inspected" if args.paper else
-                      "forwarded UUID and private-ticket removal confirmed" if args.scenario in ("trusted", "stable", "first-bind", "commands") else
+                      "forwarded UUID and private-ticket removal confirmed" if args.scenario in ("trusted", "stable", "first-bind", "commands", "claim-authme") else
                       "recording backend received zero frontend handshakes")
             print("PASS " + result + "; " + detail)
     finally:

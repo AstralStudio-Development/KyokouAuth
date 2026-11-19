@@ -54,7 +54,7 @@ class AuthService(private val config: ProxyConfig, private val logger: ProxyLog,
             identities = CachedIdentityRepository(IdentityRepository(storage))
             profileClaims = moe.ryuu.kyokouauth.core.storage.ProfileClaimRepository(storage,
                 onProfileChanged = identities::invalidate)
-            check(!config.profileClaimsEnabled || supportsProfileClaims) { "Profile claims require the supported Velocity Java adapter" }
+            check(!config.profileClaimsEnabled || supportsProfileClaims) { "Profile claims require a supported Java proxy adapter" }
             if (supportsProfileClaims) authMeInbox = AuthMeInboxMigration(config.migrationFolder, profileClaims,
                 drivers::classLoader, config::snapshotClaimsEnabled)
             config.authMeClaims?.let { claims ->

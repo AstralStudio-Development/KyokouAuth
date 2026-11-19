@@ -40,7 +40,7 @@ role-selection:
   hint-ttl-seconds: 30
 
 migration:
-  # 仅限 Velocity 的旧 AuthMe 离线档案 -> Java 微软角色（U）；不支持 J、Floodgate 或 BungeeCord。
+  # Velocity / BungeeCord：旧 AuthMe 离线档案 -> Java 微软角色（U）；不支持 J 或 Floodgate。
   # 正常迁移无需修改本段：复制 AuthMe/config.yml、SQLite文件(如适用)、playerdata 到 migration/inbox/，控制台 scan -> issues -> confirm。
   # scan 在独立后台线程只读旧库一次并生成本地临时快照；progress/cancel 可查看/取消。确认后认领和重启都不再连接旧库。
   # confirm 表示管理员已确认旧服停写且账号库/玩家档案同源；不会自动停服或锁库。

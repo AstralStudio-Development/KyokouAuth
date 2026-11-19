@@ -35,6 +35,7 @@ class KyokouAuthBungee : Plugin(), Listener {
     private var adapter: BungeeLoginGate? = null
     private var floodgate: BungeeFloodgate? = null
     private var commandGuard: BungeeCommandGuard? = null
+    private var privateClaims: BungeeClaimCommands? = null
     private var authority: PrivateTicketAuthority? = null
     private var limbo: LimboServer? = null
     private var sweep: ScheduledTask? = null
@@ -70,13 +71,15 @@ class KyokouAuthBungee : Plugin(), Listener {
                 proxy.pluginManager.getPlugin("SkinsRestorer") ?: proxy.pluginManager.getPlugin("skinsrestorer")
             }.also { roleSkinSource = it } else null
             val skins = RoleSkinService { skinSource?.provider() }.also { roleSkins = it }
-            val auth = AuthService(config, log, skins).also { this.auth = it }
+            val auth = AuthService(config, log, skins, supportsProfileClaims = true).also { this.auth = it }
             val gate = LoginGate(platform, config, messages, auth, log).also { this.gate = it }
+            val privateClaims = BungeeClaimCommands(javaClass.classLoader, gate::onPrivateClaim).also { this.privateClaims = it }
             val adapter = BungeeLoginGate(this, platform, profiles, BungeeTickets(platform, profiles, authority), gate, log,
                 submit = auth::execute, schedule = auth::schedule, accepting = { accepting },
                 intentTimeoutMillis = (config.sessionHandshakeTimeoutSeconds + 5L) * 1000L,
                 bedrock = floodgate::probe,
                 rolesEnabled = config.rolesEnabled,
+                privateClaims = privateClaims,
                 prepareRole = roleBridge?.let { bridge -> { player: BungeePlayer, profile: GameProfile ->
                     val proof = player.currentBedrockProof()
                     bridge.prepare(player.pending, profile.id, profile.name, proof)
@@ -137,6 +140,7 @@ class KyokouAuthBungee : Plugin(), Listener {
         }
         release("connection watcher") { sweep?.cancel() }; sweep = null
         release("Bungee admission") { adapter?.close() }; adapter = null
+        release("private claim boundary") { privateClaims?.close() }; privateClaims = null
         release("role skin provider generation") { roleSkinSource?.close() }; roleSkinSource = null
         release("Floodgate proof source") { floodgate?.close() }; floodgate = null
         release("native command boundary") { commandGuard?.close() }; commandGuard = null
