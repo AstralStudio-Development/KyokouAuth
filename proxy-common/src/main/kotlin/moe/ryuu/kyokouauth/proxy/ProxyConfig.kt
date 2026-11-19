@@ -192,8 +192,16 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
         fun load(dataFolder: File): ProxyConfig {
             check(dataFolder.isDirectory || dataFolder.mkdirs()) { "Cannot create the authentication data directory" }
             val file = File(dataFolder, "config.yml")
-            val defaults = ProxyConfig::class.java.classLoader.getResourceAsStream("config.yml")?.use { it.readBytes() }
-                ?: error("Missing bundled authentication configuration")
+            val locale = Locale.getDefault()
+            val simplifiedChinese = locale.language == "zh" && when (locale.script) {
+                "Hans" -> true
+                "" -> locale.country !in setOf("TW", "HK", "MO")
+                else -> false
+            }
+            // Locale affects only the first file's comments, never an existing file or the default values.
+            val template = if (!file.exists() && simplifiedChinese) "config.zh_CN.yml" else "config.yml"
+            val defaults = ProxyConfig::class.java.classLoader.getResourceAsStream(template)?.use { it.readBytes() }
+                ?: error("Missing bundled authentication configuration: $template")
             YamlDefaults.sync(file.toPath(), defaults, mapOf(
                 // Backfilling these canonical keys with the template default would override a legacy setting.
                 "limbo.biome" to "limbo.biome-id",

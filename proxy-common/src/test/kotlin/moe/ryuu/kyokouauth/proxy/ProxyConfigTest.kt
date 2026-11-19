@@ -1,8 +1,12 @@
 package moe.ryuu.kyokouauth.proxy
 
+import moe.ryuu.kyokouauth.core.config.YamlDocument
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.parallel.ResourceLock
+import org.junit.jupiter.api.parallel.Resources
 import java.io.File
 import java.nio.file.Files
+import java.util.Locale
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
@@ -32,6 +36,38 @@ class ProxyConfigTest {
         assertEquals(true, config.autoRenameMicrosoft)
         assertEquals(30L, config.sessionFailureBackoffSeconds)
         assertEquals(120L, config.sessionFailureMaxBackoffSeconds)
+    }
+
+    @Test
+    @ResourceLock(Resources.LOCALE)
+    fun `first launch localizes comments without changing any configuration values`() {
+        val previous = Locale.getDefault()
+        val display = Locale.getDefault(Locale.Category.DISPLAY)
+        val format = Locale.getDefault(Locale.Category.FORMAT)
+        try {
+            fun generate(tag: String): File {
+                Locale.setDefault(Locale.forLanguageTag(tag))
+                val folder = tempDir()
+                ProxyConfig.load(folder)
+                return File(folder, "config.yml")
+            }
+            val chinese = generate("zh-CN")
+            val english = generate("en-US")
+            assertTrue(chinese.readText().contains("配置在代理启动时读取"))
+            assertTrue(english.readText().contains("Settings are loaded at startup"))
+            assertEquals(YamlDocument.load(english), YamlDocument.load(chinese))
+            for (tag in listOf("fr-FR", "zh-Hant-TW")) assertEquals(english.readText(), generate(tag).readText())
+
+            val customized = chinese.readText().replace("# 配置在代理启动时读取", "# 保留现有注释，配置在代理启动时读取")
+                .replace("hours: 12", "hours: 4")
+            chinese.writeText(customized)
+            assertEquals(4L, ProxyConfig.load(chinese.parentFile).sessionHours)
+            assertEquals(customized, chinese.readText())
+        } finally {
+            Locale.setDefault(previous)
+            Locale.setDefault(Locale.Category.DISPLAY, display)
+            Locale.setDefault(Locale.Category.FORMAT, format)
+        }
     }
 
     @Test

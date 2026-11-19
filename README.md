@@ -139,7 +139,7 @@ limbo:
 
 ## 常用配置
 
-完整选项见[默认配置模板](proxy-common/src/main/resources/config.yml)。下面是开服后最常调整的几项：
+首次生成时，简体中文 JVM 环境使用[简体中文注释](proxy-common/src/main/resources/config.zh_CN.yml)，其他语言使用[英文注释](proxy-common/src/main/resources/config.yml)。两份模板的配置键和默认值相同；`messages.locale` 只控制玩家提示的默认语言。下面是开服后最常调整的几项：
 
 | 想调整什么 | 配置项 | 默认行为 |
 |---|---|---|

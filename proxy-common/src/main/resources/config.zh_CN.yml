@@ -1,0 +1,163 @@
+# KyokouAuth：Velocity / BungeeCord 代理配置
+#
+# 配置在代理启动时读取。插件升级会补齐缺失项，不覆盖已有设置。
+# /kyokouauth reload 只重载消息；修改本文件后需重启代理。
+
+database:
+  # 支持 sqlite、h2、mysql、mariadb、postgresql。
+  type: "sqlite"
+  # SQLite 填插件数据目录内的文件名；其他类型填数据库名。
+  database: "kyokouauth"
+  host: "127.0.0.1"
+  # 0 表示使用所选数据库类型的默认端口。
+  port: 0
+  username: ""
+  password: ""
+  pool-size: 4
+  # 缺少 JDBC 驱动时，从此仓库下载并缓存到插件数据目录的 libraries/。
+  driver-repository: "https://repo1.maven.org/maven2"
+  auto-download-driver: true
+
+session:
+  # 微软角色验证后可免验的小时数；0 表示每次登录都验证。
+  hours: 12
+  # 是否仅允许同一 IP 复用免验会话。若多个玩家共用出口地址，此选项无法区分他们。
+  bind-address: true
+
+bedrock:
+  # 接受由同一代理上的 Floodgate 2.2.5 验证的登录；Geyser 应使用 auth-type: floodgate。
+  # 不开启双角色选择时，只允许未关联账号的玩家使用 Floodgate 前缀进入。
+  enabled: false
+
+role-selection:
+  # 使用官方 Global 关联的基岩玩家，可选择本服微软角色或关联的 Java 正版角色。
+  # 两个角色的名字、UUID、皮肤和存档相互独立；基岩接入也需开启。
+  enabled: false
+  # 选角超时秒数（5～600）；关闭菜单不算选择。
+  timeout-seconds: 60
+  # 需要切换 UUID 或名字时，允许手动重连一次的秒数（5～120）。
+  hint-ttl-seconds: 30
+
+migration:
+  # Velocity 和 BungeeCord 支持把旧 AuthMe 档案认领到 Java 微软角色，不支持正版或基岩角色。
+  # 常规迁移：将 AuthMe/config.yml、SQLite 快照（如适用）及 playerdata 放入 migration/inbox/。
+  # 在控制台执行 ka migration scan，检查 issues 后再 confirm。确认后认领和重启仅读取本地快照。
+  # 确认前须停止旧服写入，并保证账号与玩家档案来自同一备份。插件不会替你停服。
+  # ka migration disable 持久停止新认领，不撤销已认领档案。
+  # 以下静态设置仅用于人工或直接来源模式；false 不会停用已确认的收件快照。
+  enabled: false
+  authme:
+    # 直接来源模式的自助入口：在 Limbo 内使用 /ka claim authme <旧名字> <旧密码>。
+    # 需要开启 migration.enabled，玩家仍须完成双重确认和新的微软验证。
+    enabled: false
+    # 仅在旧来源已停写或已有一致快照时设为 true；此设置不会替你冻结数据源。
+    source-frozen: false
+    # 指定旧 AuthMe 配置时默认批次为 authme；手工配置来源时必须填写批次名。
+    batch: ""
+    # 直接来源模式读取 server-folder 下的 plugins/AuthMe/config.yml，也可显式指定 config-file。
+    # 收件扫描始终使用 migration/inbox/AuthMe/config.yml；相对路径以本插件数据目录为准。
+    config-file: ""
+    server-folder: ""
+    # 支持 sqlite、mysql、mariadb。以下为未提供旧 AuthMe 配置时的手工来源设置。
+    type: "sqlite"
+    # 必须是已有的一致性快照，允许绝对路径。
+    # 拒绝符号链接，以及旁边含 -wal、-shm 或 -journal 文件的数据库。
+    sqlite-file: "migration/authme.db"
+    # MySQL/MariaDB 需填写 JDBC URL 并使用仅有 SELECT 权限的账号。数据库 TLS 不会加密游戏连接。
+    # MySQL 示例：jdbc:mysql://auth-db.example.org:3306/authme?sslMode=VERIFY_IDENTITY
+    # MariaDB 示例：jdbc:mariadb://auth-db.example.org:3306/authme?sslMode=verify-full
+    # connectTimeout 和 socketTimeout 默认 5000 毫秒；手动设置时允许 1～10000 毫秒。
+    # 不要把凭据放进 URL。allowMultiQueries 和 autoReconnect 只能设置为 false。
+    jdbc-url: ""
+    # 仅供直接来源模式使用的数据库凭据，不是玩家旧密码。
+    # 收件扫描从复制来的 AuthMe 配置中读取凭据。不要把真实凭据提交到仓库。
+    username: ""
+    password: ""
+    # 仅用于手工配置来源；表名与列名只接受字母、数字和下划线。
+    table: "authme"
+    name-column: "username"
+    password-column: "password"
+    totp-column: "totp"
+    password-charset: "UTF-8"
+    # 自助认领仅支持带盐的 $SHA$ 格式；使用 TOTP 或其他哈希格式的账号不能走旧密码自助认领。
+    hash: "SHA256"
+    # 私密命令不会进入普通聊天或命令补全，但不会加密离线连接，也不防客户端历史、截图或更早的封包记录。
+
+verification:
+  # 同一个微软账号完成验证后，可改用空闲的非正版名；UUID 不变，原名字释放。
+  auto-rename: true
+  # 微软设备码验证超时（秒）；超时后玩家需要重新连接。
+  timeout-seconds: 300
+  # 查询微软验证结果的最短间隔（秒）；微软要求更长时按其要求等待。
+  poll-interval-seconds: 5
+  # 验证或选角完成前隐藏并拦截的命令。不要写斜杠或参数，独立别名需另外填写。
+  # [] 清空拦截列表，["*"] 拦截全部命令。未验证的玩家始终不能切换子服。
+  blocked-commands:
+    - server
+
+safety:
+  # 单个 IP 每分钟最多尝试连接次数；0 表示不设此限制。
+  connections-per-minute: 10
+  # 待验证连接数和认证任务队列达到上限时，会拒绝新的请求。
+  pending-login-limit: 4096
+  io-workers: 4
+  io-queue-capacity: 256
+
+premium:
+  # 指定时间窗口内允许的未缓存 Mojang 名字查询次数；0 表示关闭本地配额。
+  directory-limit: 600
+  directory-limit-window-minutes: 10
+  # 仅控制正版名字查询：inherit 使用 JVM 代理设置，direct 绕过 JVM HTTP 代理。
+  # 不影响 Mojang 会话握手或微软登录。
+  directory-network: "inherit"
+  # 整台代理每分钟最多启动的 Mojang 会话握手次数。
+  session-handshakes-per-minute: 60
+  # 同一 IP、同一名字的会话握手重试间隔（秒）。
+  session-retry-seconds: 5
+  # 握手未完成或失败后进入冷却；重复失败会延长冷却，直至达到上限。
+  session-failure-backoff-seconds: 30
+  session-failure-max-backoff-seconds: 120
+  session-timeout-seconds: 30
+
+post-login:
+  # 从 Limbo 验证成功后前往的子服名称；留空走代理默认顺序。
+  server: ""
+
+messages:
+  # 找不到匹配客户端语言的文件时使用的默认消息语言。
+  locale: "zh_CN"
+
+limbo:
+  motd: "KyokouAuth"
+  # 玩家每次进入隔离验证空间时的坐标和视角。
+  spawn:
+    x: 0.5
+    y: 64.0
+    z: 0.5
+    yaw: 0.0
+    pitch: 0.0
+  view-distance: 2
+  # 按客户端协议解析的群系资源名；旧配置里的 biome-id 仍可读取。
+  biome: "minecraft:plains"
+  # 可选 WorldEdit 地图：把 Sponge v2/v3 的 .schem 放在插件数据目录，留空则不加载地图。
+  # x、y、z 为地图最小角；玩家出生点在 spawn 中单独配置。
+  map:
+    file: ""
+    x: 0
+    y: 63
+    z: 0
+    # false：缺少该版本支持的方块时拒绝加载；true：以空气替代。
+    unknown-blocks-as-air: false
+  keep-alive-seconds: 10
+  keep-alive-timeout-seconds: 30
+  # 允许客户端加载验证大厅的最长时间（秒）。
+  join-timeout-seconds: 30
+  # 可选的静态侧栏，只在 Limbo 显示，不支持占位符或动态刷新。
+  # 支持 <#RRGGBB> 等颜色和格式。请给文本加引号。
+  # 最多 15 行，按从上到下显示；标题和每行最多 512 字符。
+  sidebar:
+    enabled: false
+    title: "<#55DDF7>KyokouAuth</#55DDF7>"
+    lines:
+      - "<gray>Microsoft sign-in</gray>"
+      - "Follow the instructions in chat."

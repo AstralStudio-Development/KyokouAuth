@@ -40,54 +40,50 @@ role-selection:
   hint-ttl-seconds: 30
 
 migration:
-  # Velocity / BungeeCord：旧 AuthMe 离线档案 -> Java 微软角色（U）；不支持 J 或 Floodgate。
-  # 正常迁移无需修改本段：复制 AuthMe/config.yml、SQLite文件(如适用)、playerdata 到 migration/inbox/，控制台 scan -> issues -> confirm。
-  # scan 在独立后台线程只读旧库一次并生成本地临时快照；progress/cancel 可查看/取消。确认后认领和重启都不再连接旧库。
-  # confirm 表示管理员已确认旧服停写且账号库/玩家档案同源；不会自动停服或锁库。
-  # 快照启停是控制台持久状态：ka migration disable 停止新认领，不撤销既有身份；本段 false 不覆盖已确认快照。
-  # 以下静态选项仅保留给显式人工/直接来源入口，不供正常 inbox 扫描使用；直接来源模式验密仍访问其配置的来源。
-  # 无论哪种入口，都不猜历史UUID、不把候选当身份凭证，且新连接必须成功安装固定 Velocity 4.3.1 私密前置管线。
+  # Velocity / BungeeCord: claim a legacy AuthMe profile as a Java Microsoft role (U), not a premium or Bedrock role.
+  # For normal migration, copy AuthMe/config.yml, the SQLite snapshot if applicable, and playerdata into migration/inbox/.
+  # Run ka migration scan, review issues, then confirm. After confirmation, claims and restarts use only the local snapshot.
+  # Confirm only after all writes have stopped and the account and player files come from the same backup. It does not stop the old server.
+  # ka migration disable persists across restarts and stops new claims without undoing existing profile ownership.
+  # The static settings below are only for explicit manual or direct-source operation; false does not override an active inbox snapshot.
   enabled: false
   authme:
-    # 可选自助旧密码证明：当前私有 Limbo 内 /ka claim authme <旧名字> <旧密码>。
-    # 必须同时开启 migration.enabled；后续仍需双重确认、全新微软设备码证明和一次普通重连。
+    # Optional direct-source proof: /ka claim authme <old name> <old password> inside Limbo.
+    # Requires migration.enabled; the player still completes both confirmations and a fresh Microsoft verification.
     enabled: false
-    # 仅在已完成源服停写/切换并准备一致性快照或冻结的只读来源后显式设 true；此开关不会替你冻结源库。
+    # Set true only when the source is frozen or you have a consistent offline snapshot. This setting will not freeze it for you.
     source-frozen: false
-    # 自动模式留空时默认 authme；手动来源模式必填且非空。登记与玩家认领只使用这一批次。
+    # Defaults to authme when a source config is provided. Manual configuration needs a non-empty batch name.
     batch: ""
-    # 旧显式直接来源的配置识别：读取 server-folder 下 plugins/AuthMe/config.yml，或指定 config-file。
-    # 正常命令扫描始终使用 migration/inbox/AuthMe/config.yml，不读取这里的目录设置。
-    # 相对路径从本插件目录解析；路径可含空格，不要在路径值内额外嵌入引号。
+    # Direct-source mode: read plugins/AuthMe/config.yml under server-folder, or supply config-file explicitly.
+    # Inbox scanning always uses migration/inbox/AuthMe/config.yml. Relative paths are based on this plugin's data directory.
     config-file: ""
     server-folder: ""
-    # sqlite | mysql | mariadb；未填写 config-file 时才使用下面的手动兼容配置，与 KyokouAuth 身份数据库独立。
+    # sqlite | mysql | mariadb. These manual source settings apply only when no AuthMe config is supplied.
     type: "sqlite"
-    # 相对 plugins/kyokouauth/，也可用绝对路径。必须是已存在的一致性快照，不得指向正写入的 SQLite。
-    # 不接受符号链接或旁边仍有 -wal / -shm / -journal 的文件；不会创建缺失的源数据库。
+    # Use an existing, consistent SQLite snapshot. Absolute paths are also accepted.
+    # Symlinks and databases with -wal, -shm or -journal sidecars are rejected.
     sqlite-file: "migration/authme.db"
-    # mysql/mariadb 必填 JDBC URL，使用只读 SELECT 账号。数据库 TLS 不等于 Minecraft 连接加密。
-    # MySQL 示例：jdbc:mysql://auth-db.example.org:3306/authme?sslMode=VERIFY_IDENTITY
-    # MariaDB 示例：jdbc:mariadb://auth-db.example.org:3306/authme?sslMode=verify-full
-    # 可在 URL 中设置 connectTimeout/socketTimeout；省略时模块默认 5000ms，允许 1..10000，禁止 0。
-    # URL 不放账号密码；不支持任意驱动参数，allowMultiQueries/autoReconnect 仅允许 false。
+    # MySQL/MariaDB require a JDBC URL and a SELECT-only account. Database TLS does not encrypt Minecraft traffic.
+    # MySQL example: jdbc:mysql://auth-db.example.org:3306/authme?sslMode=VERIFY_IDENTITY
+    # MariaDB example: jdbc:mariadb://auth-db.example.org:3306/authme?sslMode=verify-full
+    # connectTimeout and socketTimeout default to 5000 ms and must be between 1 and 10000 when set.
+    # Do not put credentials in the URL. allowMultiQueries and autoReconnect can only be set to false.
     jdbc-url: ""
-    # 仅供旧显式直接来源的数据库凭据，不是玩家旧密码；该高级模式要求 SELECT-only 覆盖账号。
-    # 正常 inbox 模式直接读取复制来的 AuthMe 配置中的账号密码，不需要在此重复输入；不要提交真实凭据。
+    # Database credentials for explicit direct-source mode, not a player's old password.
+    # Inbox scanning reads credentials from the copied AuthMe config. Do not commit real credentials.
     username: ""
     password: ""
-    # 以下表/列仅供未指定旧配置的手动来源模式；标识符仅允许字母/数字/下划线。始终不修改源库或世界。
+    # Only for manual source configuration. Use letters, digits and underscores for table and column names.
     table: "authme"
     name-column: "username"
     password-column: "password"
     totp-column: "totp"
     password-charset: "UTF-8"
-    # 仅支持 AuthMe 官方默认 $SHA$ 格式：16 位小写十六进制盐 + 64 位小写十六进制摘要。
-    # TOTP 非空或未知哈希均拒绝，需管理员独立核验；不存在 HTTP 认领监听、网页或证书配置。
+    # Only the standard salted $SHA$ format is supported. Accounts using TOTP or other hashes cannot use password self-service.
     hash: "SHA256"
-    # 固定保护：账号 5 次/10min、来源地址 20 次/10min、每连接最多 1 个进行中、源 SQL 读取并发 4。
-    # 私密命令不走常规命令/补全事件；签名/LastSeen 敏感格式保守断开，不剥离或改写签名。
-    # 本功能不为 offline Minecraft 连接增加传输加密，也不防客户端历史/截图或更早的原始包记录器。
+    # Private commands are kept out of normal chat and command completion. This does not encrypt offline-mode traffic
+    # or hide passwords from client-side history, screenshots, or earlier packet loggers.
 
 verification:
   # Move a player's Microsoft binding to a new free non-premium name after signing in with the same
