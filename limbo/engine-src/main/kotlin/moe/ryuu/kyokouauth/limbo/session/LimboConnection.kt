@@ -109,7 +109,7 @@ internal class LimboConnection(
             }
             Phase.STATUS -> when (packet) {
                 is ServerboundStatusRequestPacket -> session.send(ClientboundStatusResponsePacket(ServerStatusInfo(
-                    Component.text(settings.motd), PlayerInfo(settings.maxPlayers, onlineCount(), emptyList()),
+                    settings.motdComponent?.toLibrary() ?: Component.text(settings.motd), PlayerInfo(settings.maxPlayers, onlineCount(), emptyList()),
                     VersionInfo(GeneratedCodec.VERSION, protocolVersion), null, false)))
                 is LimboPingRequest -> session.send(LimboPongResponse(packet.pingTime)) { close() }
                 else -> error("Unexpected status packet")
@@ -190,6 +190,7 @@ internal class LimboConnection(
     private fun ready() {
         if (lifecycle.loaded()) {
             joinTimeout?.cancel(false)
+            settings.sidebar?.let { SidebarPackets.show(session, it) }
             announced = true
             logger.log("Limbo ready for $name ($connectionId), protocol $protocolVersion", null)
             listener.onJoin(this)
@@ -377,6 +378,11 @@ internal class LimboConnection(
         finish()
     }
     private fun finish() {
+        // A live Limbo-initiated close can still remove the objective. A proxy switch instead
+        // replaces the client's play listener through Configuration, discarding its scoreboard.
+        if (lifecycle.phase == Phase.READY && settings.sidebar != null && session.isConnected) {
+            runCatching { SidebarPackets.remove(session) }
+        }
         invalidateRoleSelector(false)
         selectorGenerations.clear()
         lifecycle.close()

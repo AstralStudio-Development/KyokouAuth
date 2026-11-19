@@ -237,6 +237,34 @@ ka migration approve <session> <recordId> verified
 - **未验证前禁用命令（`verification.blocked-commands`）**：默认拦截并从客户端命令树隐藏 `server`。支持填写不带 `/` 与参数的命令根（独立别名需一并列出），`[]` 为清空列表，`["*"]` 为禁用全部命令；无论如何配置，未完成验证或选角的玩家都无法切换子服。
 - **限流与网络（`premium.*` / `safety.*`）**：名字归属查询与正版会话握手分开限流，超限或上游异常时安全拒绝，绝不降级为免验放行。若宿主机需通过 HTTP 代理访问微软/Mojang 接口，可在代理 JVM 启动参数配置 `-Dhttps.proxyHost` / `-Dhttps.proxyPort`；`premium.directory-network` 可单独控制名字查询走 `inherit`（继承 JVM 设置）或 `direct`（直连）。
 
+### 自定义 Limbo 地图和计分板
+
+把 WorldEdit 导出的 Sponge v2/v3 `.schem` 放入插件数据目录，与 `config.yml` 同级。把下列设置合并到现有的 `limbo:` 段，调整地图最小角和出生点后重启代理：
+
+```yaml
+limbo:
+  motd: "<#55DDF7>KyokouAuth</#55DDF7>"
+  map:
+    file: "lobby.schem"
+    x: -16
+    y: 63
+    z: -16
+    unknown-blocks-as-air: false
+  spawn:
+    x: 0.5
+    y: 64.0
+    z: 0.5
+  sidebar:
+    enabled: true
+    title: "<#55DDF7>登录验证</#55DDF7>"
+    lines:
+      - "<gray>请按聊天栏提示完成验证</gray>"
+      - "<#FFCC66>验证后即可进入服务器</#FFCC66>"
+```
+
+- 地图须完整落在出生点周围 `view-distance` 的初始区块内，最多 1,048,576 格。地图只加载静态方块，不导入生物、方块实体、群系或文件内的偏移；不支持旧 `.schematic` 或整个世界目录。未知方块默认报错，`unknown-blocks-as-air: true` 可以将缺失状态显示为空气。`file: ""` 保持原空地图。
+- 侧栏只在 Limbo 显示，可配置 15 行静态文字，不替换变量。标题、行、Limbo MOTD 和语言文件可使用 `<#RRGGBB>文字</#RRGGBB>`；YAML 文本请加引号。地图和侧栏默认关闭。
+
 ### 管理命令
 
 下列常规管理子命令使用 `/kyokouauth`（别名 `/ka`），所需权限节点为 `kyokouauth.admin`。上面的私密 `claim` 命令族走独立的连接前置入口，不属于这些管理子命令。

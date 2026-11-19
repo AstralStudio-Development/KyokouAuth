@@ -33,8 +33,8 @@ class PacketLookupTest {
         val initial = ProtocolPackets.lookupCounts
         assertEquals(PacketLookup.Counts(
             classes = when { protocol == 767 -> 7; protocol <= 769 -> 8; protocol == 777 -> 11; else -> 9 },
-            constructors = if (protocol == 777) 7 else 6,
-            methods = if (protocol < 773) 2 else 0,
+            constructors = when { protocol == 777 -> 8; protocol >= 775 -> 7; else -> 6 },
+            methods = when { protocol < 773 -> 2; protocol >= 775 -> 1; else -> 0 },
             enums = if (protocol >= 770) 1 else 0,
             arrays = if (protocol >= 768) 2 else 1,
             fields = if (protocol == 777) 1 else 0,

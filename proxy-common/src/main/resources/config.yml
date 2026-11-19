@@ -148,7 +148,25 @@ limbo:
   view-distance: 2
   # Biome resource key resolved per client protocol version (legacy `biome-id` is still read if set).
   biome: "minecraft:plains"
+  # Optional WorldEdit Sponge v2/v3 .schem file in this plugin's data directory.
+  # Placement is the minimum corner of the schematic; set spawn separately.
+  map:
+    file: ""
+    x: 0
+    y: 63
+    z: 0
+    # false: reject if any supported client lacks a state; true: show that state as air.
+    unknown-blocks-as-air: false
   keep-alive-seconds: 10
   keep-alive-timeout-seconds: 30
   # Seconds allowed for a connection to finish entering the verification screen.
   join-timeout-seconds: 30
+  # Optional static sidebar while the player is in Limbo. No placeholders or refreshes.
+  # RichText colors (including <#RRGGBB>) and decorations are supported; quote each line.
+  # At most 15 lines, top to bottom, with at most 512 characters per title or line.
+  sidebar:
+    enabled: false
+    title: "<#55DDF7>KyokouAuth</#55DDF7>"
+    lines:
+      - "<gray>Microsoft sign-in</gray>"
+      - "Follow the instructions in chat."

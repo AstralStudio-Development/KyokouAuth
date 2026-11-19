@@ -35,7 +35,8 @@ public final class CodecGenerator {
         "ServerboundKeepAlivePacket", "ServerboundChunkBatchReceivedPacket", "ServerboundAcceptTeleportationPacket",
         "ServerboundPingRequestPacket", "ServerboundPlayerLoadedPacket",
         "ClientboundOpenScreenPacket", "ClientboundContainerSetContentPacket", "ClientboundContainerClosePacket",
-        "ServerboundContainerClickPacket", "ServerboundContainerClosePacket");
+        "ServerboundContainerClickPacket", "ServerboundContainerClosePacket",
+        "ClientboundSetObjectivePacket", "ClientboundSetDisplayObjectivePacket", "ClientboundSetScorePacket");
     private record Parsed(String text, CompilationUnitTree tree, Trees trees) {
         String exact(Tree node) {
             var positions = trees.getSourcePositions();
@@ -187,6 +188,9 @@ public final class CodecGenerator {
             require(entries.stream().anyMatch(e -> e.state.equals("GAME") && e.type.getSimpleName().equals(required) && e.disposition.equals("typed")),
                 "Missing required typed packet " + required);
         if (protocol >= 769) require(entries.stream().anyMatch(e -> e.type.getSimpleName().equals("ServerboundPlayerLoadedPacket") && e.disposition.equals("typed")), "Missing typed loaded packet");
+        for (String required : List.of("ClientboundSetObjectivePacket", "ClientboundSetDisplayObjectivePacket", "ClientboundSetScorePacket"))
+            require(entries.stream().anyMatch(e -> e.state.equals("GAME") && e.direction.equals("CLIENTBOUND") &&
+                e.type.getSimpleName().equals(required) && e.disposition.equals("typed")), "Missing typed sidebar packet " + required);
     }
 
     private boolean typed(String state, String name) {
@@ -364,6 +368,12 @@ public final class CodecGenerator {
         if (protocol >= 770) {
             String enumName = LIB + "protocol.data.game.level.HeightmapTypes";
             rules.append("-keep,allowoptimization enum ").append(enumName).append(" { public static ").append(enumName).append("[] values(); public static final ").append(enumName).append(" *; }\n");
+        }
+        if (protocol >= 775) {
+            String chunk = LIB + "protocol.data.game.chunk.";
+            rules.append("-keepclassmembers class ").append(chunk).append("ChunkSection { public <init>(int,int,")
+                .append(chunk).append("DataPalette,").append(chunk).append("DataPalette); public ")
+                .append(chunk).append("DataPalette getBlockData(); }\n");
         }
         if (protocol < 773) {
             Class<?> section = Class.forName(LIB + "protocol.data.game.chunk.ChunkSection");

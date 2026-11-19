@@ -51,6 +51,9 @@ internal object ProtocolPackets {
     private val sectionConstructor = if (protocol >= 773) lookup.constructor(ROOT + "data.game.chunk.ChunkSection", ChunkSection::class.java,
         Int::class.java, Int::class.java, Int::class.java, Int::class.java)
         else lookup.constructor(ROOT + "data.game.chunk.ChunkSection", ChunkSection::class.java)
+    private val fluidSectionConstructor = if (protocol >= 775) lookup.constructor(ROOT + "data.game.chunk.ChunkSection", ChunkSection::class.java,
+        Int::class.java, Int::class.java, DataPalette::class.java, DataPalette::class.java) else null
+    private val blockData = fluidSectionConstructor?.let { lookup.method(it.declaringClass, "getBlockData", DataPalette::class.java) }
     private val biomeData = if (protocol < 773) lookup.method(sectionConstructor.declaringClass, "getBiomeData", DataPalette::class.java) else null
     private val setBiome = biomeData?.let { lookup.method(it.returnType, "set", Int::class.java,
         Int::class.java, Int::class.java, Int::class.java, Int::class.java) }
@@ -93,8 +96,8 @@ internal object ProtocolPackets {
         return login263Constructor?.newInstance(packet) ?: packet
     }
 
-    fun section(biome: Int, biomeCount: Int): ChunkSection {
-        if (protocol >= 773) return sectionConstructor.newInstance(0, 1, biome, biomeCount)
+    fun section(biome: Int, biomeCount: Int, blockStateCount: Int = 1): ChunkSection {
+        if (protocol >= 773) return sectionConstructor.newInstance(0, blockStateCount, biome, biomeCount)
         val section = sectionConstructor.newInstance()
         // Older MCPL's default palette is empty, not a singleton-air palette. Register air via its public API.
         section.setBlock(0, 0, 0, 0)
@@ -102,6 +105,10 @@ internal object ProtocolPackets {
         for (x in 0..3) for (y in 0..3) for (z in 0..3) setBiome!!.invoke(palette, x, y, z, biome)
         return section
     }
+
+    fun withFluidCount(section: ChunkSection, count: Int): ChunkSection =
+        if (count == 0 || fluidSectionConstructor == null) section else fluidSectionConstructor.newInstance(
+            section.blockCount, count, blockData!!.invoke(section), section.biomeData)
 
     fun teleport(settings: LimboSettings, id: Int): Packet {
         val s = settings.spawn

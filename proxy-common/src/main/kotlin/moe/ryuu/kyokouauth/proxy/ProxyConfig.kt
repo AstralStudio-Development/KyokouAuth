@@ -4,7 +4,9 @@ import moe.ryuu.kyokouauth.core.config.YamlDocument
 import moe.ryuu.kyokouauth.core.http.Http
 import moe.ryuu.kyokouauth.core.storage.DatabaseDescriptor
 import moe.ryuu.kyokouauth.core.storage.Dialect
+import moe.ryuu.kyokouauth.core.text.RichText
 import moe.ryuu.kyokouauth.limbo.LimboSettings
+import moe.ryuu.kyokouauth.limbo.Schematic
 import java.io.File
 import java.net.URI
 import java.nio.file.AtomicMoveNotSupportedException
@@ -98,6 +100,7 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
         requireSetting(it.length <= 256 && it.none(Char::isISOControl), "post-login.server", "a valid server name")
     }
     val limbo = LimboSettings(
+        sidebar = sidebar(),
         motd = text("limbo.motd", "KyokouAuth"),
         viewDistance = integer("limbo.view-distance", 2, 2..8),
         biomeId = integer("limbo.biome-id", 41, 0..Int.MAX_VALUE),
@@ -110,10 +113,50 @@ class ProxyConfig(private val values: Map<String, String>, private val dataFolde
             coordinate("limbo.spawn.z", 0.5, -28_999_999.0..28_999_999.0),
             coordinate("limbo.spawn.yaw", 0.0, -360_000.0..360_000.0).toFloat(),
             coordinate("limbo.spawn.pitch", 0.0, -90.0..90.0).toFloat()),
+        map = loadLimboMap(),
+        motdComponent = moe.ryuu.kyokouauth.core.text.RichText.parse(text("limbo.motd", "KyokouAuth")).toLimbo(),
         keepAliveSeconds = long("limbo.keep-alive-seconds", 10L, 1L..300L),
         keepAliveTimeoutSeconds = long("limbo.keep-alive-timeout-seconds", 30L, 1L..600L),
         joinTimeoutSeconds = long("limbo.join-timeout-seconds", 30L, 1L..600L),
     )
+
+    private fun sidebar(): LimboSettings.Sidebar? {
+        val prefix = "limbo.sidebar"
+        if (!boolean("$prefix.enabled", false)) return null
+
+        fun component(key: String, raw: String): RichText.Parsed {
+            requireSetting(raw.length <= 512, key, "at most 512 characters")
+            return RichText.parse(raw).also { parsed ->
+                requireSetting(parsed.spans.none { span -> span.text.any(Char::isISOControl) }, key, "single-line text")
+            }
+        }
+
+        val title = component("$prefix.title", text("$prefix.title", "KyokouAuth"))
+        requireSetting(title.plainText.isNotBlank(), "$prefix.title", "a non-empty title")
+        val key = "$prefix.lines"
+        requireSetting(values.keys.none { it.startsWith("$key.") }, key, "a list of text lines")
+        val maxLines = LimboSettings.Sidebar.MAX_LINES
+        val lines = text(key, "").takeIf { it.isNotEmpty() }?.split('\n', limit = maxLines + 1).orEmpty()
+        requireSetting(lines.size <= maxLines, key, "at most $maxLines lines")
+        return LimboSettings.Sidebar(title.toLimbo(), lines.map { component(key, it).toLimbo() })
+    }
+
+    private fun loadLimboMap(): LimboSettings.MapLayout? {
+        val key = "limbo.map.file"
+        val file = text(key, "").trim()
+        if (file.isEmpty()) return null
+        requireSetting(Regex("[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}\\.schem", RegexOption.IGNORE_CASE).matches(file), key,
+            "a .schem filename in the plugin data directory")
+        val path = dataFolder.toPath().resolve(file)
+        val noFollow = java.nio.file.LinkOption.NOFOLLOW_LINKS
+        requireSetting(Files.isRegularFile(path, noFollow) && Files.size(path) <= 16L * 1024 * 1024, key,
+            "a regular .schem file no larger than 16 MiB")
+        val schematic = try { Files.newInputStream(path, noFollow).use(Schematic::read) }
+        catch (failure: Exception) { throw IllegalArgumentException("Invalid configuration '$key': cannot read Sponge schematic v2/v3", failure) }
+        return LimboSettings.MapLayout(schematic, integer("limbo.map.x", 0, -28_999_999..28_999_999),
+            integer("limbo.map.y", 63, -64..319), integer("limbo.map.z", 0, -28_999_999..28_999_999),
+            boolean("limbo.map.unknown-blocks-as-air", false))
+    }
 
     private fun text(key: String, default: String) = values[key] ?: default
     private fun integer(key: String, default: Int, range: IntRange): Int {
