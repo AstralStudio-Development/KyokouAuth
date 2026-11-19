@@ -99,9 +99,14 @@ command:
   internal-error: "<#F87171>执行失败，请查看控制台日志"
 
 migration:
+  scan-usage: "<#22D3EE>扫描参数<#D4D4D8>：ka migration scan [--source-host <主机>] [--source-port <端口>] [--local-source]<newline>本地地址须用 --local-source 明确确认数据库就在当前代理运行环境；跨机请覆盖为可达主机。账号密码和表字段仍读取复制来的配置，不接受凭据型 URL。"
+  source-sqlite: "<#22D3EE>本轮来源：SQLite<#D4D4D8>；数据库文件 <database>。按旧配置指定文件读取，不合并其他残留库。"
+  source-remote: "<#22D3EE>本轮来源：<type><#D4D4D8>；主机 <host>；端口 <port>；数据库 <database>。其余字段沿用旧配置，凭据不显示。"
+  failure-local_source_confirmation_required: "<#FACC15>本地数据库地址的来源环境尚未确认，未连接数据库。<#D4D4D8>localhost/回环地址指当前代理环境，不一定是旧机器；确认同环境后用 ka migration scan --local-source，否则用 --source-host <旧库可达主机>，必要时加 --source-port <端口>。不会回退读取残留 SQLite。"
+  failure-invalid_source_selection: "<#FACC15>来源地址或覆盖参数无效，未连接数据库。<#D4D4D8>请使用真实主机名/常规 IP 和 1–65535 端口，不要输入用户名密码 URL、通配监听地址或歧义数字 IP；SQLite 来源不接受主机/端口或本地确认覆盖。"
   last-failure: "<#FACC15>本轮失败原因：<#D4D4D8><reason>"
   failure-missing_inbox_config: "<#FACC15>收件配置缺失或不是普通文件。<#D4D4D8>请把旧 AuthMe 的配置复制到 migration/inbox/AuthMe/config.yml，再执行 ka migration scan；无需修改本插件配置。"
-  failure-invalid_source_config: "<#FACC15>无法识别复制来的 AuthMe 配置。<#D4D4D8>请核对是否为完整旧配置及受支持的 SQLite/MySQL/MariaDB、SHA256 设置；不要手工猜测字段或把凭据发到聊天。"
+  failure-invalid_source_config: "<#FACC15>无法识别复制来的 AuthMe 配置。<#D4D4D8>必须明确包含 DataSource.backend（SQLITE/MYSQL/MARIADB）并使用受支持的 SHA256；缺少类型时不会猜测或读取旧 .db。请复制完整旧配置，不要手工猜字段或发送凭据。"
   failure-source_unavailable: "<#FACC15>旧来源读取或快照导出失败。<#D4D4D8>请检查数据库文件是否存在且已停写一致、只读访问、驱动、连接/TLS 和账号数量上限。"
   failure-preflight_failed: "<#FACC15>本地预检或暂存写入失败。<#D4D4D8>请检查玩家档案/缓存格式、扫描上限、磁盘与目录权限；原启用快照不变。"
   failure-invalid_confirmation: "<#FACC15>没有匹配的有效确认 token，或预检已过期。<#D4D4D8>请重新 scan，检查 issues 后使用本次给出的 token 确认。"

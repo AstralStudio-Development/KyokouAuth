@@ -30,7 +30,8 @@ object AuthMeConfigReader {
                 ?: error("Invalid configuration")
             val source = root.section("DataSource")
             val security = root.section("settings").section("security")
-            val dialect = when (source.string("backend", "SQLITE").uppercase(java.util.Locale.ROOT)) {
+            val backend = source["backend"] as? String ?: error("Missing backend")
+            val dialect = when (backend.uppercase(java.util.Locale.ROOT)) {
                 "SQLITE" -> Dialect.SQLITE
                 "MYSQL" -> Dialect.MYSQL
                 "MARIADB" -> Dialect.MARIADB

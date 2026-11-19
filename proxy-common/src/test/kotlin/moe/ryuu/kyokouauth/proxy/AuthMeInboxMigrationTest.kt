@@ -436,6 +436,105 @@ class AuthMeInboxMigrationTest {
         }
     }
 
+    @Test
+    fun `copied mysql localhost is refused before any driver lookup despite a leftover SQLite file`() {
+        val migrationRoot = root.resolve("migration")
+        val staleSqlite = prepareInbox(migrationRoot)
+        val before = Files.readAllBytes(staleSqlite)
+        Files.writeString(staleSqlite.parent.resolve("config.yml"), """
+            DataSource:
+              backend: MYSQL
+              mySQLHost: localhost
+              mySQLDatabase: legacy
+              mySQLPassword: PRIVATE_SOURCE_PASSWORD_SENTINEL
+        """.trimIndent())
+        var lookups = 0
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            val claims = ProfileClaimRepository(db)
+            AuthMeInboxMigration(migrationRoot, claims, {
+                lookups++
+                error("Source driver must not be prepared before origin confirmation")
+            }, {}).use { migration ->
+                val failed = assertFailsWith<java.util.concurrent.ExecutionException> { migration.scan().get(5, TimeUnit.SECONDS) }
+                val safe = assertIs<AuthMeImportException>(failed.cause)
+                assertEquals("LOCAL_SOURCE_CONFIRMATION_REQUIRED", safe.reason.name)
+                assertEquals(0, lookups)
+                assertNull(migration.report())
+                assertFalse(migration.available())
+                assertNull(claims.byProfile(old))
+                assertContentEquals(before, Files.readAllBytes(staleSqlite))
+                assertFalse(safe.toString().contains("PRIVATE_SOURCE_PASSWORD_SENTINEL"))
+            }
+        }
+    }
+
+    @Test
+    fun `local confirmation and endpoint overrides are per scan and never fall back to the stale SQLite database`() {
+        val migrationRoot = root.resolve("migration")
+        val stale = prepareInbox(migrationRoot)
+        val before = Files.readAllBytes(stale)
+        val prepared = mutableListOf<Dialect>()
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            val claims = ProfileClaimRepository(db)
+            AuthMeInboxMigration(migrationRoot, claims, { dialect ->
+                prepared += dialect
+                error("PRIVATE_SOURCE_PREPARE_SENTINEL")
+            }, {}).use { migration ->
+                for (dialect in listOf(Dialect.MYSQL, Dialect.MARIADB)) {
+                    Files.writeString(stale.parent.resolve("config.yml"), """
+                        DataSource:
+                          backend: ${dialect.name}
+                          mySQLHost: localhost
+                          mySQLDatabase: legacy
+                          mySQLPassword: PRIVATE_SOURCE_PASSWORD_SENTINEL
+                    """.trimIndent())
+                    prepared.clear()
+                    val confirmed = assertFailsWith<java.util.concurrent.ExecutionException> {
+                        migration.scan(moe.ryuu.kyokouauth.core.authme.AuthMeSourceSelection(localSourceConfirmed = true)).get(5, TimeUnit.SECONDS)
+                    }
+                    assertEquals(AuthMeImportFailure.SOURCE_UNAVAILABLE, assertIs<AuthMeImportException>(confirmed.cause).reason)
+                    assertEquals(listOf(dialect), prepared)
+                    assertEquals("localhost", migration.status().source?.host)
+                    val overridden = assertFailsWith<java.util.concurrent.ExecutionException> {
+                        migration.scan(moe.ryuu.kyokouauth.core.authme.AuthMeSourceSelection("old-db.example.invalid", 13306)).get(5, TimeUnit.SECONDS)
+                    }
+                    assertEquals(AuthMeImportFailure.SOURCE_UNAVAILABLE, assertIs<AuthMeImportException>(overridden.cause).reason)
+                    assertEquals(listOf(dialect, dialect), prepared)
+                    val summary = assertNotNull(migration.status().source)
+                    assertEquals(dialect, summary.dialect)
+                    assertEquals("old-db.example.invalid", summary.host)
+                    assertEquals(13306, summary.port)
+                    assertEquals("legacy", summary.database)
+                    assertFalse(summary.toString().contains("PRIVATE_SOURCE"))
+                    val unconfirmed = assertFailsWith<java.util.concurrent.ExecutionException> { migration.scan().get(5, TimeUnit.SECONDS) }
+                    assertEquals(AuthMeImportFailure.LOCAL_SOURCE_CONFIRMATION_REQUIRED, assertIs<AuthMeImportException>(unconfirmed.cause).reason)
+                    assertEquals(listOf(dialect, dialect), prepared)
+                    assertNull(migration.status().source)
+                    assertNull(claims.byProfile(old))
+                    assertFalse(migration.available())
+                }
+                assertContentEquals(before, Files.readAllBytes(stale))
+                Files.list(migrationRoot.resolve("staging")).use { assertEquals(0L, it.count()) }
+            }
+        }
+    }
+
+    @Test
+    fun `missing backend refuses the source even if a usable historical SQLite file remains`() {
+        val migrationRoot = root.resolve("migration")
+        val stale = prepareInbox(migrationRoot)
+        val before = Files.readAllBytes(stale)
+        Files.writeString(stale.parent.resolve("config.yml"), "DataSource:\n  mySQLDatabase: legacy\n")
+        Database(DatabaseDescriptor(Dialect.H2, database = root.resolve("identities").toString())).use { db ->
+            AuthMeInboxMigration(migrationRoot, ProfileClaimRepository(db), { error("Do not prepare a guessed backend") }, {}).use { migration ->
+                val failed = assertFailsWith<java.util.concurrent.ExecutionException> { migration.scan().get(5, TimeUnit.SECONDS) }
+                assertEquals(AuthMeImportFailure.INVALID_SOURCE_CONFIG, assertIs<AuthMeImportException>(failed.cause).reason)
+                assertNull(migration.report())
+                assertContentEquals(before, Files.readAllBytes(stale))
+            }
+        }
+    }
+
     private fun prepareInbox(migrationRoot: Path): Path {
         val inbox = migrationRoot.resolve("inbox")
         val authme = Files.createDirectories(inbox.resolve("AuthMe"))

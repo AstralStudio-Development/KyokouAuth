@@ -57,6 +57,64 @@ class AuthMeMigrationCommandTest {
     }
 
     @Test
+    fun `scan options are validated without echoing values and selected against the configured backend`() {
+        val config = ProxyConfig(mapOf("database.type" to "h2", "database.database" to folder.resolve("identities").toString(),
+            "database.auto-download-driver" to "false"), folder.toFile())
+        val messages = MessageCatalogue("en_US", folder.resolve("messages").toFile()).also { it.load() }
+        val server = object : ProxyServer {
+            override fun getServer(name: String) = Optional.empty<RegisteredServer>()
+            override fun getPlayer(name: String) = Optional.empty<Player>()
+            override fun getPlayer(uuid: UUID) = Optional.empty<Player>()
+            override val allPlayers = emptyList<Player>()
+            override val configuration = object : ProxyConfiguration { override val attemptConnectionOrder = emptyList<String>() }
+        }
+        val replies = LinkedBlockingQueue<String>()
+        val source = object : CommandSource {
+            override val isConsole = true
+            override fun hasPermission(permission: String) = true
+            override fun sendMessage(message: RichText.Parsed) { replies.add(message.spans.joinToString("") { it.text }) }
+        }
+        val logger = ProxyLog { _, _, _ -> }
+        fun reply() = assertNotNull(replies.poll(5, TimeUnit.SECONDS))
+        AuthService(config, logger, supportsProfileClaims = true).use { auth ->
+            val command = KyokouAuthCommand(server, config, messages, auth, LoginGate(server, config, messages, auth, logger)) {}
+            val invalid = listOf(
+                arrayOf("--local-source", "--local-source"), arrayOf("--source-host"), arrayOf("--source-port"),
+                arrayOf("--source-port", "0"), arrayOf("--source-port", "65536"), arrayOf("--source-port", "not-a-port"),
+                arrayOf("--source-host", "a.example.invalid", "--source-host", "b.example.invalid"),
+                arrayOf("--source-port", "3306", "--source-port", "3307"),
+                arrayOf("--source-host", "--local-source"), arrayOf("--unknown", "PRIVATE_UNKNOWN_SENTINEL"),
+                arrayOf("--source-host", "mysql://user:PRIVATE_HOST_PASSWORD_SENTINEL@database/source"),
+            )
+            invalid.forEach { options ->
+                command.execute(source, arrayOf("migration", "scan") + options)
+                val usage = reply()
+                assertTrue(usage.contains("Scan options"), usage)
+                assertFalse(usage.contains("PRIVATE_"), usage)
+                assertEquals(AuthMeImportPhase.IDLE, auth.inboxLegacyImportStatus()?.phase)
+            }
+            val copiedConfig = folder.resolve("migration/inbox/AuthMe/config.yml")
+            Files.writeString(copiedConfig, "DataSource:\n  backend: SQLITE\n")
+            val accepted = listOf(arrayOf("--local-source"), arrayOf("--source-host", "old-db.example.invalid"),
+                arrayOf("--source-port", "13306"), arrayOf("--source-host", "old-db.example.invalid", "--source-port", "13306"))
+            accepted.forEach { options ->
+                command.execute(source, arrayOf("migration", "scan") + options)
+                val first = reply()
+                val failure = if (first.contains("Background scan started")) reply() else first
+                assertTrue(failure.contains("SQLite sources do not accept"), failure)
+                assertEquals(AuthMeImportFailure.INVALID_SOURCE_SELECTION, auth.inboxLegacyImportStatus()?.failure)
+            }
+            Files.writeString(copiedConfig, "DataSource:\n  backend: MYSQL\n  mySQLHost: localhost\n")
+            command.execute(source, arrayOf("migration", "scan"))
+            val first = reply()
+            val local = if (first.contains("Background scan started")) reply() else first
+            assertTrue(local.contains("current proxy environment") && local.contains("--local-source") && local.contains("--source-host"), local)
+            assertEquals(AuthMeImportFailure.LOCAL_SOURCE_CONFIRMATION_REQUIRED, auth.inboxLegacyImportStatus()?.failure)
+            assertFalse(auth.authMeClaimsAvailable())
+        }
+    }
+
+    @Test
     fun `console migrates a fixed inbox without migration config and claims use only the persistent local snapshot`() {
         val oldServer = folder.resolve("migration/inbox")
         val oldAuthMe = Files.createDirectories(oldServer.resolve("AuthMe"))
@@ -64,6 +122,7 @@ class AuthMeMigrationCommandTest {
             DataSource:
               backend: SQLITE
               mySQLDatabase: legacy
+              mySQLPassword: PRIVATE_SOURCE_PASSWORD_SENTINEL
               mySQLTablename: old_accounts
               mySQLColumnName: login_name
               mySQLColumnPassword: password_hash
@@ -121,6 +180,9 @@ class AuthMeMigrationCommandTest {
             assertNull(auth.automaticLegacyImportReport())
             command.execute(source(true), arrayOf("migration", "scan"))
             assertTrue(reply().contains("Background scan started"))
+            val origin = reply()
+            assertTrue(origin.contains("Source:") && origin.contains("SQLite") && origin.contains("legacy.db"), origin)
+            assertFalse(origin.contains("PRIVATE_SOURCE_PASSWORD_SENTINEL"), origin)
             val summary = reply()
             val instruction = reply()
             assertTrue(summary.contains("ready 1"), summary)

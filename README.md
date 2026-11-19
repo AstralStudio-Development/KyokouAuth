@@ -162,7 +162,19 @@ role-selection:
    ka migration progress
    ka migration issues
    ```
-   三种来源都读取复制来的 AuthMe 配置，自动识别数据库、表、账号/密码/TOTP 字段和密码算法，再核对实际结构。**MySQL/MariaDB 直接使用旧配置中的连接账号密码，不需要在 KyokouAuth 再填一遍。** 若希望最小权限，可把收件目录中这份配置的凭据换成专用 `SELECT` 账号，这是可选加固；程序始终只读旧库，不能把只读事务误认为原账号权限已被降级。远程连接仍强制证书/主机名验证，不继承旧配置关闭 TLS 校验的设置。
+   三种来源都先读取复制来的 AuthMe 配置，**必须明确包含 `DataSource.backend`（SQLITE/MYSQL/MARIADB）**，再按该类型读取库、表、账号/密码/TOTP 字段与密码算法并核对实际结构。缺失/未知类型直接拒绝，不按目录中的 `.db` 猜测；配置为 MySQL/MariaDB 时，即使残留可用 SQLite 文件或远程连接失败，也不回退或合并。**MySQL/MariaDB 直接使用旧配置中的连接账号密码，不需要在 KyokouAuth 再填一遍。** 若希望最小权限，可把收件目录中这份配置的凭据换成专用 `SELECT` 账号，这是可选加固；程序始终只读旧库，不能把只读事务误认为原账号权限已被降级。远程连接仍强制证书/主机名验证，不继承旧配置关闭 TLS 校验的设置。
+
+   **MySQL/MariaDB 的本地地址需要单独确认来源环境。** `localhost`、`*.localhost`、127/8 和 IPv6 回环地址指当前代理的运行环境，不会自动指向旧机器；来源选择会在准备驱动和建立连接之前拒绝未确认的本地地址。确认数据库确实在当前代理环境中时使用：
+   ```text
+   ka migration scan --local-source
+   ```
+   跨机器、端口变化或受控转发时，只覆盖本次导入的地址，不重填凭据/字段：
+   ```text
+   ka migration scan --source-host old-db.example --source-port 3306
+   ```
+   可只覆盖 host 或 port；若最终仍选本地地址，仍必须加 `--local-source`。确认/覆盖只对本次扫描有效，不修改复制件、KyokouAuth 配置或源库。SQLite 仅使用普通 `scan`，不接受网络或本地地址确认参数。通配监听地址、歧义数字 IP、凭据型 URL、非法/重复参数被拒绝，不回显输入值。选择阶段不做 DNS/网段探测来猜旧机器，也不能证明 DNS 别名的原机器身份；连接仍保留所选主机名用于严格 TLS 校验。地址覆盖不代替网络可达性、数据库授权或证书校验，不会自动开放端口/关闭 TLS。
+
+   扫描结果与 `progress` 会展示本轮选用的类型、主机、端口和库名；SQLite 仅显示文件名，摘要不含账号、密码或完整 JDBC URL。摘要用于确认来源，不是账号归属证明；确认启用后认领仍只读本地快照。
 
    每次扫描最多一个任务、一个旧来源连接，查询有界；读取期间按 256 行流式/批次写入私有本地 SQLite 临时快照，最多 100000 行，超限整次失败而非静默截断。源快照导出是单事务，失败或取消会回滚并清理自己创建的临时文件。历史文件也有数量、深度及字节上限。扫描使用独立单线程导入执行器，不占登录任务队列；后台操作仍有磁盘/数据库负载，不代表完全没有性能影响。
 
@@ -243,7 +255,7 @@ ka migration approve <session> <recordId> verified
 仅限 **Velocity 代理控制台**，游戏内禁止执行。正常收件命令无需迁移配置；单条/人工入口须已启用认领，或显式开启旧 `migration.enabled`：
 
 ```text
-ka migration scan                                           从固定 inbox 后台生成未启用本地快照
+ka migration scan [--source-host <host>] [--source-port <port>] [--local-source]  按明确来源后台生成未启用快照
 ka migration progress                                       查看进度与当前快照启用状态
 ka migration issues [page]                                  分页查看当前预检异常
 ka migration cancel                                         取消扫描或未确认预检

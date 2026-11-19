@@ -43,12 +43,19 @@ class AuthMeConfigReaderTest {
     }
 
     @Test
-    fun `omitted backend keeps the official SQLite default`() {
+    fun `backend must be explicit even when an old SQLite database is present`() {
         val configFile = directory.resolve("defaults.yml")
-        Files.writeString(configFile, "DataSource:\n  mySQLDatabase: authme_default\n")
-        val source = AuthMeConfigReader.read(configFile)
-        assertEquals(Dialect.SQLITE, source.dialect)
-        assertEquals(directory.resolve("authme_default.db").toString(), source.location)
+        Files.writeString(directory.resolve("authme_default.db"), "old database must not select the backend")
+        for (yaml in listOf(
+            "DataSource:\n  mySQLDatabase: authme_default\n",
+            "settings: {}",
+            "DataSource: {backend: null}",
+            "DataSource: {backend: ''}",
+            "DataSource: {backend: UNKNOWN}",
+        )) {
+            Files.writeString(configFile, yaml)
+            assertSanitized { AuthMeConfigReader.read(configFile) }
+        }
     }
 
     @Test

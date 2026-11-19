@@ -2,6 +2,7 @@ package moe.ryuu.kyokouauth.proxy
 
 import moe.ryuu.kyokouauth.core.authme.AuthMeLegacyVerifier
 import moe.ryuu.kyokouauth.core.authme.AuthMeProfileDiscovery
+import moe.ryuu.kyokouauth.core.authme.AuthMeSourceSummary
 import moe.ryuu.kyokouauth.core.identity.GameName
 import moe.ryuu.kyokouauth.core.storage.LegacyBatchEntry
 import moe.ryuu.kyokouauth.core.storage.LegacyBatchStatus
@@ -94,7 +95,8 @@ class AuthMeMigrationService(
 
 data class AuthMeMigrationIssue(val name: String?, val reason: String)
 
-data class AuthMeMigrationPreview(val token: String, val expiresAt: Long, val report: AuthMeAutoMigrationReport)
+data class AuthMeMigrationPreview(val token: String, val expiresAt: Long, val report: AuthMeAutoMigrationReport,
+                                val source: AuthMeSourceSummary? = null)
 
 data class AuthMeAutoMigrationReport(
     val sourceAccounts: Int,

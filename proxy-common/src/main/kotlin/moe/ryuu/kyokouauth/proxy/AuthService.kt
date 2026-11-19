@@ -114,9 +114,10 @@ class AuthService(private val config: ProxyConfig, private val logger: ProxyLog,
     }
 
     /** Import work has its own single-worker executor and never occupies the authentication queue. */
-    fun scanInboxLegacyImport(): CompletableFuture<AuthMeMigrationPreview> {
+    fun scanInboxLegacyImport(selection: moe.ryuu.kyokouauth.core.authme.AuthMeSourceSelection =
+        moe.ryuu.kyokouauth.core.authme.AuthMeSourceSelection()): CompletableFuture<AuthMeMigrationPreview> {
         if (!supportsProfileClaims || closed.get()) return CompletableFuture.failedFuture(IllegalStateException("Profile claims are unavailable"))
-        return checkNotNull(authMeInbox).scan()
+        return checkNotNull(authMeInbox).scan(selection)
     }
 
     fun inboxLegacyImportStatus(): AuthMeImportStatus? = authMeInbox?.status()

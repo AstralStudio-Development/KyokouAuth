@@ -1,5 +1,7 @@
 package moe.ryuu.kyokouauth.proxy
 import moe.ryuu.kyokouauth.core.auth.MojangDirectory
+import moe.ryuu.kyokouauth.core.authme.AuthMeSourceSelection
+import moe.ryuu.kyokouauth.core.authme.AuthMeSourceSummary
 import moe.ryuu.kyokouauth.core.identity.GameName
 import moe.ryuu.kyokouauth.core.storage.BoundIdentity
 import moe.ryuu.kyokouauth.core.storage.ClaimResult
@@ -94,10 +96,12 @@ class KyokouAuthCommand(
         }
         when (operation) {
             "scan" -> {
-                if (args.size != 2) { tell(source, "command.migration-usage"); return }
-                val scan = auth.scanInboxLegacyImport()
+                val selection = migrationScanOptions(args)
+                if (selection == null) { tell(source, "migration.scan-usage"); return }
+                val scan = auth.scanInboxLegacyImport(selection)
                 if (!scan.isCompletedExceptionally) tell(source, "migration.scan-started")
                 scan.migrationAnswer(source) { preview ->
+                    migrationSource(source, preview.source)
                     migrationReport(source, preview.report)
                     tell(source, "migration.scan-confirm", "token" to preview.token)
                 }
@@ -117,6 +121,7 @@ class KyokouAuthCommand(
                     val phase = component("migration.phase-${status.phase.name.lowercase(Locale.ROOT)}", null).spans.joinToString("") { it.text }
                     tell(source, "migration.scan-progress", "phase" to phase, "count" to status.processed.toString(),
                         "active" to status.active.toString())
+                    migrationSource(source, status.source)
                     status.failure?.let { failure ->
                         val reason = component("migration.failure-${failure.name.lowercase(Locale.ROOT)}", null).spans.joinToString("") { it.text }
                         tell(source, "migration.last-failure", "reason" to reason)
@@ -178,6 +183,43 @@ class KyokouAuthCommand(
             }
             else -> tell(source, "command.migration-usage")
         }
+    }
+
+    private fun migrationScanOptions(args: Array<out String>): AuthMeSourceSelection? {
+        var host: String? = null
+        var port: Int? = null
+        var local = false
+        var index = 2
+        while (index < args.size) {
+            when (args[index].lowercase(Locale.ROOT)) {
+                "--local-source" -> {
+                    if (local) return null
+                    local = true
+                }
+                "--source-host" -> {
+                    if (host != null || ++index >= args.size) return null
+                    val value = args[index]
+                    if (value.length !in 1..253 || value.startsWith("-") || value.any {
+                            it.isWhitespace() || it.isISOControl() || it in "@/\\?#\"'"
+                        }) return null
+                    host = value
+                }
+                "--source-port" -> {
+                    if (port != null || ++index >= args.size) return null
+                    port = args[index].toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
+                }
+                else -> return null
+            }
+            index++
+        }
+        return AuthMeSourceSelection(host, port, local)
+    }
+
+    private fun migrationSource(source: CommandSource, summary: AuthMeSourceSummary?) {
+        if (summary == null) return
+        if (summary.host == null) tell(source, "migration.source-sqlite", "database" to summary.database)
+        else tell(source, "migration.source-remote", "type" to summary.dialect.displayName,
+            "host" to summary.host.orEmpty(), "port" to summary.port.toString(), "database" to summary.database)
     }
 
     private fun migrationReport(source: CommandSource, report: AuthMeAutoMigrationReport) {

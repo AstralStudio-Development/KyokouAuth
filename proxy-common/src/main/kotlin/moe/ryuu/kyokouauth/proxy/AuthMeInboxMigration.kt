@@ -2,6 +2,9 @@ package moe.ryuu.kyokouauth.proxy
 
 import moe.ryuu.kyokouauth.core.authme.AuthMeConfigReader
 import moe.ryuu.kyokouauth.core.authme.AuthMeLegacyVerifier
+import moe.ryuu.kyokouauth.core.authme.AuthMeLocalSourceConfirmationRequired
+import moe.ryuu.kyokouauth.core.authme.AuthMeSourceSelection
+import moe.ryuu.kyokouauth.core.authme.AuthMeSourceSummary
 import moe.ryuu.kyokouauth.core.authme.AuthMeSourceConfig
 import moe.ryuu.kyokouauth.core.authme.AuthMeVerification
 import moe.ryuu.kyokouauth.core.identity.GameName
@@ -63,6 +66,7 @@ class AuthMeInboxMigration(
     @Volatile private var phase = AuthMeImportPhase.IDLE
     @Volatile private var processed = 0
     @Volatile private var lastFailure: AuthMeImportFailure? = null
+    @Volatile private var currentSource: AuthMeSourceSummary? = null
 
     init {
         try {
@@ -98,21 +102,28 @@ class AuthMeInboxMigration(
     fun available(): Boolean = !closed.get() && enabled && active != null
     fun status(): AuthMeImportStatus = synchronized(lock) {
         expirePendingLocked()
-        AuthMeImportStatus(phase, processed, available(), lastFailure)
+        AuthMeImportStatus(phase, processed, available(), lastFailure, currentSource)
     }
     fun report(): AuthMeMigrationPreview? = synchronized(lock) {
         expirePendingLocked()
         pending?.preview?.takeIf { !closed.get() }
     }
 
-    fun scan(): CompletableFuture<AuthMeMigrationPreview> = launch(AuthMeImportPhase.SCANNING_SOURCE) { running ->
+    fun scan(selection: AuthMeSourceSelection = AuthMeSourceSelection()): CompletableFuture<AuthMeMigrationPreview> = launch(AuthMeImportPhase.SCANNING_SOURCE) { running ->
         discardPending()
         drainCleanup()
         val copiedConfig = folder.resolve("inbox/AuthMe/config.yml")
         running.failure = AuthMeImportFailure.MISSING_INBOX_CONFIG
         check(Files.isRegularFile(copiedConfig, NOFOLLOW_LINKS))
         running.failure = AuthMeImportFailure.INVALID_SOURCE_CONFIG
-        val source = AuthMeConfigReader.read(copiedConfig)
+        val configured = AuthMeConfigReader.read(copiedConfig)
+        running.failure = AuthMeImportFailure.INVALID_SOURCE_SELECTION
+        val selected = try { selection.select(configured) } catch (local: AuthMeLocalSourceConfirmationRequired) {
+            running.failure = AuthMeImportFailure.LOCAL_SOURCE_CONFIRMATION_REQUIRED
+            throw local
+        }
+        val source = selected.source
+        currentSource = selected.summary
         running.failure = AuthMeImportFailure.SOURCE_UNAVAILABLE
         val directory = folder.resolve("staging").resolve(UUID.randomUUID().toString())
         secureDirectory(directory)
@@ -135,7 +146,7 @@ class AuthMeInboxMigration(
             localVerifier = verifier
             val settings = AuthMeClaimSettings(canonical, BATCH, databaseFile, folder.resolve("inbox"))
             val planner = AuthMeMigrationService(settings, verifier, claims, nowMillis)
-            val preview = planner.preview { current(running) }
+            val preview = planner.preview { current(running) }.copy(source = selected.summary)
             checkCurrent(running)
             val profiles = Properties()
             preview.report.entries.filter { it.status == LegacyBatchStatus.READY || it.status == LegacyBatchStatus.ALREADY_REGISTERED }
@@ -173,6 +184,7 @@ class AuthMeInboxMigration(
             takePendingLocked()
             value
         }
+        currentSource = staged.preview.source
         var loaded: LocalSnapshot? = null
         var promoted: Path? = null
         var published = false
@@ -287,6 +299,7 @@ class AuthMeInboxMigration(
             phase = start
             processed = 0
             lastFailure = null
+            currentSource = null
             try {
                 executor.execute {
                     var outcome = runCatching { checkCurrent(running); action(running) }
@@ -468,11 +481,12 @@ class AuthMeInboxMigration(
 
 enum class AuthMeImportPhase { IDLE, SCANNING_SOURCE, MATCHING_PROFILES, READY, ACTIVATING, ACTIVE, DISABLING, DISABLED, CANCELLED, EXPIRED, FAILED }
 data class AuthMeImportStatus(val phase: AuthMeImportPhase, val processed: Int, val active: Boolean,
-                              val failure: AuthMeImportFailure? = null)
+                              val failure: AuthMeImportFailure? = null, val source: AuthMeSourceSummary? = null)
 
 /** Stable, non-sensitive administrator diagnostics; source values and causes are never retained. */
 enum class AuthMeImportFailure {
-    MISSING_INBOX_CONFIG, INVALID_SOURCE_CONFIG, SOURCE_UNAVAILABLE, PREFLIGHT_FAILED,
+    MISSING_INBOX_CONFIG, INVALID_SOURCE_CONFIG, INVALID_SOURCE_SELECTION, LOCAL_SOURCE_CONFIRMATION_REQUIRED,
+    SOURCE_UNAVAILABLE, PREFLIGHT_FAILED,
     INVALID_CONFIRMATION, SNAPSHOT_INVALID, TARGET_IMPORT_FAILED, ACTIVATION_FAILED,
     NO_ACTIVE_SNAPSHOT, OPERATION_FAILED,
 }

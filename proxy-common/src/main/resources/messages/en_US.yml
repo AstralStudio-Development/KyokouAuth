@@ -100,9 +100,14 @@ command:
   internal-error: "<#F87171>Command failed; check the console log"
 
 migration:
+  scan-usage: "<#22D3EE>Scan options<#D4D4D8>: ka migration scan [--source-host <host>] [--source-port <port>] [--local-source]<newline>Use --local-source only when the database is in this proxy's current environment. Override the host when moving machines. Credentials and fields still come from the copied config; credential-bearing URLs are not accepted."
+  source-sqlite: "<#22D3EE>Source: SQLite<#D4D4D8>; database file <database>. Only the configured file is used; leftover databases are not merged."
+  source-remote: "<#22D3EE>Source: <type><#D4D4D8>; host <host>; port <port>; database <database>. Remaining fields use the copied config; credentials are hidden."
+  failure-local_source_confirmation_required: "<#FACC15>Local database origin is not confirmed; no database connection was opened.<#D4D4D8> localhost/loopback refers to the current proxy environment, not necessarily the old machine. Confirm the same environment with ka migration scan --local-source, or use --source-host <reachable-old-database-host> and optionally --source-port <port>. Leftover SQLite is never a fallback."
+  failure-invalid_source_selection: "<#FACC15>Invalid source endpoint or override; no database connection was opened.<#D4D4D8> Use a real hostname/conventional IP and port 1-65535, not credential URLs, wildcard bind addresses or ambiguous numeric IPs. SQLite sources do not accept host/port or local-confirmation overrides."
   last-failure: "<#FACC15>Last failure: <#D4D4D8><reason>"
   failure-missing_inbox_config: "<#FACC15>The copied configuration is missing or not a regular file.<#D4D4D8> Copy the old AuthMe config to migration/inbox/AuthMe/config.yml and run ka migration scan; no KyokouAuth configuration is needed."
-  failure-invalid_source_config: "<#FACC15>The copied AuthMe configuration could not be recognized.<#D4D4D8> Check the complete source config and supported SQLite/MySQL/MariaDB and SHA256 settings. Do not guess fields or send credentials to chat."
+  failure-invalid_source_config: "<#FACC15>The copied AuthMe configuration could not be recognized.<#D4D4D8> DataSource.backend must explicitly name SQLITE/MYSQL/MARIADB with supported SHA256 settings. Missing backend never guesses or selects an old .db. Copy the complete old config; do not guess fields or send credentials to chat."
   failure-source_unavailable: "<#FACC15>Could not read the old source or export its snapshot.<#D4D4D8> Check database files, a consistent stopped source, read-only access, drivers, connectivity/TLS and the account limit."
   failure-preflight_failed: "<#FACC15>Local preflight or staging failed.<#D4D4D8> Check playerdata/cache format, scan limits, disk space and directory access. The active snapshot is unchanged."
   failure-invalid_confirmation: "<#FACC15>No matching current confirmation token, or the preview expired.<#D4D4D8> Run scan again, review issues and confirm using its new token."
