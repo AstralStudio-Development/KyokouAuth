@@ -1,6 +1,6 @@
 """Test-only complete native Geyser GUI translation oracle, not a production extension.
 
-inspect/self-test start no JVM. run must use the primary narrator's serial JVM window: finish one
+inspect/self-test start no JVM. Run this suite separately from other JVM-based suites: finish one
 128MiB compiler first, then one 256MiB isolated pinned Geyser. Only the tiny probe Jar is installed
 inside this nonce test directory; no custom definitions, packs, avatar bridge or Transfer extension.
 Replay the current native role client's actual role-selector.bin through complete ItemTranslator,

@@ -7,7 +7,7 @@ Floodgate-generated key under .narrafork/floodgate-e2e is read; no run-* key, la
 Microsoft device code, real Xbox account or production database is used.
 
 This verifies the trusted Geyser-side Java transport, NOT a complete Geyser/real Bedrock login.
-Run JVMs only in the primary narrator's reserved verification window. `prepare` downloads only;
+Run this regression separately from other JVM-based suites. `prepare` downloads only;
 `run` compiles the test-only Java probe, then runs one 128 MiB proxy and one 64 MiB client at a time.
 All generated metadata, keys, classes, configs, logs and evidence remain under .narrafork.
 """

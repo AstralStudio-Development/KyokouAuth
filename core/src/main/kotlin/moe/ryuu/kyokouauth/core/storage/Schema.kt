@@ -79,12 +79,9 @@ internal object Schema {
             )
         },
 
-        // One Bedrock connection may act as one Java identity.
-        //
-        // This exists because Floodgate's global linking cannot answer the question we need to ask.
-        // Its `/v2/link/bedrock/{xuid}` endpoint returns an empty body even when
-        // `/v2/link/java/{uuid}` reports the link, so Floodgate never resolves a Bedrock join to a
-        // Java account. Verified against the live API on 2026-11-16; see ADR-0013.
+        // Historical local-link schema retained for migration compatibility, not authorization.
+        // The proxy architecture uses current connection proof plus official linking metadata;
+        // legacy v2 rows cannot grant role access. See docs/adr/0018-proxy-owns-the-login.md.
         //
         // `bedrock_uuid` is the primary key because one Bedrock account is one person. `java_uuid`
         // is deliberately not unique: a second Xbox account is not by itself evidence that a

@@ -1,6 +1,6 @@
 """Pinned official SkinsRestorer 15.12.6 + Floodgate + real Velocity gate isolation regression.
 
-inspect/self-test never start a JVM. run is for the primary narrator's reserved JVM window:
+inspect/self-test never start a JVM. Run this suite separately from other JVM-based suites:
 one 128 MiB proxy plus one 64 MiB client, with compiler JVMs finished before proxy startup.
 Only the public plugin Jars are read from run-*; no user config, skins database, API key, token
 or production Floodgate key is read. All generated data stays under .narrafork.
@@ -291,7 +291,7 @@ def run_case(args, case, probe_jar, gate_jar, crypto_classpath, velocity, floodg
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("inspect", "self-test", "run"), help="Only run starts/compiler JVMs; reserve a primary-narrator window")
+    parser.add_argument("command", choices=("inspect", "self-test", "run"), help="Only run compiles or starts JVMs; run separately from other JVM-based suites")
     parser.add_argument("--case", choices=("java", "bedrock", "both"), default="both")
     parser.add_argument("--skinsrestorer-jar", type=Path, default=ROOT / "run-live/plugins/SkinsRestorer.jar")
     parser.add_argument("--floodgate-jar", type=Path, default=ROOT / ".narrafork/floodgate-e2e/deps/floodgate-velocity-2.2.5-b141.jar")

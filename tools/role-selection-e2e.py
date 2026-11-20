@@ -1,12 +1,12 @@
 """Protocol-777 native Floodgate role selection, ordinary LOGIN only, no Transfer/cookies.
 
-prepare never starts Java or downloads. run is reserved for the primary narrator's serial JVM
-window: one 128MiB proxy + one 64MiB recording backend + one 64MiB SDK client. Its javac finishes
+prepare never starts Java or downloads. Run cases serially: one 128MiB proxy + one 64MiB
+recording backend + one 64MiB SDK client. Its javac finishes
 before servers start. Every case owns a fresh loopback fixture/key/config under .narrafork.
 Microsoft/linkage/texture/canary inputs are synthetic; official Floodgate cipher, handler, native
 platform events and complete SDK codecs are real. This is not Xbox/phone/render/Paper acceptance.
-Java advanced cross-role selection is unsupported this round: use existing velocity-e2e.py and
-bungee-e2e.py for their unchanged Java basic handshakes, not these Floodgate results.
+Cross-role selection is limited to Floodgate connections. Java login regression is covered by
+velocity-e2e.py and bungee-e2e.py, not these Floodgate results.
 """
 import argparse
 import base64

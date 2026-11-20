@@ -26,6 +26,11 @@ replay_pid*.log
 
 # Local assistant state, test caches/evidence, private deployments and backups; never publish.
 .narrafork/
+.claude/
+.codex/
+/AGENTS.md
+/CLAUDE.md
+/CONTEXT.md
 
 # Python helper bytecode is generated test output, not source.
 __pycache__/

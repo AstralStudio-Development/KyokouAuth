@@ -266,8 +266,7 @@ BungeeCord 版不按构建号限制运行，而是检查必要接口并保留连
 ## 开发与参考文档
 
 - [开发、产物审计与本地验收工具](docs/development.md) —— 模块结构、测试开关与开发脚本说明
-- [项目上下文与领域术语](CONTEXT.md) —— 架构设计、安全边界与核心词汇
-- [架构决策记录（ADR）](docs/adr/) —— 核心设计取舍论证（代理接管登录见 [ADR-0018](docs/adr/0018-proxy-owns-the-login.md)）
+- [架构与身份模型](docs/adr/0018-proxy-owns-the-login.md) —— 代理准入、领域术语、安全边界与设计取舍
 
 ## 许可证说明
 

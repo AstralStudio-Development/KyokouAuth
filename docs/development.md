@@ -1,6 +1,6 @@
 # 开发、产物审计与本地验收工具
 
-本文面向插件开发者与维护者，说明仓库构建、模块结构及 `tools/` 下本地验证工具的职责与操作风险。服务器安装与配置请看 [README](../README.md)。
+本文面向插件开发者与维护者，说明仓库构建、模块结构及 `tools/` 下本地验证工具的职责与操作风险。服务器安装与配置请看 [README](../README.md)，身份模型、安全约束和设计取舍见 [架构文档](adr/0018-proxy-owns-the-login.md)。
 
 ## 构建要求与模块结构
 
@@ -75,11 +75,14 @@ Bungee 运行时不再按构建号或整模块指纹限定。各原生桥仍校�
 
 ## `tools/` 工具速查
 
+该目录保留构建工具、可重建夹具与回归测试源码，不是运行日志或临时测试数据。Java 辅助程序由对应 Python 入口编译调用，不能仅因名称含 `Probe` 或 `Oracle` 就单独删除；服主安装插件无需运行这些工具。
+
 ### 构建与注册表夹具
 
 - [tools/generate-limbo-codec.py](../tools/generate-limbo-codec.py) / [tools/shrink-limbo.py](../tools/shrink-limbo.py)：由 Gradle 构建任务自动调用，负责生成稀疏协议编解码器与执行 R8 裁剪。
 - [tools/prepare-limbo.py](../tools/prepare-limbo.py) / [tools/remap-limbo-vanilla.py](../tools/remap-limbo-vanilla.py)：准备固定版本的上游协议包与官方服务端 JAR，并对 767～774 应用官方混淆映射生成仅用于离线校验的命名 JAR。
 - [tools/extract-limbo-fixtures.py](../tools/extract-limbo-fixtures.py) / [tools/extract-role-selector-fixtures.py](../tools/extract-role-selector-fixtures.py) / [tools/prepare-limbo-oracle.py](../tools/prepare-limbo-oracle.py)：从固定官方服务端提取配置期数据包、选角菜单物品 ID 与协议校验夹具。
+- [tools/extract-limbo-block-states.py](../tools/extract-limbo-block-states.py)：重建 Limbo 地图所需的各协议方块状态表，辅助程序为 [BlockStateFixture.java](../tools/BlockStateFixture.java)。
 - [tools/audit-limbo-artifact.py](../tools/audit-limbo-artifact.py)：独立检查最终插件 JAR 的体积上限、重定位包名、ServiceLoader、夹具哈希与字节码目标：
   ```bash
   python tools/audit-limbo-artifact.py platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar
@@ -109,9 +112,11 @@ Bungee 运行时不再按构建号或整模块指纹限定。各原生桥仍校�
   python -B tools/profile-claim-e2e.py run --case expired
   python -B -m unittest discover -s tools -p 'test_*.py'
   ```
-  `authme` 是新增自助来源路径的隔离复现命令，使用构造的 AuthMe 来源账号和微软响应；上面列出命令不表示本轮已经执行或取得 PASS，须以实际运行输出和留存证据为准。工具通过测试 bootstrap 启动并调用实际生产类，但这种测试装配不是玩家的生产授权，也不代表真人浏览器已经完成微软登录。
+  `authme` 使用构造的 AuthMe 来源账号和微软响应验证自助认领路径。测试 bootstrap 调用实际生产类，但不代表真人已完成微软授权；结果应以脚本输出及证据中的验证范围为准。
 
   工具只写入全新 `.narrafork/profile-claim-e2e` 子目录，仅从已有缓存复用公开 JAR；不读取真实账户、生产配置或玩家数据。证据中的 `syntheticProofs` 与 `clientRendering` 必须分别解读，不能把构造密码证明、菜单协议交互或普通重连通过写成真实 AuthMe/Microsoft 账号验收或画面渲染通过。
+
+- [tools/luckperms-proxy-e2e.py](../tools/luckperms-proxy-e2e.py)：使用真实 LuckPerms 5.5.91 和全新 SQLite，检查合成 XUID 首次登录、稳定 UUID 改名及第二账号复用旧名时的名字索引与权限隔离。需要先编译 Velocity 测试装配，并在脚本指定的缓存路径预置固定 SHA-256 的公开 LP 插件和运行库；脚本不使用真人令牌，不代表 GUI 或微软授权验收。
 
 ## 验证边界说明
 
@@ -119,4 +124,4 @@ Bungee 运行时不再按构建号或整模块指纹限定。各原生桥仍校�
 
 1. **单元测试与官方 Codec 验包**：证明状态机规则与数据包可被官方协议解码，不代表真实客户端已完成画面渲染。
 2. **受控隔离端到端脚本**：证明真实代理事件链、Floodgate 加密器与转发票据行为；微软令牌、官方关联与旧号证明为构造输入。原生选角脚本的后端为记录夹具，旧档认领脚本则实际启动全新 Paper，可验证原版玩家资料与指定版本真实插件的 UUID 连续性；两者不能混称为相同层级的后端验收。
-3. **实机人工验收与生产变更禁令**：基岩客户端与手机端 GUI、真实 AuthMe 旧密码和账号归属核验、微软/Xbox 真人网页授权、手动回连体验、Velocity `AuthMe -> Java U` 自助与人工路径，以及下游子服按 UUID 存储的玩家存档连续性，仍需在目标隔离环境确认。当前没有自愿提供的真实测试号，真实 AuthMe/Microsoft 账号授权尚未验收。项目尚未部署生产；代码评审或本地构建全绿不自动授权对生产库执行 schema 迁移、重启、部署或提交。仅保证原版及严格按 `GameProfile` UUID 索引的数据延续，不承诺任意第三方插件通用兼容。
+3. **实机人工验收**：基岩客户端与手机端 GUI、真实 AuthMe 旧密码和账号归属、微软/Xbox 网页授权、手动回连体验，以及下游子服玩家资料连续性，需由自愿测试账号的持有者在目标隔离环境确认。构建与脚本测试通过不代表已完成这些验证；生产 schema 迁移、重启和部署需独立准备备份与回滚方案。资料连续性只针对原版及严格按 `GameProfile` UUID 索引的数据，不承诺任意第三方插件通用兼容。
