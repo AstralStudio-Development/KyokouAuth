@@ -24,7 +24,7 @@ def prepare_proxy(root, jdk, port):
     classes = base / "plugin-classes"
     (folder / "plugins").mkdir(parents=True, exist_ok=True)
     classes.mkdir(parents=True, exist_ok=True)
-    artifact = root / "platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar"
+    artifact = root / "platform-velocity/build/libs/KyokouAuth-Velocity-0.1.1.jar"
     velocity = root / "run-proxy/velocity.jar"
     subprocess.run([str(jdk / "bin/javac.exe"), "-encoding", "UTF-8", "-cp", os.pathsep.join((str(velocity), str(artifact))),
                     "-d", str(classes), str(root / "tools/MultiLimboTestProxy.java")], check=True)

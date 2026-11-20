@@ -1,7 +1,7 @@
 """Compile/run the independent vanilla 26.3 oracle against raw exported packets.
 
 Usage:
-  python tools/verify-limbo.py --jar platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar
+  python tools/verify-limbo.py --jar platform-velocity/build/libs/KyokouAuth-Velocity-0.1.1.jar
   python tools/verify-limbo.py <capture-directory>/manifest.tsv
 
 No server is started; dependencies are read-only. Compilation and vanilla logs remain

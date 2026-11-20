@@ -399,7 +399,7 @@ def main():
     parser.add_argument('command',choices=('prepare','run'))
     parser.add_argument('--case',choices=('mapping','claim','authme','cancel','disconnect','expired'),default='mapping',
         help='mapping: storage seam only; other cases exercise the native Limbo GUI with synthetic proofs')
-    parser.add_argument('--jar',type=Path,default=ROOT/'platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar')
+    parser.add_argument('--jar',type=Path,default=ROOT/'platform-velocity/build/libs/KyokouAuth-Velocity-0.1.1.jar')
     parser.add_argument('--jdk',type=Path,default=Path('C:/Program Files/Zulu/zulu-25'))
     parser.add_argument('--luckperms',type=Path,help='Cached pinned official LuckPerms Bukkit 5.5.91 Jar; only installed in the new isolated Paper')
     parser.add_argument('--luckperms-libraries',type=Path,help='Optional cached public LuckPerms dependency Jars; never provide plugin data directories')

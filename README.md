@@ -25,7 +25,7 @@ KyokouAuth 必须配合代理转发和下游子服防火墙隔离使用，**严�
 
 #### 方案 A：Velocity
 
-1. 将 `KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar` 放入代理 `plugins/` 目录。
+1. 将 `KyokouAuth-Velocity-0.1.1.jar` 放入代理 `plugins/` 目录。
 2. 编辑 `velocity.toml`，关闭代理全局正版模式并启用 `modern` 转发：
    ```toml
    online-mode = false
@@ -35,7 +35,7 @@ KyokouAuth 必须配合代理转发和下游子服防火墙隔离使用，**严�
 
 #### 方案 B：BungeeCord
 
-1. 将 `KyokouAuth-Bungee-0.1.0-SNAPSHOT.jar` 放入代理 `plugins/` 目录（切勿与 Velocity 版混用）。
+1. 将 `KyokouAuth-Bungee-0.1.1.jar` 放入代理 `plugins/` 目录（切勿与 Velocity 版混用）。
 2. 编辑 BungeeCord 的 `config.yml`：
    ```yaml
    online_mode: false
@@ -266,8 +266,8 @@ BungeeCord 版不按构建号限制运行，而是检查必要接口并保留连
 ```
 
 构建生成的插件产物：
-- Velocity 版：`platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar`
-- BungeeCord 版：`platform-bungee/build/libs/KyokouAuth-Bungee-0.1.0-SNAPSHOT.jar`
+- Velocity 版：`platform-velocity/build/libs/KyokouAuth-Velocity-0.1.1.jar`
+- BungeeCord 版：`platform-bungee/build/libs/KyokouAuth-Bungee-0.1.1.jar`
 
 ## 开发与参考文档
 

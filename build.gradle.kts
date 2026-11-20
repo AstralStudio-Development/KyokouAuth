@@ -9,7 +9,7 @@ subprojects {
     apply(plugin = "org.jetbrains.kotlin.jvm")
 
     group = "moe.ryuu.kyokouauth"
-    version = rootProject.file("VERSION").let { if (it.exists()) it.readText().trim() else "0.1.0-SNAPSHOT" }
+    version = rootProject.file("VERSION").let { if (it.exists()) it.readText().trim() else "0.1.1" }
 
     repositories {
         mavenCentral()

@@ -361,7 +361,7 @@ def main():
     args = parser.parse_args()
     platform_name = 'Bungee' if args.platform == 'bungee' else 'Velocity'
     if args.jar is None:
-        args.jar = ROOT / f'platform-{args.platform}/build/libs/KyokouAuth-{platform_name}-0.1.0-SNAPSHOT.jar'
+        args.jar = ROOT / f'platform-{args.platform}/build/libs/KyokouAuth-{platform_name}-0.1.1.jar'
     dependency = BASE / f'deps/LuckPerms-{platform_name}-5.5.91.jar'
     if hashlib.sha256(dependency.read_bytes()).hexdigest() != LP_SHA256[args.platform]:
         raise RuntimeError(f'Official LuckPerms {platform_name} 5.5.91 checksum mismatch')

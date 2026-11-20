@@ -93,15 +93,15 @@ python tools/bungee-e2e.py network --scenario claim-authme --via-bungee .narrafo
 - [tools/extract-limbo-block-states.py](../tools/extract-limbo-block-states.py)：重建 Limbo 地图所需的各协议方块状态表，辅助程序为 [BlockStateFixture.java](../tools/BlockStateFixture.java)。
 - [tools/audit-limbo-artifact.py](../tools/audit-limbo-artifact.py)：独立检查最终插件 JAR 的体积上限、重定位包名、ServiceLoader、夹具哈希与字节码目标：
   ```bash
-  python tools/audit-limbo-artifact.py platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar
+  python tools/audit-limbo-artifact.py platform-velocity/build/libs/KyokouAuth-Velocity-0.1.1.jar
   ```
 
 ### 协议验包与端到端隔离回归
 
 - [tools/verify-limbo.py](../tools/verify-limbo.py) / [tools/verify-limbo-matrix.py](../tools/verify-limbo-matrix.py) / [tools/limbo-assembly-smoke.py](../tools/limbo-assembly-smoke.py)：导出插件实际发出的协议包，交由对应版本的官方服务端 Codec 解码核验注册表、区块、光照、传送与富文本：
   ```bash
-  python tools/verify-limbo-matrix.py --jar platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar --workers 1
-  python tools/verify-limbo-matrix.py --jar platform-bungee/build/libs/KyokouAuth-Bungee-0.1.0-SNAPSHOT.jar --workers 1
+  python tools/verify-limbo-matrix.py --jar platform-velocity/build/libs/KyokouAuth-Velocity-0.1.1.jar --workers 1
+  python tools/verify-limbo-matrix.py --jar platform-bungee/build/libs/KyokouAuth-Bungee-0.1.1.jar --workers 1
   ```
 - [tools/prepare-limbo-client.py](../tools/prepare-limbo-client.py) / [tools/limbo-e2e.py](../tools/limbo-e2e.py) / [tools/velocity-e2e.py](../tools/velocity-e2e.py) / [tools/bungee-e2e.py](../tools/bungee-e2e.py)：启动受控隔离代理与无账号原版客户端（只读复用本机 `.minecraft` 公开资源文件），通过只读 JDK Observer 检查客户端世界加载、界面状态与留存连接：
   ```bash
@@ -133,7 +133,7 @@ python tools/bungee-e2e.py network --scenario claim-authme --via-bungee .narrafo
 - `isTemporaryConnection(PendingConnection): boolean`：未知、过期或临时 Profile 返回 `true`。`false` 只表示不是占位 Profile，**不能作为认证授权**。
 - `isAuthenticated(ProxiedPlayer): boolean`：查询精确原生对象对应连接的 Gate 状态，不按公开名字或 UUID 猜测。认证完成且真实后端连接成功时可在 `ServerConnectedEvent` 观察。
 
-ApolloSupport 适配版的登录事件只使用缓存或手动显示映射；临时 Profile 跳过，后台查询等到认证通过。冷缓存不会重发已发送的 LoginSuccess，自身登录显示映射需后续连接使用缓存。真实组合回归可追加 `--apollo-support ./ApolloSupport-1.0.0.jar`：`claim-authme` 验证临时身份不被改写及旧档重连；`held` 用合成手动映射检查客户端显示 UUID、协议 777 的 session UUID 与私有属性剥离，原生服务器身份保持不变。该装配阻止外部 HTTP，不证明真人 Lunar 饰品画面渲染。
+ApolloSupport 适配版的登录事件只使用缓存或手动显示映射；临时 Profile 跳过，后台查询等到认证通过。冷缓存不会重发已发送的 LoginSuccess，自身登录显示映射需后续连接使用缓存。真实组合回归可追加 `--apollo-support ./ApolloSupport-1.0.1.jar`：`claim-authme` 验证临时身份不被改写及旧档重连；`held` 用合成手动映射检查客户端显示 UUID、协议 777 的 session UUID 与私有属性剥离，原生服务器身份保持不变。该装配阻止外部 HTTP，不证明真人 Lunar 饰品画面渲染。
 
 ## 验证边界说明
 

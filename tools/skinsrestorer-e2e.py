@@ -295,7 +295,7 @@ def main():
     parser.add_argument("--case", choices=("java", "bedrock", "both"), default="both")
     parser.add_argument("--skinsrestorer-jar", type=Path, default=ROOT / "run-live/plugins/SkinsRestorer.jar")
     parser.add_argument("--floodgate-jar", type=Path, default=ROOT / ".narrafork/floodgate-e2e/deps/floodgate-velocity-2.2.5-b141.jar")
-    parser.add_argument("--jar", type=Path, default=ROOT / "platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar")
+    parser.add_argument("--jar", type=Path, default=ROOT / "platform-velocity/build/libs/KyokouAuth-Velocity-0.1.1.jar")
     parser.add_argument("--proxy", type=Path, default=ROOT / "run-proxy/velocity.jar")
     parser.add_argument("--jdk", type=Path, default=Path("C:/Program Files/Zulu/zulu-25"))
     parser.add_argument("--client-classpath-file", type=Path, default=ROOT / "limbo/protocols/777/build/generated/limbo-codec/tool-classpath.txt")

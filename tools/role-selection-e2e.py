@@ -387,7 +387,7 @@ def main():
     parser.add_argument("--timeout", type=int, choices=range(10, 301), default=90)
     args = parser.parse_args()
     label = "Velocity" if args.platform == "velocity" else "Bungee"
-    args.jar = args.jar or ROOT / f"platform-{args.platform}/build/libs/KyokouAuth-{label}-0.1.0-SNAPSHOT.jar"
+    args.jar = args.jar or ROOT / f"platform-{args.platform}/build/libs/KyokouAuth-{label}-0.1.1.jar"
     args.proxy = args.proxy or (ROOT / "run-proxy/velocity.jar" if args.platform == "velocity" else ROOT / ".narrafork/bungee-e2e/deps/BungeeCord-2111.jar")
     args.floodgate = args.floodgate or ROOT / f".narrafork/floodgate-e2e/deps/floodgate-{args.platform}-2.2.5-b141.jar"
     if args.platform == "bungee":

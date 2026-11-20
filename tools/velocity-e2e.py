@@ -77,7 +77,7 @@ def wait_for(process, console, marker, timeout=80):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--jar", type=Path, default=ROOT / "platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar")
+    parser.add_argument("--jar", type=Path, default=ROOT / "platform-velocity/build/libs/KyokouAuth-Velocity-0.1.1.jar")
     parser.add_argument("--proxy", type=Path, default=ROOT / "run-proxy/velocity.jar")
     parser.add_argument("--jdk", type=Path, default=Path("C:/Program Files/Zulu/zulu-25"))
     parser.add_argument("--scenario", choices=["held", "server", "commands", "tcp-refused", "login-kick", "join-timeout", "production", "unavailable"], default="held")
