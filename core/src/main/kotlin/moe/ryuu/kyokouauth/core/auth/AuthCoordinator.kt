@@ -304,9 +304,9 @@ class AuthCoordinator(
         /**
          * The standard offline UUID of a name.
          *
-         * Used only as a placeholder: the data written under it is deleted when the player leaves
-         * unverified, and it is never stored. It is deterministic rather than random so that a player
-         * who drops mid-verification gets the same placeholder back and does not accumulate junk.
+         * Used only as a placeholder, never stored by us as a bound identity. Third-party proxy
+         * plugins may still cache it, so adapters exposing provisional players must isolate their
+         * native names from the real claimed name. Determinism avoids a new cache UUID per attempt.
          */
         fun provisionalUuid(name: GameName): UUID =
             UUID.nameUUIDFromBytes(("OfflinePlayer:" + name.value).toByteArray(Charsets.UTF_8))

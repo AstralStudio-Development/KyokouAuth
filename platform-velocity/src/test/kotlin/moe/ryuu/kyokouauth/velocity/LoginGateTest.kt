@@ -102,6 +102,77 @@ class LoginGateTest {
     ).also { it.activate() }
 
     @Test
+    fun `first bind exposes only an isolated native name and binds the original claimed name`() {
+        val placeholder = AuthCoordinator.provisionalUuid(name)
+        services.decision = AuthCoordinator.Decision.Verify(placeholder, AuthCoordinator.Reason.FIRST_BIND, true, null)
+        val client = client(identityUuid = placeholder)
+        val pre = PreLoginEvent(client.player, name.value, null)
+        gate.onPreLogin(pre)
+        assertTrue(pre.result.isAllowed)
+        val profile = GameProfileRequestEvent(client.player, GameProfile(placeholder, name.value, emptyList()), false)
+        gate.onPrepareJavaProfile(profile)
+        assertEquals(placeholder, profile.gameProfile.id)
+        assertTrue(profile.gameProfile.name.startsWith("KA\$"))
+        assertEquals(16, profile.gameProfile.name.length)
+        assertEquals(null, GameName.parse(profile.gameProfile.name), "A real Java name must not collide with a validation alias")
+        val alias = profile.gameProfile.name
+        gate.onGameProfile(profile)
+        assertEquals(alias, profile.gameProfile.name)
+        client.nativeName = alias
+        val login = LoginEvent(client.player, "")
+        gate.onLogin(login)
+        assertTrue(login.result.isAllowed)
+        assertFalse(gate.common.isAuthenticated(gate.ports.player(client.player)))
+        val held = LimboHandle(client.sessionId, placeholder, alias)
+        gate.onJoin(held)
+        services.runWork()
+        services.advanceBy(1_000L)
+        assertEquals(name, services.lastBoundName, "The alias must never become a registered or renamed identity")
+        assertEquals(1, services.bindCalls)
+        assertEquals(1, services.grants)
+        assertEquals(1, client.disconnects, "A provisional native profile must still reconnect")
+        assertEquals(0, client.requests)
+        assertFalse(gate.common.isAuthenticated(gate.ports.player(client.player)))
+    }
+
+    @Test
+    fun `a provisional native player cannot revert its isolated name before login`() {
+        val placeholder = AuthCoordinator.provisionalUuid(name)
+        services.decision = AuthCoordinator.Decision.Verify(placeholder, AuthCoordinator.Reason.FIRST_BIND, true, null)
+        val client = client(identityUuid = placeholder)
+        gate.onPreLogin(PreLoginEvent(client.player, name.value, null))
+        val profile = GameProfileRequestEvent(client.player, GameProfile(placeholder, name.value, emptyList()), false)
+        gate.onPrepareJavaProfile(profile)
+        assertTrue(profile.gameProfile.name != name.value)
+        val login = LoginEvent(client.player, "") // Another plugin substituted the original name.
+        gate.onLogin(login)
+        assertFalse(login.result.isAllowed)
+        assertEquals(0, services.bindCalls)
+        assertEquals(0, services.grants)
+    }
+
+    @Test
+    fun `Mojang profile keeps its verified UUID and real name before permission setup`() {
+        services.decision = AuthCoordinator.Decision.MojangSession(uuid)
+        val client = client(online = true)
+        val pre = PreLoginEvent(client.player, name.value, uuid)
+        gate.onPreLogin(pre)
+        assertTrue(pre.result.isOnlineModeAllowed)
+        val profile = GameProfileRequestEvent(client.player, GameProfile(uuid, name.value, emptyList()), true)
+        gate.onPrepareJavaProfile(profile)
+        assertEquals(uuid, profile.gameProfile.id)
+        assertEquals(name.value, profile.gameProfile.name)
+        gate.onGameProfile(profile)
+        assertEquals(uuid, profile.gameProfile.id)
+        assertEquals(name.value, profile.gameProfile.name)
+        val login = LoginEvent(client.player, "")
+        gate.onLogin(login)
+        assertTrue(login.result.isAllowed)
+        assertTrue(gate.common.isAuthenticated(gate.ports.player(client.player)))
+        assertEquals(1, services.premiumCalls)
+    }
+
+    @Test
     fun `Java identity is final before normal skin listeners and their textures survive last validation`() {
         val client = client()
         val pre = PreLoginEvent(client.player, name.value, null)
@@ -1145,6 +1216,14 @@ class LoginGateTest {
         val pre = PreLoginEvent(client.player, client.player.username, client.player.uniqueId)
         gate.onPreLogin(pre)
         assertTrue(pre.result.isAllowed)
+        if (gate === this.gate && (services.decision as? AuthCoordinator.Decision.Verify)?.provisional == true) {
+            val profile = GameProfileRequestEvent(client.player,
+                GameProfile(client.player.uniqueId, client.player.username, emptyList()), false)
+            gate.onPrepareJavaProfile(profile)
+            gate.onGameProfile(profile)
+            client.nativeName = profile.gameProfile.name
+            client.limbo.nativeName = profile.gameProfile.name
+        }
         val event = LoginEvent(client.player, "")
         gate.onLogin(event)
         assertEquals(allowed, event.result.isAllowed)
@@ -1156,6 +1235,7 @@ class LoginGateTest {
 
     private inner class Client(online: Boolean, identityUuid: UUID, playerName: String) {
         val sessionId: UUID = UUID.randomUUID()
+        var nativeName = playerName
         var active = true
         var protocol = 777
         var disconnects = 0
@@ -1166,7 +1246,7 @@ class LoginGateTest {
         val limbo = LimboHandle(sessionId, identityUuid, playerName)
         val player = stub<Player> { method, args ->
             when (method) {
-                "getUsername" -> playerName
+                "getUsername" -> nativeName
                 "getUniqueId" -> identityUuid
                 "getSessionId" -> sessionId
                 "getRemoteAddress" -> InetSocketAddress("127.0.0.1", 50000)
@@ -1201,7 +1281,8 @@ class LoginGateTest {
         private val identityUuid: UUID = this@LoginGateTest.uuid,
         private val playerName: String = this@LoginGateTest.name.value,
     ) : LimboPlayer {
-        override val name get() = playerName
+        var nativeName = playerName
+        override val name get() = nativeName
         override val uuid get() = identityUuid
         override val address = "127.0.0.1"
         var disconnects = 0
@@ -1240,6 +1321,7 @@ class LoginGateTest {
         val timers = mutableListOf<Timer>()
         var premiumCalls = 0
         var bindCalls = 0
+        var lastBoundName: GameName? = null
         var grants = 0
         var beginCalls = 0
         var beginFailure: Exception? = null
@@ -1258,6 +1340,7 @@ class LoginGateTest {
         }
         override fun bindMicrosoft(name: GameName, xuid: Xuid, gamertag: String): AuthCoordinator.ClaimOutcome {
             bindCalls++
+            lastBoundName = name
             return microsoft()
         }
         override fun grantSession(uuid: UUID, address: String) { grants++ }

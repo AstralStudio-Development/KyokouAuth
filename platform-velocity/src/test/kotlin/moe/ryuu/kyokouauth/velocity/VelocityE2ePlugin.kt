@@ -51,7 +51,7 @@ class VelocityE2ePlugin @Inject constructor(
     private val bedrockScenario = scenario.startsWith("bedrock")
     private val bedrockProbes = AtomicInteger()
     private var bedrock: VelocityFloodgate? = null
-    private val stable = UUID(0L, 2535412345678901L)
+    private val stable = UUID(0L, System.getProperty("kyokou.e2e.xuid", "2535412345678901").toLong())
     private val trusted = AtomicBoolean(false)
     private val authorize = AtomicBoolean(false)
     private val probeExecutions = AtomicInteger()

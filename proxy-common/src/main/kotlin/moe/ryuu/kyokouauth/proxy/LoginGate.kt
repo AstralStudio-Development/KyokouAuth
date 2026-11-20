@@ -41,6 +41,7 @@ class LoginGate constructor(
     private val services: Services,
     private val logger: ProxyLog,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val isolateProvisionalNames: Boolean = false,
 ) : LimboListener {
 
     constructor(server: ProxyServer, config: ProxyConfig, messages: MessageCatalogue, auth: AuthService, logger: ProxyLog) :
@@ -84,6 +85,7 @@ class LoginGate constructor(
         val roles: Boolean = false,
         val selected: SelectedRoleAuthorization? = null,
         val role: RoleOption? = null,
+        val isolateProvisionalNames: Boolean = false,
     ) {
         val provisional = (decision as? AuthCoordinator.Decision.Verify)?.provisional == true
         @Volatile var profileValidated = false
@@ -98,7 +100,12 @@ class LoginGate constructor(
             is AuthCoordinator.Decision.MojangSession -> decision.expectedUuid
             is AuthCoordinator.Decision.Reject -> error("Rejected pending profile")
         }
-        val profileName: String get() = role?.identity?.name?.value ?: chooserName ?: name.value
+        // Permission plugins can persist this Player before it reaches the private Limbo. Keep the
+        // real claimed name away from its placeholder UUID. '$' cannot occur in a valid Java name;
+        // the alias is deterministic for the same placeholder and fits native profile/SQL limits.
+        private val provisionalName = if (isolateProvisionalNames && provisional)
+            "KA\$" + (decision as AuthCoordinator.Decision.Verify).uuid.toString().replace("-", "").take(13) else null
+        val profileName: String get() = role?.identity?.name?.value ?: chooserName ?: provisionalName ?: name.value
     }
 
     /** Authorization is local to one exact session, never inferred from a hint's existence. */
@@ -496,7 +503,8 @@ class LoginGate constructor(
         if (decision !is AuthCoordinator.Decision.Reject) {
             val stored = synchronized(pendingLock) {
                 if (ready && event.connection.isActive && pending.size < config.pendingLoginLimit) {
-                    pending[event.connection.sessionId] = Pending(event.connection, name, address, decision, clock())
+                    pending[event.connection.sessionId] = Pending(event.connection, name, address, decision, clock(),
+                        isolateProvisionalNames = isolateProvisionalNames)
                     true
                 } else false
             }
@@ -676,7 +684,8 @@ class LoginGate constructor(
         }
         val properties = event.gameProfile.properties.filterNot { it.name == CONNECTION_PROPERTY } +
             GameProfile.Property(CONNECTION_PROPERTY, event.connection.sessionId.toString(), "")
-        event.gameProfile = event.gameProfile.withId(uuid).withProperties(properties)
+        val nativeName = if (pending.isolateProvisionalNames && pending.provisional) pending.profileName else event.gameProfile.name
+        event.gameProfile = event.gameProfile.copy(id = uuid, name = nativeName, properties = properties)
     }
 
     /** Premium storage acceptance is part of admission, not a best-effort write after login. */
@@ -691,7 +700,9 @@ class LoginGate constructor(
         if (!ready || !player.isActive || pending == null || expired(pending) ||
             !pending.connection.isActive || !bedrockMatches(pending, event.bedrock) ||
             (if (pending.roles) !pending.profileValidated || player.username != pending.profileName || player.uniqueId != pending.profileUuid
-                else if (pending.bedrock != null) player.username != pending.name.value else GameName.parse(player.username)?.key != pending.name.key) ||
+                else if (pending.bedrock != null) player.username != pending.name.value
+                else if (pending.isolateProvisionalNames && pending.provisional) player.username != pending.profileName
+                else GameName.parse(player.username)?.key != pending.name.key) ||
             addressOf(player) != pending.address
         ) {
             releaseRoleReservation(player.sessionId)

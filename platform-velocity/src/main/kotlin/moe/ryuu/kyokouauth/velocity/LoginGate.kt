@@ -51,7 +51,8 @@ class LoginGate internal constructor(
 ) : LimboListener {
     internal interface Services : SharedGate.Services
     internal val ports = VelocityPorts(server)
-    internal val common = SharedGate(ports, config, messages, services, logger.toProxyLog(), clock)
+    internal val common = SharedGate(ports, config, messages, services, logger.toProxyLog(), clock,
+        isolateProvisionalNames = true)
     private val privateClaimLock = Any()
     private var privateClaimsClosed = false
     private var privateClaims: VelocityClaimCommands? = if (config.profileClaimsEnabled) createClaimShield() else null
