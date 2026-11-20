@@ -243,11 +243,13 @@ ka migration approve <session> <recordId> verified          为已独立核验�
 
 | 组件 | 支持范围与要求 |
 |---|---|
-| **代理服务端** | Velocity **4.3.1**；BungeeCord 官方构建 **2111**（依赖 Netty 4.2） |
+| **代理服务端** | Velocity **4.3.1**；满足运行时接口检查的 BungeeCord 系代理（已实测官方 **2110、2111**，依赖 Netty 4.2） |
 | **Java 运行时** | 插件最低要求 **Java 21**（实际需满足所用代理服务端的运行环境要求） |
-| **客户端版本** | Minecraft **1.21～26.3 正式版**（协议号 767～777） |
+| **客户端版本** | Minecraft **1.21～26.3 正式版**（协议号 767～777，同时受所用代理支持范围限制） |
 | **可选组件** | Floodgate 2.2.5 b141 + Geyser 2.12.1 b1303；SkinsRestorer（供微软角色显示皮肤） |
 | **数据库** | SQLite（默认开箱即用）、H2、MySQL、MariaDB、PostgreSQL |
+
+BungeeCord 版不按构建号限制运行，而是检查必要接口并保留连接级安全校验。Waterfall、XCord 等分支尚未专项验收；通过启动检查不代表所有功能均已验证。
 
 ## 构建与开发
 

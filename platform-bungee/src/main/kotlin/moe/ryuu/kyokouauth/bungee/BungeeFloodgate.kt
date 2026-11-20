@@ -64,7 +64,7 @@ internal interface FloodgateChannels {
     fun native(player: ProxiedPlayer): Channel
 }
 
-/** Fixed official-2111 seam shared by native login lifetime watches and optional Floodgate proof. */
+/** Verified native seam shared by login lifetime watches and optional Floodgate proof. */
 internal class BungeeFloodgateChannels(loader: ClassLoader) : FloodgateChannels {
     private val handler = Class.forName("net.md_5.bungee.connection.InitialHandler", false, loader)
     private val user = Class.forName("net.md_5.bungee.UserConnection", false, loader)
@@ -74,10 +74,7 @@ internal class BungeeFloodgateChannels(loader: ClassLoader) : FloodgateChannels 
     private val handle = wrapper.getMethod("getHandle")
 
     init {
-        check(handler.`package`.implementationVersion?.endsWith("55e1b0b:2111") == true &&
-            user.`package`.implementationVersion?.endsWith("55e1b0b:2111") == true) {
-            "Floodgate channel proof requires the verified official Bungee 2111 implementation"
-        }
+        BungeeRuntime.requireCompatible()
         check(PendingConnection::class.java.isAssignableFrom(handler) && ProxiedPlayer::class.java.isAssignableFrom(user))
         check(pendingChannel.type == wrapper && !Modifier.isStatic(pendingChannel.modifiers))
         check(nativeChannel.returnType == wrapper && handle.returnType == Channel::class.java)

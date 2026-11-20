@@ -16,9 +16,7 @@ internal class BungeeRoleLoginBridge(loader: ClassLoader) {
     private val publicKey = loginRequest.returnType.getMethod("getPublicKey")
 
     init {
-        check(handler.`package`.implementationVersion?.endsWith("55e1b0b:2111") == true) {
-            "Role selection requires the verified official Bungee 2111 implementation (55e1b0b)"
-        }
+        BungeeRuntime.requireCompatible()
         check(PendingConnection::class.java.isAssignableFrom(handler))
         check(name.type == String::class.java && mutablePrivate(name.modifiers)) { "Unsupported InitialHandler name signature" }
         check(state.type.isEnum && state.type.name == "net.md_5.bungee.connection.InitialHandler\$State" && mutablePrivate(state.modifiers))

@@ -391,7 +391,10 @@ def main():
     args.proxy = args.proxy or (ROOT / "run-proxy/velocity.jar" if args.platform == "velocity" else ROOT / ".narrafork/bungee-e2e/deps/BungeeCord-2111.jar")
     args.floodgate = args.floodgate or ROOT / f".narrafork/floodgate-e2e/deps/floodgate-{args.platform}-2.2.5-b141.jar"
     if args.platform == "bungee":
-        require(args.proxy.is_file() and digest(args.proxy) == "1d9dbc31b57b22a37553f160ac1b61762717e9e4a6a1341f3dd27a1f6f2671fd", "Pinned official Bungee 2111 public Jar mismatch")
+        require(args.proxy.is_file() and digest(args.proxy) in {
+            "ede03ff02417f9257e6a53be7daf2718ba9fb917f3ff8e4f9f9823a50e08942a",
+            "1d9dbc31b57b22a37553f160ac1b61762717e9e4a6a1341f3dd27a1f6f2671fd",
+        }, "Pinned official Bungee 2110/2111 public Jar mismatch")
     helper, upstream, floodgate, metadata = prepare(args)
     if args.command == "prepare":
         print("Prepared pinned local no-Transfer fixtures; zero JVM/downloads/user-config/key/data reads")

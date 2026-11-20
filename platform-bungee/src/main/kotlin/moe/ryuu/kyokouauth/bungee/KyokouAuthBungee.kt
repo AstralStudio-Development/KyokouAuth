@@ -54,6 +54,7 @@ class KyokouAuthBungee : Plugin(), Listener {
         }
         try {
             check(proxy.config.isIpForward) { "KyokouAuth-Bungee requires ip_forward: true" }
+            BungeeRuntime.requireCompatible()
             check(proxy.getServerInfo(LoginGate.LIMBO_SERVER_NAME) == null) { "Reserved internal server name is already registered" }
             val config = ProxyConfig.load(dataFolder)
             val floodgate = BungeeFloodgate(config.bedrockEnabled, { proxy.pluginManager.getPlugin("floodgate") }, config.rolesEnabled)

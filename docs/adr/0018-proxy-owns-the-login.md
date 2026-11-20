@@ -26,7 +26,7 @@ KyokouAuth 从「Paper 后端上的 Bukkit 插件」迁移为「Velocity / Bunge
 
 - **私有 Limbo 端点**：各协议 Engine 监听随机本地回环端口，仅通过 Velocity `createRawRegisteredServer` 或 Bungee 未公开 `ServerInfo` 由适配器私有持有，绝不注册进公开服务器表、`/server` 列表或 Tab 补全。
 - **转发信任链**：Velocity 使用 modern forwarding HMAC；Bungee 因传统握手字段可被伪造，改为附加由当前进程签发、绑定当前连接/身份/协议/目标的短 TTL 一次性票据，入场原子兑换并在连接真实后端前剥离。
-- **认证前命令过滤**：`verification.blocked-commands`（默认 `server`）按连接当前认证状态拦截命令执行并裁剪客户端可见命令树。Velocity 使用原生命令执行与命令树事件；Bungee（构建 2111）因无公开命令树事件，在启动签名自检通过后通过窄前端通道利用 Bungee 自有 `Commands` 编码器过滤下发树与现代补全，认证完成后随下游子服命令树自然恢复。
+- **认证前命令过滤**：`verification.blocked-commands`（默认 `server`）按连接当前认证状态拦截命令执行并裁剪客户端可见命令树。Velocity 使用原生命令执行与命令树事件；Bungee 因无公开命令树事件，在启动签名自检通过后通过窄前端通道利用 Bungee 自有 `Commands` 编码器过滤下发树与现代补全，认证完成后随下游子服命令树自然恢复。
 
 ## 架构迁移的直接后果
 
@@ -80,7 +80,7 @@ KyokouAuth 从「Paper 后端上的 Bukkit 插件」迁移为「Velocity / Bunge
   3. 自助来源核验通过后，仅向当前精确连接签发短期源授权，以 `AUTHME_PASSWORD` 写入证明方法与审计；原人工独立核验路径继续保留：管理员通过 `ka migration pending` 找到等待会话，独立核实旧号归属后执行 `ka migration approve <session> <recordId> verified`，承担人工核验审计责任；
   4. 玩家经既有原版 `ConfirmationMenu` 首次确认旧档名与新登录名，随后在同一连接完成全新的 Microsoft/Xbox 设备码证明取得正 XUID，再第二次确认旧档名、新名字与 Xbox 代号；
   5. 数据库仍为 **schema v5**（历史 v1～v4 迁移保持不变；v4 新增 `kyokouauth_legacy_profile`、`kyokouauth_profile_owner`、`kyokouauth_claim_grant`、`kyokouauth_profile_claim_audit`，v5 为 claim grant 增加 `proof_method`）。同一事务消费短期授权并持久化 `XUID -> 历史 Profile UUID` 归属与名字绑定，断开提示普通重连一次。认领中取消、超时、来源失败或冲突均失败关闭，不静默新建默认 `UUID(0, XUID)` 角色。
-- **输入隐私与有界执行**：支持本地快照运行时启用。新连接只有成功安装固定且校验过的 Velocity 4.3.1 或官方 BungeeCord 2111 前置管线后，原生适配器才向公共 gate 标记精确 session 已受保护；旧的未保护连接不会临时收到认领入口，安装失败即拒绝登录。敏感命令在 `CommandExecuteEvent`、Brigadier 错误回显、后端转发和公共补全事件前消费，只交轻量解析与有界 authIO。仅接纳 dedicated unsigned / 受支持 Legacy；签名/LastSeen 敏感格式保守断开，不改写或剥离签名。关闭模块先关闭原通道，在实际关闭前保留 guard。每连接一个进行中，账号 5 次/10min、来源地址 20 次/10min，本地验密并发 4，扫描使用独立单线程且不占登录队列；接管的密码 CharArray 各路径清零，不记录/回显密码或哈希，错误不披露账号存在性细节。
+- **输入隐私与有界执行**：支持本地快照运行时启用。新连接只有在 Velocity 4.3.1 或通过必要接口检查的 BungeeCord 系代理上成功安装前置管线后，原生适配器才向公共 gate 标记精确 session 已受保护；旧的未保护连接不会临时收到认领入口，安装失败即拒绝登录。敏感命令在 `CommandExecuteEvent`、Brigadier 错误回显、后端转发和公共补全事件前消费，只交轻量解析与有界 authIO。仅接纳 dedicated unsigned / 受支持 Legacy；签名/LastSeen 敏感格式保守断开，不改写或剥离签名。关闭模块先关闭原通道，在实际关闭前保留 guard。每连接一个进行中，账号 5 次/10min、来源地址 20 次/10min，本地验密并发 4，扫描使用独立单线程且不占登录队列；接管的密码 CharArray 各路径清零，不记录/回显密码或哈希，错误不披露账号存在性细节。
 - **隐私承诺的界限**：常规命令/补全事件 spy 收不到旧密码；不承诺防更早原始包记录器、恶意 root/替换插件、客户端本地历史或截屏。该入口不为 offline Minecraft 连接增加传输加密，不是端到端或运营者绝对不可见方案。
 - **持久性与插件范围**：认领提交后，XUID 对应的持久 `Profile UUID` 永久保持为所认领的历史 UUID；`migration disable` 持久停止新认领但不撤销既有映射。仅保证原版及严格以 `GameProfile` UUID 为主键的数据延续，不承诺按名字或私有账号表存储的任意第三方插件通用兼容。
 - **验收与发布边界**：构造的来源账号/微软响应、模块回归与测试 bootstrap 调用实际生产类，都不是真实 AuthMe/Microsoft 账号授权验收，也不是生产授权。当前没有自愿提供的真实测试号，真人授权尚未验收；项目尚未部署生产，生产库迁移、重启或部署不在本地验证授权范围内。

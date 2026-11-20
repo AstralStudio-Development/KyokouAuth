@@ -198,9 +198,7 @@ internal class BungeeCommandPackets(
 
     private class Fixed2111Channels {
         init {
-            check(UserConnection::class.java.`package`.implementationVersion?.endsWith("55e1b0b:2111") == true) {
-                "Native command boundary requires official Bungee 2111"
-            }
+            BungeeRuntime.requireCompatible()
             check(UserConnection::class.java.getMethod("getCh").returnType == ChannelWrapper::class.java)
             check(ChannelWrapper::class.java.getMethod("getHandle").returnType == Channel::class.java)
             check(Commands::class.java.getMethod("getRoot").returnType == RootCommandNode::class.java)

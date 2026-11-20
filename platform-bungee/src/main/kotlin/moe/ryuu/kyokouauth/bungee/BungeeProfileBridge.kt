@@ -8,7 +8,7 @@ import java.lang.reflect.Modifier
 import java.util.UUID
 
 /**
- * Deliberately narrow compatibility boundary for official Bungee 2111.
+ * Deliberately narrow compatibility boundary for the verified official Bungee builds.
  * UUIDs are always set with PendingConnection.setUniqueId while still in USERNAME. The sole field
  * write installs an offline LoginResult, including a deliberate rebuild for a Gate-selected role
  * before Player construction. Later profiles only use the public properties setter; neither
@@ -36,9 +36,7 @@ internal class BungeeProfileBridge(
     private val propertySignature = property.getMethod("getSignature")
 
     init {
-        check(handler.`package`.implementationVersion?.endsWith("55e1b0b:2111") == true) {
-            "KyokouAuth-Bungee requires the verified official Bungee 2111 implementation (55e1b0b)"
-        }
+        BungeeRuntime.requireCompatible()
         check(PendingConnection::class.java.isAssignableFrom(handler)) { "Unsupported Bungee InitialHandler" }
         check(getter.returnType == result && field.type == result && Modifier.isPrivate(field.modifiers) &&
             !Modifier.isStatic(field.modifiers) && !Modifier.isFinal(field.modifiers)) { "Unsupported loginProfile signature" }

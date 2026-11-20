@@ -41,14 +41,14 @@
 
 ### AuthMe 只读来源与私密认领接线
 
-Velocity 4.3.1 和官方 BungeeCord 2111 均支持旧 AuthMe 离线档认领到 Java 微软角色（U），不支持迁移到正版角色（J）或基岩角色。启用步骤及完整配置以 [README 收件快照步骤](../README.md#推荐复制材料后命令扫描无需迁移配置velocity) 与 [默认 config.yml](../proxy-common/src/main/resources/config.yml) 为准。
+Velocity 4.3.1 和官方 BungeeCord 2110、2111 均支持旧 AuthMe 离线档认领到 Java 微软角色（U），不支持迁移到正版角色（J）或基岩角色。启用步骤及完整配置以 [README 收件快照步骤](../README.md#推荐复制材料后命令扫描无需迁移配置velocity) 与 [默认 config.yml](../proxy-common/src/main/resources/config.yml) 为准。
 
 - `AuthService` 已将 `core` AuthMe 只读验证器接入当前私有 Limbo 的 `/ka claim authme <旧名字> <旧密码>`；`/kyokouauth` 与命名空间形式同样受保护，另有 `claim status` / `claim cancel`。只接受新且空闲非正版名的临时 Java U，在 `OFFER` / `WAITING_OLD` 可提交，不能使用普通管理 dispatcher 或借助管理权限代交。
 - 正常迁移无需任何 `migration.*` 配置：把 `AuthMe/config.yml`、SQLite 文件（如适用）与实际 `playerdata` 复制到 `migration/inbox/`，`migration scan` 用独立单线程读取一次来源并写未启用本地快照；`progress/cancel` 查看/取消，`issues [page]` 分页报告，一次性 `confirm <token>` 在预检完成起 5 分钟内核对本地快照/历史记录/目标并持久启用。确认即管理员对停写、同源备份的明确确认，不会自动锁库。候选按 256 条短事务登记，全部完成后才原子切换快照；失败不替换旧启用状态，已写候选可重扫幂等续做。正常批次固定 `authme-inbox`，且必须命中当前快照名字/UUID 允许清单及唯一 `AVAILABLE` 记录；单条手动登记不能绕过允许清单。
 - `AuthMeLegacyVerifier.exportSnapshot` 单旧源连接、有界流式读取、256 行批写、单 SQLite 导出事务、取消/超限清理及 LOWER 名字索引。MySQL/MariaDB 直接读取复制配置中的凭据，不强制重填；可在复制件中改为专用 SELECT 账号，旧账号权限不会因只读事务自动降级。导出只保留受支持哈希，不保留源 SQL 凭据/TOTP 秘密/明文密码。确认、认领与重启只使用本地快照，`migration disable` 持久停止新认领而不撤销既有归属。旧静态 `migration.*` 与人工核验命令仅留作显式异常/直接来源入口。
 - `AuthMeConfigReader` 必须读取显式 `DataSource.backend`，没有类型不猜 SQLite；配置为 MYSQL/MARIADB 时残留 .db 从不作为回退。`AuthMeSourceSelection` 在驱动准备前校验端点：本地源需每次 `--local-source` 确认，`--source-host`/`--source-port` 仅覆盖本次主机/端口；保留其余字段与强 TLS，拒绝 wildcard、歧义数字 IP 和凭据型 URL，不做 DNS/网络探测。预检/progress 的来源摘要不含账号密码/JDBC URL。
 - 来源支持 SQLite 一致性快照及 MySQL/MariaDB 只读访问；仅支持官方默认 16 位小写十六进制盐的 `$SHA$` / `SHA256`，TOTP 非空或未知哈希拒绝。远程数据库 TLS 必须校验身份，超时有界；数据库连接凭证不是玩家旧密码。没有 HTTP 认领监听、网页或证书配置，数据库 TLS 不是 HTTP 功能。
-- 运行时启用本地快照时，只有固定 **Velocity 4.3.1** 或官方 **BungeeCord 2111** 的实现校验及当前连接前置 guard 安装成功，原生适配器才通知公共 gate 标记受保护 session。新连接安装失败即拒绝；已有未保护连接不会收到认领入口，须重新连接。dedicated unsigned / 受支持 Legacy 敏感命令在常规命令事件、Brigadier 回显、后端转发和公共补全事件前被消费；签名/LastSeen 敏感格式保守断开，不剥离或改写签名。关闭模块先关闭原通道，实际关闭前 guard 继续拒绝入站。
+- 运行时启用本地快照时，只有 **Velocity 4.3.1** 或 **BungeeCord 系代理**通过必要接口检查、且当前连接前置 guard 安装成功，原生适配器才通知公共 gate 标记受保护 session。新连接安装失败即拒绝；已有未保护连接不会收到认领入口，须重新连接。dedicated unsigned / 受支持 Legacy 敏感命令在常规命令事件、Brigadier 回显、后端转发和公共补全事件前被消费；签名/LastSeen 敏感格式保守断开，不剥离或改写签名。关闭模块先关闭原通道，实际关闭前 guard 继续拒绝入站。
 - 轻量解析后进入有界 authIO：单连接一个进行中，账号 5 次/10min、来源地址 20 次/10min，本地验密并发 4；导入器单独执行，不占登录工作队列。接管的密码 CharArray 在所有退出路径清零；不记录/回显密码或哈希，错误不披露账号存在性细节。该保护不覆盖更早原始包记录器、恶意 root/替换插件、客户端历史/截屏，也不为 offline Minecraft 连接增加传输加密；不得表述为端到端或运营者绝对不可见。
 - 两证、双确认、原子提交和一次普通重连的流程不变；schema 仍为 v5，v1～v4 保持不变，来源授权以 `AUTHME_PASSWORD` 写入 `proof_method` 和审计。构造账号/微软响应与模块全绿都不等于真人账号授权验收。
 
@@ -63,7 +63,13 @@ Velocity 4.3.1 和官方 BungeeCord 2111 均支持旧 AuthMe 离线档认领到 
 ```bash
 ./gradlew :platform-velocity:test --tests '*VelocityClaimCommands*Test' :platform-bungee:testClasses :platform-bungee:shadowJar
 python tools/bungee-e2e.py network --scenario claim-authme
+python tools/bungee-e2e.py startup --bungee-build 2110 --port 0
+python tools/bungee-e2e.py startup --runtime-variant relabelled --port 0
+python tools/bungee-e2e.py startup --runtime-variant resource --port 0
+python tools/bungee-e2e.py startup --runtime-variant changed --port 25679
 ```
+
+Bungee 运行时不再按构建号或整模块指纹限定。各原生桥仍校验其使用的类型、方法、字段和真实连接状态；缺少关键接口时关闭准入。测试下载与 `--bungee-build` 参数仍固定官方制品和 SHA-256，以便重现，与产品支持范围无关。`relabelled` 仅修改构建标签，`resource` 仅修改无关资源，二者应可启动；`changed` 从测试副本移除必需的 `UserConnection.getCh` 方法，应在启动自检时拒绝，并验证不能登录后端。所有变体仅修改隔离测试副本，不修改原始缓存或现服。
 
 真实 native 测试使用仅加入 testRuntimeClasspath 的 `run-proxy/velocity.jar`，严格校验 4.3.1；全新 checkout 缺少该缓存时仅以显式 assumption 跳过 native 用例，无 JAR 的 EmbeddedChannel 基础用例仍执行。已缓存但不在运行 classpath 或未知版本不是可接受的跳过理由。
 

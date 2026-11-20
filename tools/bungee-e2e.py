@@ -1,7 +1,7 @@
-"""Fixed official Bungee 2111 isolation. All generated files remain in .narrafork/bungee-e2e.
+"""Isolated Bungee runtime regression. Generated files remain in .narrafork/bungee-e2e.
 
-prepare: download/verify the exact official distribution and API, extract its test dependencies.
-startup: load the production JAR, or prove fail-closed startup with ip_forward disabled.
+prepare: download/verify the pinned 2111 distribution and API, extract test dependencies.
+startup: load the production JAR, or test refusal with ip_forward disabled or an unknown runtime.
 network: run a test-only injected-Services bootstrap (never ships in the production JAR).
          Synthetic probes prove forwarding/failure isolation, not vanilla rendering. --client uses
          the installed credential-free original 26.3 client for READY and 12-second heartbeat.
@@ -29,6 +29,10 @@ import zipfile
 ROOT = Path(__file__).resolve().parent.parent
 BASE = ROOT / ".narrafork/bungee-e2e"
 BUNGEE_SHA256 = "1d9dbc31b57b22a37553f160ac1b61762717e9e4a6a1341f3dd27a1f6f2671fd"
+BUNGEE_BUILDS = {
+    2110: "ede03ff02417f9257e6a53be7daf2718ba9fb917f3ff8e4f9f9823a50e08942a",
+    2111: BUNGEE_SHA256,
+}
 API = "26.1-R0.1-20261105.104341-62"
 API_SHA256 = "a49ccc85acaf078c2f9cc41eac5f0f5fb614b60ae6c5995232f717c8721ffb84"
 STABLE = uuid.UUID(int=2535412345678901)
@@ -283,11 +287,54 @@ def inspect_artifact(artifact):
     return evidence
 
 
+def runtime_distribution(build):
+    jar = BASE / "deps" / f"BungeeCord-{build}.jar"
+    download(f"https://ci.md-5.net/job/BungeeCord/{build}/artifact/bootstrap/target/BungeeCord.jar", jar)
+    if hashlib.sha256(jar.read_bytes()).hexdigest() != BUNGEE_BUILDS[build]:
+        raise RuntimeError(f"Official Bungee {build} checksum mismatch")
+    return jar
+
+
+def runtime_variant(source, target, variant):
+    """Make metadata/resource-only test copies, or remove a required native method."""
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, "w") as out:
+        for entry in original.infolist():
+            data = original.read(entry)
+            if entry.filename.startswith("META-INF/libraries/bungeecord-proxy-"):
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(io.BytesIO(data)) as module, zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as patched:
+                    for name in module.namelist():
+                        content = module.read(name)
+                        if name == "META-INF/MANIFEST.MF" and variant == "relabelled":
+                            changed = content.replace(b"55e1b0b:", b"5555555:")
+                            if changed == content:
+                                raise RuntimeError("Missing original Bungee revision label in fixture")
+                            content = changed
+                        elif name == "LICENSE" and variant == "resource":
+                            content += b"\nSynthetic unrelated-resource fixture\n"
+                        elif name == "net/md_5/bungee/UserConnection.class" and variant == "changed":
+                            before = b"\x01\x00\x05getCh"
+                            after = b"\x01\x00\x05getCx"
+                            if content.count(before) != 1:
+                                raise RuntimeError("Missing unique native getCh method name in class constant pool")
+                            content = content.replace(before, after)
+                        patched.writestr(name, content)
+                data = buffer.getvalue()
+            out.writestr(entry.filename, data)
+    return target
+
+
 def setup_runtime(args, backend_port):
-    jar = prepare()
-    run = BASE / "runtime" / (args.scenario + ("-" + args.version if args.observer else ""))
+    build = getattr(args, "bungee_build", 2111)
+    variant = getattr(args, "runtime_variant", None)
+    jar = prepare() if build == 2111 else runtime_distribution(build)
+    run = BASE / "runtime" / (args.scenario + ("-" + args.version if args.observer else "") +
+                              (f"-bungee-{build}" if build != 2111 else "") +
+                              (f"-{variant}" if variant else ""))
     plugins = run / "plugins"
     plugins.mkdir(parents=True, exist_ok=True)
+    if variant:
+        jar = runtime_variant(jar, run / "BungeeCord-fixture.jar", variant)
     (run / "matrix-result.json").unlink(missing_ok=True)
     (run / "command-results.json").unlink(missing_ok=True)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -327,7 +374,7 @@ log_pings: false
 prevent_proxy_connections: false
 listeners:
 - host: 127.0.0.1:{args.port}
-  motd: Isolated Bungee 2111 authentication test
+  motd: Isolated Bungee authentication test
   max_players: 20
   priorities:
   - backend
@@ -358,12 +405,18 @@ def runtime(args, backend_port, engine_port=None):
         process = subprocess.Popen(command, cwd=run, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, text=True)
         try:
             deadline = time.monotonic() + 90
+            expect_refusal = args.scenario == "unavailable" or getattr(args, "runtime_variant", None) == "changed"
             while True:
                 text = logpath.read_text(encoding="utf-8", errors="replace")
-                marker = "all logins remain refused" if args.scenario == "unavailable" else (
+                marker = "all logins remain refused" if expect_refusal else (
                     "BUNGEE_E2E_STARTED" if args.command == "network" else "KyokouAuth-Bungee accepting connections")
                 if marker in text and "Listening on" in text:
                     break
+                refused = "all logins remain refused"
+                if not expect_refusal and refused in text and "Listening on" in text:
+                    raise RuntimeError("KyokouAuth refused startup: " + str(logpath.relative_to(ROOT)))
+                if expect_refusal and "KyokouAuth-Bungee accepting connections" in text:
+                    raise RuntimeError("KyokouAuth unexpectedly accepted startup: " + str(logpath.relative_to(ROOT)))
                 if process.poll() is not None or "BUNGEE_E2E_START_FAILED" in text:
                     raise RuntimeError("Bungee startup failed: " + str(logpath.relative_to(ROOT)))
                 if time.monotonic() > deadline:
@@ -524,6 +577,9 @@ def main():
     parser.add_argument("command", choices=["prepare", "startup", "network"])
     parser.add_argument("--scenario", default="production", choices=["production", "unavailable", "held", "trusted", "first-bind", "stable", "server", "commands", "tcp-refused", "login-kick", "join-timeout", "claim-authme"])
     parser.add_argument("--port", type=int, default=25679)
+    parser.add_argument("--bungee-build", type=int, choices=sorted(BUNGEE_BUILDS), default=2111)
+    parser.add_argument("--runtime-variant", choices=("relabelled", "resource", "changed"),
+                        help="Test-only copy: metadata, unrelated resource, or a missing native API")
     parser.add_argument("--jdk", type=Path, default=Path("C:/Program Files/Zulu/zulu-25"))
     parser.add_argument("--minecraft", type=Path, default=Path(os.environ.get("APPDATA", ".")) / ".minecraft")
     parser.add_argument("--client", action="store_true")
@@ -534,6 +590,10 @@ def main():
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(); print("PASS fixed Bungee 2111 / 55e1b0b and pinned API prepared"); return
+    if args.runtime_variant and (args.command != "startup" or args.bungee_build != 2111 or args.scenario != "production"):
+        parser.error("--runtime-variant requires startup on the default 2111 production fixture")
+    if args.runtime_variant == "changed" and args.port == 0:
+        parser.error("the changed runtime fixture requires a probe port")
     if args.command == "network" and args.scenario in ("production", "unavailable"):
         parser.error("network requires an injected-Services scenario")
     if args.scenario == "commands" and not args.client:
@@ -550,10 +610,18 @@ def main():
         override = 9 if args.scenario == "tcp-refused" else engine.port if engine else None
         with runtime(args, backend.port, override) as run:
             if args.command == "startup":
-                if args.scenario == "unavailable":
+                if args.scenario == "unavailable" or args.runtime_variant == "changed":
                     if probe(args.port) != "rejected":
                         raise RuntimeError("Failed startup did not reject LOGIN")
-                result = "production startup/shutdown" if args.scenario != "unavailable" else "ip_forward failure remains closed"
+                if args.runtime_variant == "changed":
+                    text = (run / "console.log").read_text(encoding="utf-8", errors="replace")
+                    if "Unsupported Bungee native contract" not in text or "getCh" not in text:
+                        raise RuntimeError("Expected the missing native getCh API to be rejected at startup")
+                    result = "missing native API remains closed"
+                elif args.scenario == "unavailable":
+                    result = "ip_forward failure remains closed"
+                else:
+                    result = "production startup/shutdown"
             elif args.scenario == 'claim-authme':
                 result = profile_claim(args, run, backend)
             elif args.client:
