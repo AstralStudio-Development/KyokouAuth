@@ -35,6 +35,28 @@ class ProfileClaimFlowTest {
     lateinit var directory: Path
 
     @Test
+    fun `reserved native alias keeps the original claim name and cannot substitute another name`() {
+        val original = GameName.parseOrThrow("NewSteve")
+        val id = moe.ryuu.kyokouauth.core.auth.AuthCoordinator.provisionalUuid(original)
+        val alias = moe.ryuu.kyokouauth.limbo.VerificationProfileName.of(id)
+        for (claimed in listOf(original, GameName.parseOrThrow("OtherName"))) {
+            val h = Harness()
+            val session = UUID.randomUUID()
+            val player = FakePlayer(session, id, alias)
+            val limbo = FakeLimboPlayer(session, id, alias)
+            h.flow.open(player, limbo, claimed)
+            if (claimed == original) {
+                assertEquals(ProfileClaimFlow.Stage.OFFER, h.flow.pending().single().stage)
+                assertTrue(limbo.menus.isNotEmpty())
+                assertTrue(h.failures.isEmpty())
+            } else {
+                assertTrue(h.flow.pending().isEmpty())
+                assertTrue(h.failures.isNotEmpty())
+            }
+        }
+    }
+
+    @Test
     fun `private password proof starts from the offer and still requires source and Xbox confirmations`() {
         val h = Harness()
         val connection = h.connection("NewSteve")

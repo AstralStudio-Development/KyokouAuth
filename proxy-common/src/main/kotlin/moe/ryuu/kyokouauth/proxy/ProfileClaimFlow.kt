@@ -918,7 +918,9 @@ class ProfileClaimFlow(
             limbo.connectionId == sessionId &&
             player.uniqueId == limbo.uuid &&
             player.username == limbo.name &&
-            GameName.parse(player.username)?.key == loginName.key
+            (GameName.parse(player.username)?.key == loginName.key ||
+                player.uniqueId == moe.ryuu.kyokouauth.core.auth.AuthCoordinator.provisionalUuid(loginName) &&
+                moe.ryuu.kyokouauth.limbo.VerificationProfileName.matches(player.uniqueId, player.username))
 
     /** Must hold `synchronized(registryLock)`. Collects entries already past their deadline or closed. */
     private fun purgeExpiredLocked(now: Long, collectedExpired: MutableList<Entry>) {

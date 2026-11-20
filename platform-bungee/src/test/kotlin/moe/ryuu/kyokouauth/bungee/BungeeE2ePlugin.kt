@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Test-only alternative bootstrap. Never packaged in the production plugin or enabled by config. */
 class BungeeE2ePlugin : Plugin(), Listener {
     private val scenario = System.getProperty("kyokou.e2e.scenario", "held")
-    private val stable = UUID(0L, 2535412345678901L)
+    private val stable = UUID(0L, System.getProperty("kyokou.e2e.xuid", "2535412345678901").toLong())
     private val trusted = AtomicBoolean(false)
     private val claimsScenario = scenario == "claim-authme"
     private val historical = UUID.fromString("529a5f64-5822-330d-a962-8e02fa0e0716")
@@ -61,7 +61,9 @@ class BungeeE2ePlugin : Plugin(), Listener {
         proxy.pluginManager.registerListener(this, this)
         try {
             check(proxy.config.isIpForward)
-            platform = BungeePlatform(proxy)
+            platform = BungeePlatform(proxy, BungeeViaVersion(lookup = {
+                proxy.pluginManager.getPlugin("ViaVersion")
+            }))
             authority = PrivateTicketAuthority()
             val profiles = BungeeProfileBridge(javaClass.classLoader, bedrock = { pending ->
                 platform.find(pending)?.currentBedrockProof()
@@ -136,10 +138,11 @@ class BungeeE2ePlugin : Plugin(), Listener {
                     return BoundIdentity.of(Identity.Microsoft(name, xuid, gamertag, historical), 1L)
                 }
             }
-            gate = LoginGate(platform, config, messages, services, log)
+            gate = LoginGate(platform, config, messages, services, log, isolateProvisionalNames = true)
             privateClaims = BungeeClaimCommands(javaClass.classLoader, gate::onPrivateClaim)
             adapter = BungeeLoginGate(this, platform, profiles, BungeeTickets(platform, profiles, authority), gate,
-                log, services::submit, services::schedule, { accepting }, privateClaims = privateClaims, bedrock = { player ->
+                log, services::submit, services::schedule, { accepting }, privateClaims = privateClaims,
+                prepareTemporary = { player, profile -> profiles.prepareVerification(player.pending, profile) }, bedrock = { player ->
                     floodgate.probe(player).also { result ->
                         if (bedrockScenario) {
                             logger.info("BUNGEE_E2E_BEDROCK_SAMPLE result=${result.javaClass.simpleName}")
@@ -203,6 +206,8 @@ class BungeeE2ePlugin : Plugin(), Listener {
             limbo!!.startAll().forEach { (protocol, address) ->
                 platform.registerEngine(protocol, if (protocol == 777 && overridePort != null) InetSocketAddress("127.0.0.1", overridePort) else address)
             }
+            platform.installPrivateProtocols()
+            proveViaPrivateProtocols()
             for (protocol in 767..777) {
                 val name = "kyokouauth-limbo-$protocol"
                 val common = platform.getServer(name).orElseThrow()
@@ -222,6 +227,24 @@ class BungeeE2ePlugin : Plugin(), Listener {
         } catch (failure: Exception) { logger.log(java.util.logging.Level.SEVERE, "BUNGEE_E2E_START_FAILED", failure) }
     }
 
+    private fun proveViaPrivateProtocols() {
+        val plugin = proxy.pluginManager.getPlugin("ViaVersion") ?: return
+        val via = Class.forName("com.viaversion.viaversion.api.Via", true, plugin.javaClass.classLoader)
+        val platform = via.getMethod("proxyPlatform").invoke(null)
+        fun call(receiver: Any, method: String): Any = receiver.javaClass.getMethod(method).invoke(receiver)
+        val detector = call(platform, "protocolDetectorService")
+        val config = call(call(platform, "getBungeeConfig"), "getBungeeServerProtocols") as Map<*, *>
+        val uncache = detector.javaClass.getMethod("uncacheProtocolVersion", String::class.java)
+        val version = detector.javaClass.getMethod("serverProtocolVersion", String::class.java)
+        // ViaBungee periodically evicts private names. Correctness must survive without that cache.
+        for (protocol in 767..777) {
+            val name = "kyokouauth-limbo-$protocol"
+            uncache.invoke(detector, name)
+            check((call(version.invoke(detector, name), "getVersion") as Number).toInt() == protocol)
+            check(config[name] == protocol && proxy.getServerInfo(name) == null)
+        }
+        logger.info("BUNGEE_E2E_VIA_PRIVATE_PROTOCOLS private=11 cache=evicted default=${config["default"]}")
+    }
     private fun javaOnly(operation: String, write: Boolean = false) {
         if (write) javaWrites.incrementAndGet()
         if (bedrockScenario) {
@@ -243,6 +266,16 @@ class BungeeE2ePlugin : Plugin(), Listener {
     fun observePrivateCompletion(event: TabCompleteEvent) {
         if (claimsScenario && PrivateClaimCommands.isSensitive(event.cursor)) logger.severe("BUNGEE_E2E_PRIVATE_LEAK_TAB")
     }
+    fun isTemporaryConnection(connection: net.md_5.bungee.api.connection.PendingConnection): Boolean {
+        if (!accepting || !::platform.isInitialized || !::gate.isInitialized) return true
+        return platform.find(connection)?.let(gate::isTemporaryConnection) ?: true
+    }
+
+    fun isAuthenticated(player: net.md_5.bungee.api.connection.ProxiedPlayer): Boolean {
+        if (!accepting || !::platform.isInitialized || !::gate.isInitialized) return false
+        return platform.find(player)?.let(gate::isAuthenticated) == true
+    }
+
     override fun onDisable() {
         accepting = false
         commandProbe?.close(); commandProbe = null

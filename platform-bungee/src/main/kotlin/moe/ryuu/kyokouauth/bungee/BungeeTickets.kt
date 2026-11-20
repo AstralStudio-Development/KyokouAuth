@@ -68,4 +68,15 @@ internal class BungeeTickets(
         authority.revoke(player.sessionId)
         player.engineAttempt = null
     }
+
+    companion object {
+        /** Native LoginSuccess can share the pending profile array. Replace only the packet's view. */
+        fun stripClientProperties(packet: net.md_5.bungee.protocol.packet.LoginSuccess) {
+            val properties = packet.properties ?: return
+            val visible = properties.filterNot {
+                it.name == "kyokouauth:private-ticket" || it.name == "kyokouauth:connection-id"
+            }
+            if (visible.size != properties.size) packet.properties = visible.toTypedArray()
+        }
+    }
 }

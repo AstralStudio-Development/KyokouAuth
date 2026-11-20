@@ -78,6 +78,21 @@ internal class BungeeProfileBridge(
         }
     }
 
+    private val verificationBridge by lazy { BungeeRoleLoginBridge(loader) }
+
+    /** First-bind identity changes happen before native Player/permission loading, never at LoginEvent. */
+    fun prepareVerification(pending: PendingConnection, profile: GameProfile) {
+        actual(pending)
+        val oldName = pending.name
+        val current = getter.invoke(pending)
+        if (current != null) {
+            check(identity(pending, current) == (profile.id to oldName)) { "Existing offline profile changed before isolation" }
+        }
+        verificationBridge.prepareVerification(pending, profile.id, profile.name)
+        field.set(pending, resultConstructor.newInstance(profile.id.toString().replace("-", ""), profile.name,
+            nativeProperties(profile.properties)))
+    }
+
     // Loaded only by the explicitly enabled role branch, never by default Java admission.
     private val rolePhase by lazy {
         val state = handler.getDeclaredField("thisState")

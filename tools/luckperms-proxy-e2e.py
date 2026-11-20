@@ -1,10 +1,11 @@
-"""Check first bind, rename, and old-name reuse with real Velocity and pinned LuckPerms.
+"""Check first bind, rename, and old-name reuse with real Velocity/Bungee and pinned LuckPerms.
 
 Uses test-only synthetic admission Services; never opens a launcher account, production
 configuration, or existing LP database. Five loopback stages share one fresh SQLite LP
 store. Native 1.21.1 login success and stored permissions are not real-account or GUI proof.
 """
 import argparse
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import io
@@ -16,12 +17,18 @@ import sqlite3
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
+import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = ROOT / '.narrafork/luckperms-proxy-e2e'
-LP_SHA256 = '9234e4573dc53dce3e2acbfe820538ce57b4ae633a52f3ac7f08545dee486b31'
+LP_SHA256 = {
+    'velocity': '9234e4573dc53dce3e2acbfe820538ce57b4ae633a52f3ac7f08545dee486b31',
+    'bungee': '812d3260b54d992353aa7a6c1851680d770e77271b41d9d4b670108f9e1876a3',
+}
+BUNGEE_SHA256 = '1d9dbc31b57b22a37553f160ac1b61762717e9e4a6a1341f3dd27a1f6f2671fd'
 LIB_SHA256 = {
     'adventure-4.21.1.jar': '910265674814c5d4d1464b244f8dea8b2da4a6df6ceb9e0bbc1d27aa808fe981',
     'asm-9.8.jar': '876eab6a83daecad5ca67eb9fcabb063c97b5aeb8cf1fca7a989ecde17522051',
@@ -98,10 +105,138 @@ def login(port, name):
             return native_uuid, native_name.decode('utf-8')
 
 
-def free_port():
-    with socket.socket() as listener:
-        listener.bind(('127.0.0.1', 0))
-        return listener.getsockname()[1]
+class LoginBackend:
+    """Bungee needs backend login success before frontend success; echo only observed identity.
+
+    This bounded 767 fixture never enters PLAY, selects an expected UUID, or writes LP state.
+    """
+    def __init__(self, port):
+        self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(('127.0.0.1', port))
+        self.listener.listen()
+        self.listener.settimeout(0.2)
+        self.stopped = threading.Event()
+        self.events = []
+        self.connections = []
+        self.workers = []
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def packet(incoming):
+        size = read_varint(incoming)
+        if size > 1 << 21:
+            raise ValueError('Oversized backend packet')
+        data = incoming.read(size)
+        if len(data) != size:
+            raise EOFError('Incomplete backend packet')
+        return io.BytesIO(data)
+
+    @staticmethod
+    def string(incoming):
+        size = read_varint(incoming)
+        if size > 32767:
+            raise ValueError('Oversized backend string')
+        value = incoming.read(size)
+        if len(value) != size:
+            raise EOFError('Incomplete backend string')
+        return value.decode('utf-8')
+
+    def run(self):
+        while not self.stopped.is_set():
+            try:
+                connection, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            self.connections.append(connection)
+            worker = threading.Thread(target=self.handle, args=(connection,), daemon=True)
+            self.workers.append(worker)
+            worker.start()
+
+    def handle(self, connection):
+        connection.settimeout(10)
+        try:
+            with connection.makefile('rb') as incoming:
+                handshake = self.packet(incoming)
+                if read_varint(handshake) != 0 or read_varint(handshake) != 767:
+                    raise ValueError('Backend fixture supports only native 767 handshakes')
+                forwarded = self.string(handshake).split('\x00')
+                handshake.read(2)
+                if read_varint(handshake) != 2 or len(forwarded) < 3:
+                    raise ValueError('Expected legacy-forwarded login handshake')
+                hello = self.packet(incoming)
+                if read_varint(hello) != 0:
+                    raise ValueError('Expected backend HELLO')
+                name = self.string(hello)
+                actual_uuid = uuid.UUID(bytes=hello.read(16))
+                forwarded_uuid = uuid.UUID(forwarded[2])
+                if actual_uuid != forwarded_uuid:
+                    raise ValueError('Backend HELLO UUID differs from actual proxy forwarding')
+                properties = json.loads(forwarded[3]) if len(forwarded) >= 4 else []
+                event = {'name': name, 'loginUuid': str(actual_uuid), 'forwardedUuid': str(forwarded_uuid),
+                         'propertyNames': [entry['name'] for entry in properties]}
+                self.events.append(event)
+                # UUID, name, empty property array, strict-error-handling (protocol 767).
+                payload = varint(2) + actual_uuid.bytes + text(name) + varint(0) + b'\x01'
+                connection.sendall(varint(len(payload)) + payload)
+                while not self.stopped.is_set() and incoming.read(1):
+                    pass
+        except (EOFError, OSError, ValueError) as failure:
+            if not self.stopped.is_set():
+                self.events.append({'error': f'{type(failure).__name__}: {failure}'})
+        finally:
+            connection.close()
+
+    def close(self):
+        self.stopped.set()
+        self.listener.close()
+        for connection in self.connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        self.thread.join(timeout=1)
+        for worker in self.workers:
+            worker.join(timeout=1)
+
+
+@contextmanager
+def backend_login_fixture(platform, port):
+    backend = LoginBackend(port) if platform == 'bungee' else None
+    try:
+        yield backend
+    finally:
+        if backend is not None:
+            backend.close()
+
+
+def free_port(excluded=()):
+    for _ in range(128):
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        if port not in excluded:
+            return port
+    raise RuntimeError('Could not allocate a fresh loopback port without reusing a previous stage')
+
+
+def wait_for_startup(process, console, start_marker, listening_marker, timeout=100):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        content = console.read_text(encoding='utf-8', errors='replace') if console.exists() else ''
+        lowered = content.lower()
+        if any(marker in lowered for marker in ('could not bind', 'bindexception', 'address already in use')):
+            raise RuntimeError(f'Proxy listener bind failed; inspect {console.relative_to(ROOT)}')
+        if start_marker in content and listening_marker in content:
+            return
+        if process.poll() is not None:
+            raise RuntimeError(f'Proxy exited {process.returncode}; inspect {console.relative_to(ROOT)}')
+        time.sleep(0.1)
+    raise TimeoutError(f'Proxy did not reach startup/listener readiness; inspect {console.relative_to(ROOT)}')
 
 
 def stop(process):
@@ -128,10 +263,10 @@ def database_rows(database):
     return players, sentinels
 
 
-def grant_sentinel(process, database, timeout=20):
+def grant_sentinel(process, database, timeout=20, command_prefix='lpv'):
     if process.stdin is None or process.poll() is not None:
         raise RuntimeError('Owned fixture console is unavailable')
-    process.stdin.write(f'lpv user {STABLE} permission set {SENTINEL} true\n')
+    process.stdin.write(f'{command_prefix} user {STABLE} permission set {SENTINEL} true\n')
     process.stdin.flush()
     deadline = time.monotonic() + timeout
     observed = []
@@ -148,37 +283,57 @@ def grant_sentinel(process, database, timeout=20):
     raise TimeoutError(f'LP console command did not persist the A-only sentinel: {observed}')
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--jar', type=Path, default=ROOT / 'platform-velocity/build/libs/KyokouAuth-Velocity-0.1.0-SNAPSHOT.jar')
-    parser.add_argument('--jdk', type=Path, default=Path('C:/Program Files/Zulu/zulu-25'))
-    args = parser.parse_args()
-    dependency = BASE / 'deps/LuckPerms-Velocity-5.5.91.jar'
-    if hashlib.sha256(dependency.read_bytes()).hexdigest() != LP_SHA256:
-        raise RuntimeError('Official LuckPerms Velocity 5.5.91 checksum mismatch')
-    libraries = BASE / 'deps/luckperms-libs'
-    for filename, expected in LIB_SHA256.items():
-        if hashlib.sha256((libraries / filename).read_bytes()).hexdigest() != expected:
-            raise RuntimeError(f'Pinned LuckPerms runtime dependency checksum mismatch: {filename}')
-    spec = importlib.util.spec_from_file_location('velocity_fixture', ROOT / 'tools/velocity-e2e.py')
-    fixture = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(fixture)
-    fixture.BASE.mkdir(parents=True, exist_ok=True)
-    artifact = fixture.test_jar(args.jar, required_plugins=('luckperms',))
-    (BASE / 'runtime').mkdir(parents=True, exist_ok=True)
-    run = Path(tempfile.mkdtemp(prefix='native-', dir=BASE / 'runtime'))
-    plugins = run / 'plugins'
-    lp = plugins / 'luckperms'
-    lp.mkdir(parents=True)
-    shutil.copyfile(artifact, plugins / 'gate-test.jar')
-    shutil.copyfile(dependency, plugins / 'LuckPerms.jar')
-    (lp / 'libs').mkdir()
-    for filename in LIB_SHA256:
-        shutil.copyfile(libraries / filename, lp / 'libs' / filename)
-    (lp / 'config.yml').write_text('storage-method: sqlite\nwatch-files: false\n', encoding='utf-8')
-    port = free_port()
-    backend = free_port()
-    (run / 'velocity.toml').write_text(f'''config-version = "2.9"
+def bungee_test_jar(artifact, target):
+    classes = ROOT / 'platform-bungee/build/classes/kotlin/test/moe/ryuu/kyokouauth/bungee'
+    entries = sorted(classes.glob('BungeeE2e*.class'))
+    bootstrap = classes / 'BungeeE2ePlugin.class'
+    if not bootstrap.is_file() or not entries:
+        raise RuntimeError('Build :platform-bungee:testClasses first')
+    if b'kyokou.e2e.xuid' not in bootstrap.read_bytes():
+        raise RuntimeError('Rebuild BungeeE2ePlugin with synthetic XUID selection before this five-stage test')
+    with zipfile.ZipFile(artifact) as source:
+        if 'bungee.yml' not in source.namelist() or 'moe/ryuu/kyokouauth/bungee/KyokouAuthBungee.class' not in source.namelist():
+            raise RuntimeError('Bungee regression requires the production Bungee shadowJar, not a Velocity/test JAR')
+        if any('/BungeeE2e' in name for name in source.namelist()):
+            raise RuntimeError('Production Bungee artifact contains a test bootstrap')
+        with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as output:
+            for entry in source.infolist():
+                if entry.filename != 'bungee.yml':
+                    output.writestr(entry, source.read(entry))
+            for path in entries:
+                output.write(path, 'moe/ryuu/kyokouauth/bungee/' + path.name)
+            output.writestr('bungee.yml', 'name: KyokouAuth\nversion: e2e\n'
+                            'main: moe.ryuu.kyokouauth.bungee.BungeeE2ePlugin\ndepends: [LuckPerms]\n')
+    return target
+
+
+def configure_proxy(run, platform, port, backend):
+    if platform == 'bungee':
+        (run / 'config.yml').write_text(f'''online_mode: false
+ip_forward: true
+network_compression_threshold: -1
+connection_throttle: -1
+connection_throttle_limit: 100
+timeout: 15000
+server_connect_timeout: 1000
+log_pings: false
+prevent_proxy_connections: false
+listeners:
+- host: 127.0.0.1:{port}
+  motd: Isolated LuckPerms Bungee identity test
+  max_players: 20
+  priorities: [backend]
+  force_default_server: true
+  forced_hosts: {{}}
+  query_enabled: false
+servers:
+  backend:
+    address: 127.0.0.1:{backend}
+    motd: Login-only recording backend
+    restricted: false
+''', encoding='utf-8')
+    else:
+        (run / 'velocity.toml').write_text(f'''config-version = "2.9"
 bind = "127.0.0.1:{port}"
 online-mode = false
 force-key-authentication = false
@@ -195,7 +350,50 @@ try = ["backend"]
 login-ratelimit = 0
 compression-threshold = -1
 ''', encoding='utf-8')
-    (run / 'forwarding.secret').write_text('isolated-synthetic-forwarding-secret', encoding='utf-8')
+        (run / 'forwarding.secret').write_text('isolated-synthetic-forwarding-secret', encoding='utf-8')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--platform', choices=('velocity', 'bungee'), default='velocity')
+    parser.add_argument('--jar', type=Path, help='Production shadowJar for the selected platform')
+    parser.add_argument('--jdk', type=Path, default=Path('C:/Program Files/Zulu/zulu-25'))
+    args = parser.parse_args()
+    platform_name = 'Bungee' if args.platform == 'bungee' else 'Velocity'
+    if args.jar is None:
+        args.jar = ROOT / f'platform-{args.platform}/build/libs/KyokouAuth-{platform_name}-0.1.0-SNAPSHOT.jar'
+    dependency = BASE / f'deps/LuckPerms-{platform_name}-5.5.91.jar'
+    if hashlib.sha256(dependency.read_bytes()).hexdigest() != LP_SHA256[args.platform]:
+        raise RuntimeError(f'Official LuckPerms {platform_name} 5.5.91 checksum mismatch')
+    proxy = ROOT / ('.narrafork/bungee-e2e/deps/BungeeCord-2111.jar' if args.platform == 'bungee' else 'run-proxy/velocity.jar')
+    if args.platform == 'bungee' and hashlib.sha256(proxy.read_bytes()).hexdigest() != BUNGEE_SHA256:
+        raise RuntimeError('Official BungeeCord 2111 checksum mismatch')
+    command_prefix = 'lpb' if args.platform == 'bungee' else 'lpv'
+    start_marker = 'BUNGEE_E2E_STARTED' if args.platform == 'bungee' else 'VELOCITY_E2E_STARTED'
+    listening_marker = 'Listening on' if args.platform == 'bungee' else 'Done ('
+    libraries = BASE / 'deps/luckperms-libs'
+    for filename, expected in LIB_SHA256.items():
+        if hashlib.sha256((libraries / filename).read_bytes()).hexdigest() != expected:
+            raise RuntimeError(f'Pinned LuckPerms runtime dependency checksum mismatch: {filename}')
+    spec = importlib.util.spec_from_file_location('velocity_fixture', ROOT / 'tools/velocity-e2e.py')
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    (BASE / 'runtime').mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix=f'{args.platform}-native-', dir=BASE / 'runtime'))
+    plugins = run / 'plugins'
+    lp = plugins / ('LuckPerms' if args.platform == 'bungee' else 'luckperms')
+    lp.mkdir(parents=True)
+    if args.platform == 'bungee':
+        artifact = bungee_test_jar(args.jar, plugins / 'gate-test.jar')
+    else:
+        fixture.BASE.mkdir(parents=True, exist_ok=True)
+        artifact = fixture.test_jar(args.jar, required_plugins=('luckperms',))
+        shutil.copyfile(artifact, plugins / 'gate-test.jar')
+    shutil.copyfile(dependency, plugins / 'LuckPerms.jar')
+    (lp / 'libs').mkdir()
+    for filename in LIB_SHA256:
+        shutil.copyfile(libraries / filename, lp / 'libs' / filename)
+    (lp / 'config.yml').write_text('storage-method: sqlite\nwatch-files: false\n', encoding='utf-8')
     database = lp / 'luckperms-sqlite.db'
     provisional = str(uuid.UUID(bytes=hashlib.md5(('OfflinePlayer:' + NAME).encode()).digest(), version=3))
     stages = (
@@ -206,6 +404,15 @@ compression-threshold = -1
         ('b-stable-old', 'trusted', NAME, XUID_B, STABLE_B),
     )
     evidence = {
+        'platform': args.platform,
+        'passed': False,
+        'protocol': 767,
+        'proxyJar': str(proxy.relative_to(ROOT)),
+        'proxySha256': hashlib.sha256(proxy.read_bytes()).hexdigest(),
+        'productionArtifactSha256': hashlib.sha256(args.jar.read_bytes()).hexdigest(),
+        'fixtureArtifactSha256': hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        'luckPermsSha256': LP_SHA256[args.platform],
+        'luckPermsConsoleCommand': command_prefix,
         'syntheticProofs': True,
         'proofScope': 'Test-only admission/XUID Services; native 1.21.1 LoginSuccess, real LP console '
                       'command and read-only SQLite observations. No real Microsoft/Mojang account '
@@ -219,25 +426,39 @@ compression-threshold = -1
     evidence_file = run / 'evidence.json'
     evidence_file.write_text(json.dumps(evidence, indent=2), encoding='utf-8')
     print('RUNTIME', run.relative_to(ROOT), flush=True)
+    used_ports = set()
     for label, scenario, name, xuid, expected in stages:
+        port = free_port(used_ports)
+        used_ports.add(port)
+        backend = free_port(used_ports)
+        used_ports.add(backend)
+        configure_proxy(run, args.platform, port, backend)
         log = run / (label + '.log')
         command = [str(args.jdk / 'bin/java.exe'), '-Xms64M', '-Xmx256M', '-XX:ActiveProcessorCount=2',
                    '-Dterminal.jline=false', '-Dkyokou.e2e.scenario=' + scenario,
                    '-Dkyokou.e2e.xuid=' + str(xuid),
-                   '-jar', str(ROOT / 'run-proxy/velocity.jar')]
-        with log.open('w', encoding='utf-8') as output:
+                   '-jar', str(proxy)]
+        with log.open('w', encoding='utf-8') as output, backend_login_fixture(args.platform, backend) as native_backend:
             process = subprocess.Popen(command, cwd=run, stdin=subprocess.PIPE, stdout=output,
                                        stderr=subprocess.STDOUT, text=True, encoding='utf-8')
             try:
-                fixture.wait_for(process, log, 'VELOCITY_E2E_STARTED', timeout=100)
-                fixture.wait_for(process, log, 'Done (', timeout=30)
+                wait_for_startup(process, log, start_marker, listening_marker)
                 actual, native_name = login(port, name)
                 if label == 'a-stable-old':
                     evidence['sentinelAssignment'] = {
                         'stage': label,
-                        'via': 'owned isolated proxy console: lpv user <A UUID> permission set <sentinel> true',
-                        'readOnlySqliteConfirmed': grant_sentinel(process, database),
+                        'via': f'owned isolated proxy console: {command_prefix} user <A UUID> permission set <sentinel> true',
+                        'readOnlySqliteConfirmed': grant_sentinel(process, database, command_prefix=command_prefix),
                     }
+            except Exception as failure:
+                evidence['failedStage'] = label
+                evidence['failedStagePorts'] = {'frontend': port, 'backend': backend}
+                evidence['failure'] = f'{type(failure).__name__}: {failure}'
+                if native_backend is not None:
+                    evidence['failedStageBackendLogins'] = list(native_backend.events)
+                evidence_file.write_text(json.dumps(evidence, indent=2), encoding='utf-8')
+                print('EVIDENCE', evidence_file.relative_to(ROOT), flush=True)
+                raise
             finally:
                 stop(process)
         if process.returncode != 0:
@@ -245,8 +466,10 @@ compression-threshold = -1
         rows, sentinels = database_rows(database)
         content = log.read_text(encoding='utf-8', errors='replace')
         stage = {'stage': label, 'scenario': scenario, 'requestedName': name, 'syntheticXuid': str(xuid),
+                 'ports': {'frontend': port, 'backend': backend},
                  'nativeUuid': actual, 'nativeName': native_name, 'expectedUuid': expected,
                  'players': rows, 'sentinelPermissions': sentinels,
+                 'backendLogins': list(native_backend.events) if native_backend is not None else [],
                  'uuidMismatchWarning': 'but this data is stored under a different UUID' in content}
         evidence['stages'].append(stage)
         evidence_file.write_text(json.dumps(evidence, indent=2), encoding='utf-8')
@@ -255,6 +478,7 @@ compression-threshold = -1
     real_names = {NAME.lower(), RENAMED_NAME.lower()}
     final_players = dict(final['players'])
     checks = {
+        'freshFrontendPorts': len({stage['ports']['frontend'] for stage in evidence['stages']}) == len(stages),
         'nativeProfiles': all(stage['nativeUuid'] == stage['expectedUuid'] and
                               (stage['scenario'] != 'trusted' or stage['nativeName'] == stage['requestedName'])
                               for stage in evidence['stages']),
@@ -275,6 +499,12 @@ compression-threshold = -1
         'allStagesWithoutUuidMismatchWarning': not any(stage['uuidMismatchWarning']
                                                        for stage in evidence['stages']),
     }
+    if args.platform == 'bungee':
+        checks['trustedBackendEchoedActualProfiles'] = all(
+            any(event.get('name') == stage['nativeName'] and
+                event.get('loginUuid') == event.get('forwardedUuid') == stage['nativeUuid']
+                for event in stage['backendLogins'])
+            for stage in evidence['stages'] if stage['scenario'] == 'trusted')
     evidence['checks'] = checks
     evidence['passed'] = all(checks.values())
     evidence_file.write_text(json.dumps(evidence, indent=2), encoding='utf-8')

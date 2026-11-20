@@ -62,7 +62,9 @@ class KyokouAuthBungee : Plugin(), Listener {
             val messages = MessageCatalogue(config.locale, File(dataFolder, "messages")).also { it.load() }
             // No role-specific native signature/field access is initialized by default Java-only installs.
             val roleBridge = if (config.rolesEnabled) BungeeRoleLoginBridge(javaClass.classLoader) else null
-            val platform = BungeePlatform(proxy).also { this.platform = it }
+            val platform = BungeePlatform(proxy, BungeeViaVersion(lookup = {
+                proxy.pluginManager.getPlugin("ViaVersion")
+            })).also { this.platform = it }
             val profiles = BungeeProfileBridge(javaClass.classLoader, bedrock = { pending ->
                 platform.find(pending)?.currentBedrockProof()
             }, role = { pending -> platform.find(pending)?.currentRoleProfile() })
@@ -73,7 +75,7 @@ class KyokouAuthBungee : Plugin(), Listener {
             }.also { roleSkinSource = it } else null
             val skins = RoleSkinService { skinSource?.provider() }.also { roleSkins = it }
             val auth = AuthService(config, log, skins, supportsProfileClaims = true).also { this.auth = it }
-            val gate = LoginGate(platform, config, messages, auth, log).also { this.gate = it }
+            val gate = LoginGate(platform, config, messages, auth, log, isolateProvisionalNames = true).also { this.gate = it }
             val privateClaims = BungeeClaimCommands(javaClass.classLoader, gate::onPrivateClaim).also { this.privateClaims = it }
             val adapter = BungeeLoginGate(this, platform, profiles, BungeeTickets(platform, profiles, authority), gate, log,
                 submit = auth::execute, schedule = auth::schedule, accepting = { accepting },
@@ -81,6 +83,7 @@ class KyokouAuthBungee : Plugin(), Listener {
                 bedrock = floodgate::probe,
                 rolesEnabled = config.rolesEnabled,
                 privateClaims = privateClaims,
+                prepareTemporary = { player, profile -> profiles.prepareVerification(player.pending, profile) },
                 prepareRole = roleBridge?.let { bridge -> { player: BungeePlayer, profile: GameProfile ->
                     val proof = player.currentBedrockProof()
                     bridge.prepare(player.pending, profile.id, profile.name, proof)
@@ -101,6 +104,11 @@ class KyokouAuthBungee : Plugin(), Listener {
             val endpoints = limbo.startAll()
             check(endpoints.keys == (767..777).toSet()) { "Incomplete private engine directory: ${endpoints.keys}" }
             endpoints.toSortedMap().forEach { (protocol, address) -> platform.registerEngine(protocol, address) }
+            try {
+                platform.installPrivateProtocols()
+            } catch (failure: Exception) {
+                log.warn("ViaVersion private engine declarations unavailable; affected private connections will be refused", failure)
+            }
             val command = KyokouAuthCommand(platform, config, messages, auth, gate) { messages.load() }
             proxy.pluginManager.registerCommand(this, BungeeCommand(platform, command))
             sweep = proxy.scheduler.schedule(this, { adapter.sweepClosed() }, 1, 1, TimeUnit.SECONDS)
@@ -130,6 +138,20 @@ class KyokouAuthBungee : Plugin(), Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     fun refuseKick(event: ServerKickEvent) {
         if (!accepting) { event.isCancelled = false; event.reason = unavailable().toBungee(); event.player.disconnect(event.reason) }
+    }
+
+    /** Read-only display integration hint; false does not prove ownership or authorize a connection. */
+    fun isTemporaryConnection(connection: net.md_5.bungee.api.connection.PendingConnection): Boolean {
+        if (!accepting) return true
+        val player = platform?.find(connection) ?: return true
+        return gate?.isTemporaryConnection(player) ?: true
+    }
+
+    /** Authentication state of this exact native player, never a public UUID/name lookup. */
+    fun isAuthenticated(player: net.md_5.bungee.api.connection.ProxiedPlayer): Boolean {
+        if (!accepting) return false
+        val connection = platform?.find(player) ?: return false
+        return gate?.isAuthenticated(connection) == true
     }
 
     override fun onDisable() { closeServices() }

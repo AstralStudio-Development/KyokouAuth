@@ -44,8 +44,9 @@ class LoginGate constructor(
     private val isolateProvisionalNames: Boolean = false,
 ) : LimboListener {
 
-    constructor(server: ProxyServer, config: ProxyConfig, messages: MessageCatalogue, auth: AuthService, logger: ProxyLog) :
-        this(server, config, messages, liveServices(auth), logger)
+    constructor(server: ProxyServer, config: ProxyConfig, messages: MessageCatalogue, auth: AuthService, logger: ProxyLog,
+                isolateProvisionalNames: Boolean = false) :
+        this(server, config, messages, liveServices(auth), logger, isolateProvisionalNames = isolateProvisionalNames)
 
     /** External work is replaceable in tests; the gate and its event ordering remain the real ones. */
     interface Services {
@@ -104,7 +105,7 @@ class LoginGate constructor(
         // real claimed name away from its placeholder UUID. '$' cannot occur in a valid Java name;
         // the alias is deterministic for the same placeholder and fits native profile/SQL limits.
         private val provisionalName = if (isolateProvisionalNames && provisional)
-            "KA\$" + (decision as AuthCoordinator.Decision.Verify).uuid.toString().replace("-", "").take(13) else null
+            moe.ryuu.kyokouauth.limbo.VerificationProfileName.of((decision as AuthCoordinator.Decision.Verify).uuid) else null
         val profileName: String get() = role?.identity?.name?.value ?: chooserName ?: provisionalName ?: name.value
     }
 
@@ -588,6 +589,21 @@ class LoginGate constructor(
         val accepted = premiumHandshakes.complete(sessionId, verified)
         premiumWatches.remove(sessionId)?.cancel(false)
         accepted
+    }
+
+    /** Presentation hint only: false is not an authentication grant. Unknown/stale connections are temporary. */
+    fun isTemporaryConnection(connection: InboundConnection): Boolean {
+        if (!ready || !connection.isActive) return true
+        val before = pending[connection.sessionId]
+        if (before != null) {
+            if (before.connection !== connection || !before.connection.isActive || expired(before)) return true
+            return before.provisional || before.roles && before.role == null
+        }
+        val live = connections[connection.sessionId] ?: return true
+        return synchronized(live) {
+            if (live.player !== connection || !current(live) || live.access == Access.CLOSED) true
+            else live.pending.provisional || live.access != Access.AUTHENTICATED && live.pending.roles && live.pending.role == null
+        }
     }
 
     /** Adapter hint only (e.g. key isolation); never an authentication or role authorization grant. */

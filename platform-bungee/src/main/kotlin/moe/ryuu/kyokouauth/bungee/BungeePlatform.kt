@@ -130,7 +130,7 @@ internal class BungeePlayer(val pending: PendingConnection, private val platform
     }
 }
 
-internal class BungeePlatform(val proxy: NativeProxy) : ProxyServer {
+internal class BungeePlatform(val proxy: NativeProxy, private val viaVersion: BungeeViaVersion? = null) : ProxyServer {
     @Volatile private var profileAccess: ProfileAccess? = null
     @Synchronized fun installProfiles(profiles: ProfileAccess) {
         check(profileAccess == null || profileAccess === profiles) { "Native profile bridge already installed" }
@@ -178,18 +178,27 @@ internal class BungeePlatform(val proxy: NativeProxy) : ProxyServer {
         val info = proxy.constructServerInfo(name, address, "KyokouAuth private verification engine", true)
         check(!hasPublicServer(name)) { "Private engine construction raced a public registration" }
         val common = RegisteredServer(name)
+        viaVersion?.register(name, protocol)
         servers[info] = common
         nativeServers[common] = info
         internalServers[common] = protocol
         privateServers[key] = common
     }
     @Synchronized fun engineProtocol(server: RegisteredServer): Int? = internalServers[server]
+    @Synchronized fun installPrivateProtocols() { viaVersion?.install() }
+    @Synchronized fun prepareEngineConnection(server: RegisteredServer) {
+        val protocol = internalServers[server] ?: return
+        check(nativeServer(server) != null) { "Private engine handle is no longer current" }
+        viaVersion?.prepare(server.name, protocol)
+    }
     @Synchronized fun unregisterEngines() {
-        internalServers.keys.toList().forEach { common ->
-            nativeServers.remove(common)?.let(servers::remove)
-            privateServers.remove(serverKey(common.name), common)
+        try { viaVersion?.close() } finally {
+            internalServers.keys.toList().forEach { common ->
+                nativeServers.remove(common)?.let(servers::remove)
+                privateServers.remove(serverKey(common.name), common)
+            }
+            internalServers.clear()
         }
-        internalServers.clear()
     }
     @Synchronized override fun getServer(name: String): Optional<RegisteredServer> {
         val key = serverKey(name)

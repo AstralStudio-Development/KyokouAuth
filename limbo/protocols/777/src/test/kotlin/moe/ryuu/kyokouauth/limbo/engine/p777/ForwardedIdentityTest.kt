@@ -13,12 +13,12 @@ internal object SignedTestProfile {
     val secret = "local-test-secret-not-production".toByteArray()
     val uuid = UUID.fromString("38aef317-7922-4c5a-aaf4-e973691f0c15")
     val connectionId = UUID.fromString("9ad924e6-cbef-473d-8a7a-871c65414f45")
-    fun payload(name: String = "OraclePlayer", binding: Boolean = true, extra: Boolean = false): ByteArray {
+    fun payload(name: String = "OraclePlayer", binding: Boolean = true, extra: Boolean = false, profileId: UUID = uuid): ByteArray {
         val buffer = Unpooled.buffer()
         val body = try {
             MinecraftTypes.writeVarInt(buffer, 1)
             MinecraftTypes.writeString(buffer, "127.0.0.1")
-            val profile = GameProfile(uuid, name).apply {
+            val profile = GameProfile(profileId, name).apply {
                 setProperties(if (binding) listOf(GameProfile.Property(ForwardedIdentity.CONNECTION_PROPERTY, connectionId.toString())) else emptyList())
             }
             MinecraftTypes.writeStaticGameProfile(buffer, profile)
@@ -35,6 +35,17 @@ class ForwardedIdentityTest {
         assertEquals(SignedTestProfile.uuid, result.profile.id)
         assertEquals(SignedTestProfile.connectionId, result.connectionId)
         assertTrue(result.profile.properties.isEmpty(), "internal connection binding must not be forwarded to clients")
+    }
+    @Test fun `a reserved alias still requires the signed matching placeholder identity`() {
+        val id = UUID.nameUUIDFromBytes("OfflinePlayer:Temporary".toByteArray())
+        val alias = moe.ryuu.kyokouauth.limbo.VerificationProfileName.of(id)
+        val result = ForwardedIdentity.verify(SignedTestProfile.payload(alias, profileId = id), SignedTestProfile.secret, alias)
+        assertEquals(id, result.profile.id)
+        assertEquals(alias, result.profile.name)
+        assertFails { ForwardedIdentity.verify(SignedTestProfile.payload(alias), SignedTestProfile.secret, alias) }
+        assertFails { ForwardedIdentity.verify(SignedTestProfile.payload(alias, profileId = id), "wrong".toByteArray(), alias) }
+        assertFails { ForwardedIdentity.verify(SignedTestProfile.payload("other\$name", profileId = id),
+            SignedTestProfile.secret, "other\$name") }
     }
     @Test fun `wrong secret and tampering are rejected`() {
         assertFailsWith<IllegalArgumentException> { ForwardedIdentity.verify(SignedTestProfile.payload(), "wrong".toByteArray(), "OraclePlayer") }

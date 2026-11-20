@@ -27,6 +27,12 @@ internal object BungeeRuntime {
             check(ChannelWrapper::class.java.getMethod("getHandle").returnType == Channel::class.java) {
                 "Unsupported Bungee ChannelWrapper.getHandle return type"
             }
+            val login = net.md_5.bungee.protocol.packet.LoginSuccess::class.java
+            val properties = Array<net.md_5.bungee.protocol.data.Property>::class.java
+            check(login.getMethod("getProperties").returnType == properties &&
+                login.getMethod("setProperties", properties).returnType == Void.TYPE) {
+                "Unsupported Bungee client login property isolation contract"
+            }
         } catch (failure: ReflectiveOperationException) {
             throw IllegalStateException("Unsupported Bungee native contract: ${failure.message}; login remains closed", failure)
         } catch (failure: LinkageError) {

@@ -117,7 +117,10 @@ internal class LimboConnection(
             Phase.HELLO -> {
                 require(packet is ServerboundHelloPacket)
                 loginName = packet.username
-                require(VALID_NAME.matches(loginName))
+                // This only admits a candidate name into the forwarding handshake. HMAC/ticket
+                // verification still binds the exact reserved alias to its trusted placeholder UUID.
+                require(VALID_NAME.matches(loginName) ||
+                    moe.ryuu.kyokouauth.limbo.VerificationProfileName.isCandidate(loginName))
                 when (val mode = forwardingMode) {
                     is ForwardingMode.VelocityModern -> {
                         require('\u0000' !in hostname) { "Legacy forwarding is forbidden in modern mode" }

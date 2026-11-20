@@ -32,6 +32,37 @@ class BungeeRoleLoginBridgeTest {
         field.set(pending, field.type.enumConstants.single { (it as Enum<*>).name == name })
     }
 
+    @Test fun `provisional alias is applied only in offline prelogin and cannot be used as a role name`() {
+        val channel = EmbeddedChannel(ChannelInboundHandlerAdapter())
+        try {
+            val pending = handler(channel)
+            val id = BungeeProfileBridge.offlineId("Temporary")
+            val alias = "KA\$" + id.toString().replace("-", "").take(13)
+            val bridge = BungeeRoleLoginBridge(loader)
+            assertFails { bridge.prepare(pending, id, alias) }
+            assertFails { bridge.prepareVerification(pending, UUID.randomUUID(), alias) }
+            bridge.prepareVerification(pending, id, alias)
+            assertEquals(alias, pending.name)
+            assertEquals(id, pending.uniqueId)
+            state(pending, "FINISHING")
+            assertFails { bridge.prepareVerification(pending, id, alias) }
+        } finally { channel.finishAndReleaseAll() }
+    }
+
+    @Test fun `provisional isolation refuses an existing signed login key without mutation`() {
+        val channel = EmbeddedChannel(ChannelInboundHandlerAdapter())
+        try {
+            val pending = handler(channel)
+            val id = BungeeProfileBridge.offlineId("Temporary")
+            val request = LoginRequest("Temporary", PlayerPublicKey(123L, byteArrayOf(1), byteArrayOf(2)), id)
+            pending.javaClass.getDeclaredField("loginRequest").apply { isAccessible = true }.set(pending, request)
+            assertFails { BungeeRoleLoginBridge(loader).prepareVerification(pending, id,
+                "KA\$" + id.toString().replace("-", "").take(13)) }
+            assertEquals("Temporary", pending.name)
+            assertEquals(UUID(0, 1), pending.uniqueId)
+        } finally { channel.finishAndReleaseAll() }
+    }
+
     @Test fun `role is real pending login name and UUID before player exists`() {
         val channel = EmbeddedChannel(ChannelInboundHandlerAdapter())
         try {

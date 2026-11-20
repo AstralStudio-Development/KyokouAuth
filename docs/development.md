@@ -71,6 +71,14 @@ python tools/bungee-e2e.py startup --runtime-variant changed --port 25679
 
 Bungee 运行时不再按构建号或整模块指纹限定。各原生桥仍校验其使用的类型、方法、字段和真实连接状态；缺少关键接口时关闭准入。测试下载与 `--bungee-build` 参数仍固定官方制品和 SHA-256，以便重现，与产品支持范围无关。`relabelled` 仅修改构建标签，`resource` 仅修改无关资源，二者应可启动；`changed` 从测试副本移除必需的 `UserConnection.getCh` 方法，应在启动自检时拒绝，并验证不能登录后端。所有变体仅修改隔离测试副本，不修改原始缓存或现服。
 
+ViaVersion 联动回归固定使用官方 ViaBungee 0.4.0 与 ViaVersion 5.12.2。将公开 JAR 放入下面参数指定的本地缓存后执行（脚本校验 SHA-256）：
+
+```bash
+python tools/bungee-e2e.py network --scenario claim-authme --via-bungee .narrafork/via-e2e/deps/ViaBungee-0.4.0.jar --via-version .narrafork/via-e2e/deps/ViaVersion-5.12.2.jar
+```
+
+该装配声明测试后端的实际协议，但保留 Via 默认协议 47；测试启动后主动清除 11 个私有名称的检测缓存，验证内存声明仍能返回正确协议、私有端点不进入公开列表，再走菜单认领和普通重连。`--via-default-protocol` 仅用于诊断对照，不是插件修复要求；生产适配只操作本插件拥有的私有名字，不修改全局默认或真实子服。测试不包含真人账号授权，也不能替代故障机具体代理、Via 或其他改包插件的组合验收。
+
 真实 native 测试使用仅加入 testRuntimeClasspath 的 `run-proxy/velocity.jar`，严格校验 4.3.1；全新 checkout 缺少该缓存时仅以显式 assumption 跳过 native 用例，无 JAR 的 EmbeddedChannel 基础用例仍执行。已缓存但不在运行 classpath 或未知版本不是可接受的跳过理由。
 
 ## `tools/` 工具速查
@@ -116,7 +124,16 @@ Bungee 运行时不再按构建号或整模块指纹限定。各原生桥仍校�
 
   工具只写入全新 `.narrafork/profile-claim-e2e` 子目录，仅从已有缓存复用公开 JAR；不读取真实账户、生产配置或玩家数据。证据中的 `syntheticProofs` 与 `clientRendering` 必须分别解读，不能把构造密码证明、菜单协议交互或普通重连通过写成真实 AuthMe/Microsoft 账号验收或画面渲染通过。
 
-- [tools/luckperms-proxy-e2e.py](../tools/luckperms-proxy-e2e.py)：使用真实 LuckPerms 5.5.91 和全新 SQLite，检查合成 XUID 首次登录、稳定 UUID 改名及第二账号复用旧名时的名字索引与权限隔离。需要先编译 Velocity 测试装配，并在脚本指定的缓存路径预置固定 SHA-256 的公开 LP 插件和运行库；脚本不使用真人令牌，不代表 GUI 或微软授权验收。
+- [tools/luckperms-proxy-e2e.py](../tools/luckperms-proxy-e2e.py)：使用真实 LuckPerms 5.5.91 和全新 SQLite，检查合成 XUID 首次登录、稳定 UUID 改名及第二账号复用旧名时的名字索引与权限隔离。默认验证 Velocity，`--platform bungee` 验证 BungeeCord；需先编译对应平台的测试装配，并预置脚本校验 SHA-256 的对应 LP 制品及运行库。五阶段共用一份新空 SQLite，但每阶段使用不重复的随机回环端口；Bungee 登录回显后端只回显实际转发身份。脚本不使用真人令牌，不代表 GUI 或微软授权验收。
+
+### Bungee 显示插件的只读集成接口
+
+从代理插件管理器取得 `KyokouAuth` 实例后，可按方法能力调用：
+
+- `isTemporaryConnection(PendingConnection): boolean`：未知、过期或临时 Profile 返回 `true`。`false` 只表示不是占位 Profile，**不能作为认证授权**。
+- `isAuthenticated(ProxiedPlayer): boolean`：查询精确原生对象对应连接的 Gate 状态，不按公开名字或 UUID 猜测。认证完成且真实后端连接成功时可在 `ServerConnectedEvent` 观察。
+
+ApolloSupport 适配版的登录事件只使用缓存或手动显示映射；临时 Profile 跳过，后台查询等到认证通过。冷缓存不会重发已发送的 LoginSuccess，自身登录显示映射需后续连接使用缓存。真实组合回归可追加 `--apollo-support ./ApolloSupport-1.0.0.jar`：`claim-authme` 验证临时身份不被改写及旧档重连；`held` 用合成手动映射检查客户端显示 UUID、协议 777 的 session UUID 与私有属性剥离，原生服务器身份保持不变。该装配阻止外部 HTTP，不证明真人 Lunar 饰品画面渲染。
 
 ## 验证边界说明
 

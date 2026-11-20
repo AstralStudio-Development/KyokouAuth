@@ -36,6 +36,7 @@ BUNGEE_BUILDS = {
 API = "26.1-R0.1-20261105.104341-62"
 API_SHA256 = "a49ccc85acaf078c2f9cc41eac5f0f5fb614b60ae6c5995232f717c8721ffb84"
 STABLE = uuid.UUID(int=2535412345678901)
+APOLLO_DISPLAY_UUID = uuid.UUID('11111111-2222-4333-8444-555555555555')
 REPRESENTATIVE_PROTOCOLS = {"1.21.1": 767, "1.21.4": 769, "1.21.5": 770, "26.3": 777}
 
 
@@ -327,12 +328,44 @@ def runtime_variant(source, target, variant):
 def setup_runtime(args, backend_port):
     build = getattr(args, "bungee_build", 2111)
     variant = getattr(args, "runtime_variant", None)
+    via = getattr(args, "via_bungee", None)
+    apollo = getattr(args, "apollo_support", None)
     jar = prepare() if build == 2111 else runtime_distribution(build)
     run = BASE / "runtime" / (args.scenario + ("-" + args.version if args.observer else "") +
                               (f"-bungee-{build}" if build != 2111 else "") +
-                              (f"-{variant}" if variant else ""))
+                              (f"-{variant}" if variant else "") + ("-via" if via else "") +
+                              (f"-default-{args.via_default_protocol}" if via and args.via_default_protocol is not None else "") +
+                              ("-apollo" if apollo else ""))
     plugins = run / "plugins"
     plugins.mkdir(parents=True, exist_ok=True)
+    if via:
+        dependencies = ((via, "4f5be0cf23a8f33b9b0ecfa362638eb472bdaf44475320f808e886b0b9a73542"),
+                        (args.via_version, "24e4876fefe73e08a4c87cd6c457ee0916e62dd69656631caf41e26f909d504b"))
+        for path, expected in dependencies:
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                raise RuntimeError("Pinned ViaBungee 0.4.0 / ViaVersion 5.12.2 dependency mismatch")
+        via_data = plugins / "ViaVersion"
+        via_data.mkdir(exist_ok=True)
+        shutil.copyfile(via, plugins / "ViaBungee.jar")
+        shutil.copyfile(args.via_version, via_data / "ViaVersion.jar")
+        # The recording backend also speaks 777; declare it as an operator normally would.
+        # Keep the global default at ViaBungee's 47 so private-engine discovery is genuinely tested.
+        declaration = "{backend: 777}" if args.via_default_protocol is None else f"{{backend: 777, default: {args.via_default_protocol}}}"
+        (via_data / "config.yml").write_text("bungee-ping-interval: -1\nbungee-ping-save: false\nbungee-servers: " + declaration + "\n", encoding="utf-8")
+        (via_data / "viaversion.yml").write_text("check-for-updates: false\n", encoding="utf-8")
+    if apollo:
+        with zipfile.ZipFile(apollo) as source:
+            if "moe/illusory/AuthenticationBridge.class" not in source.namelist():
+                raise RuntimeError("Apollo fixture requires the public-auth-contract-aware build")
+        shutil.copyfile(apollo, plugins / "ApolloSupport.jar")
+        apollo_data = plugins / "ApolloSupport"
+        apollo_data.mkdir(exist_ok=True)
+        (apollo_data / "config.yml").write_text(
+            "uuid-resolver:\n  enabled: true\npacket-rewrite:\n  enabled: true\n  rewrite-login-success: true\n"
+            f"manual-mappings:\n  NewSteve: '{APOLLO_DISPLAY_UUID}'\n  OracleLocal: '{APOLLO_DISPLAY_UUID}'\ndebug: true\n",
+            encoding="utf-8")
+        (run / "apollo-artifact.json").write_text(json.dumps({"sha256": hashlib.sha256(apollo.read_bytes()).hexdigest(),
+            "syntheticDisplayUuid": str(APOLLO_DISPLAY_UUID), "network": "blocked by loopback JVM proxy"}, indent=2), encoding="utf-8")
     if variant:
         jar = runtime_variant(jar, run / "BungeeCord-fixture.jar", variant)
     (run / "matrix-result.json").unlink(missing_ok=True)
@@ -355,7 +388,10 @@ def setup_runtime(args, backend_port):
                     output.writestr(entry, source.read(entry))
             for path in fixture_classes:
                 output.write(path, "moe/ryuu/kyokouauth/bungee/" + path.name)
-            output.writestr("bungee.yml", "name: KyokouAuth\nversion: e2e\nmain: moe.ryuu.kyokouauth.bungee.BungeeE2ePlugin\n")
+            descriptor = "name: KyokouAuth\nversion: e2e\nmain: moe.ryuu.kyokouauth.bungee.BungeeE2ePlugin\n"
+            if via:
+                descriptor += "depends: [ViaVersion]\n"
+            output.writestr("bungee.yml", descriptor)
     else:
         shutil.copy2(artifact, target)
         folder = plugins / "KyokouAuth"
@@ -399,6 +435,8 @@ def runtime(args, backend_port, engine_port=None):
                "-Dkyokou.e2e.scenario=" + args.scenario]
     if engine_port is not None:
         command += ["-Dkyokou.e2e.enginePort=" + str(engine_port)]
+    if getattr(args, "apollo_support", None):
+        command += ["-Dhttp.proxyPort=9", "-Dhttps.proxyPort=9"]
     command += ["-jar", str(jar)]
     logpath = run / "console.log"
     with logpath.open("w", encoding="utf-8") as log:
@@ -435,7 +473,7 @@ def runtime(args, backend_port, engine_port=None):
                 raise RuntimeError("Isolated Bungee did not shut down normally: " + str(process.returncode))
 
 
-def probe(port, name="OracleLocal", timeout=10):
+def probe(port, name="OracleLocal", timeout=10, expected_display_uuid=None):
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as connection:
         connection.settimeout(timeout)
         claimed = uuid.uuid3(uuid.NAMESPACE_DNS, "deliberately-not-trusted")
@@ -449,10 +487,35 @@ def probe(port, name="OracleLocal", timeout=10):
                     if packet_id == 0:
                         return "rejected"
                     if packet_id == 2:
+                        # Fixed protocol-777 fixture: UUID/name/properties followed by the 776+ session UUID.
+                        raw_uuid = packet.read(16)
+                        if len(raw_uuid) != 16 or read_string(packet) != name:
+                            raise RuntimeError("Invalid native frontend login identity")
+                        count = read_varint(packet)
+                        if not 0 <= count <= 128:
+                            raise RuntimeError("Invalid login property count")
+                        for _ in range(count):
+                            key = read_string(packet)
+                            read_string(packet)
+                            signed = packet.read(1)
+                            if signed == b"\x01":
+                                read_string(packet)
+                            elif signed != b"\x00":
+                                raise RuntimeError("Invalid login property signature flag")
+                            if key == "kyokouauth:private-ticket":
+                                raise RuntimeError("Private forwarding ticket leaked to the client")
+                        if len(packet.read(16)) != 16 or packet.read(1):
+                            raise RuntimeError("Modern LoginSuccess session UUID was lost or trailing fields appeared")
+                        if expected_display_uuid is not None and uuid.UUID(bytes=raw_uuid) != expected_display_uuid:
+                            raise RuntimeError("Apollo did not apply the expected cached display mapping")
                         connection.sendall(frame(varint(3)))
+                        if expected_display_uuid is not None:
+                            return "login-success"
             except socket.timeout as error:
                 raise RuntimeError("Frontend did not reject/close before the bounded probe deadline") from error
             except (EOFError, OSError):
+                if expected_display_uuid is not None:
+                    raise RuntimeError("Frontend closed before Apollo display LoginSuccess was observed")
                 return "closed"
 
 
@@ -580,6 +643,10 @@ def main():
     parser.add_argument("--bungee-build", type=int, choices=sorted(BUNGEE_BUILDS), default=2111)
     parser.add_argument("--runtime-variant", choices=("relabelled", "resource", "changed"),
                         help="Test-only copy: metadata, unrelated resource, or a missing native API")
+    parser.add_argument("--via-bungee", type=Path, help="Pinned official ViaBungee 0.4.0 Jar for the isolated fixture")
+    parser.add_argument("--via-version", type=Path, help="Pinned official ViaVersion 5.12.2 Jar for the isolated fixture")
+    parser.add_argument("--via-default-protocol", type=int, help="Optional diagnostic Via backend default; normally omitted")
+    parser.add_argument("--apollo-support", type=Path, help="Auth-contract-aware ApolloSupport Jar for a synthetic display mapping test")
     parser.add_argument("--jdk", type=Path, default=Path("C:/Program Files/Zulu/zulu-25"))
     parser.add_argument("--minecraft", type=Path, default=Path(os.environ.get("APPDATA", ".")) / ".minecraft")
     parser.add_argument("--client", action="store_true")
@@ -588,6 +655,10 @@ def main():
     parser.add_argument("--paper", action="store_true", help="Use a separate plugin-free Paper backend and read UUID through its native console")
     parser.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args()
+    if bool(args.via_bungee) != bool(args.via_version):
+        parser.error("--via-bungee and --via-version are required together")
+    if args.via_default_protocol is not None and not args.via_bungee:
+        parser.error("--via-default-protocol requires the Via integration fixture")
     if args.command == "prepare":
         prepare(); print("PASS fixed Bungee 2111 / 55e1b0b and pinned API prepared"); return
     if args.runtime_variant and (args.command != "startup" or args.bungee_build != 2111 or args.scenario != "production"):
@@ -645,10 +716,26 @@ def main():
                         vanilla(args, run, backend, reconnect=True)
                 result = "original " + args.version + " client " + args.scenario
             else:
-                if args.scenario not in ("trusted", "tcp-refused", "login-kick", "join-timeout"):
-                    parser.error("this scenario requires --client; synthetic packets cannot prove Limbo READY")
-                probe(args.port, timeout=14)
-                result = "synthetic native event/forwarding " + args.scenario
+                if args.scenario == "held" and args.apollo_support:
+                    if probe(args.port, timeout=14, expected_display_uuid=APOLLO_DISPLAY_UUID) != "login-success":
+                        raise RuntimeError("Apollo cached display mapping was not observed")
+                    result = "Apollo display LoginSuccess with modern session UUID preserved"
+                else:
+                    if args.scenario not in ("trusted", "tcp-refused", "login-kick", "join-timeout"):
+                        parser.error("this scenario requires --client; synthetic packets cannot prove Limbo READY")
+                    probe(args.port, timeout=14)
+                    result = "synthetic native event/forwarding " + args.scenario
+            if args.via_bungee and args.command == "network":
+                text = (run / "console.log").read_text(encoding="utf-8", errors="replace")
+                default = args.via_default_protocol if args.via_default_protocol is not None else 47
+                marker = f"BUNGEE_E2E_VIA_PRIVATE_PROTOCOLS private=11 cache=evicted default={default}"
+                if marker not in text:
+                    raise RuntimeError("Actual Via private protocol declarations or unchanged default were not observed")
+                (run / "via-results.json").write_text(json.dumps({
+                    "viaVersion": "5.12.2", "viaBungee": "0.4.0", "defaultProtocol": default,
+                    "privateProtocols": list(range(767, 778)), "cacheEvictionSurvived": True,
+                    "publicRegistryPrivateEntries": 0, "syntheticProofs": True,
+                }, indent=2), encoding="utf-8")
             if args.scenario in ("trusted", "stable", "first-bind", "commands", "claim-authme"):
                 deadline = time.monotonic() + 8
                 while not backend.events and time.monotonic() < deadline:

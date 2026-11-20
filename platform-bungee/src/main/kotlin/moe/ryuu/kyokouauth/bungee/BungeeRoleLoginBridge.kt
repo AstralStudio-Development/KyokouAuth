@@ -32,17 +32,28 @@ internal class BungeeRoleLoginBridge(loader: ClassLoader) {
         val nativeBedrockName = proof != null && proof.isCurrent() && proof.username == roleName && proof.uniqueId == id
         require(roleName.length in 1..16 && roleName.none { it.isWhitespace() || it.isISOControl() } &&
             (VALID_ROLE_NAME.matches(roleName) || nativeBedrockName)) { "Invalid native role name" }
-        check(pending.javaClass == handler) { "Only the verified official InitialHandler is supported" }
+        prepareIdentity(pending, id, roleName)
+    }
+
+    /** Only the gate's deterministic first-bind alias may use this otherwise non-Java namespace. */
+    fun prepareVerification(pending: PendingConnection, id: UUID, alias: String) {
+        require(id == BungeeProfileBridge.offlineId(pending.name) &&
+            moe.ryuu.kyokouauth.limbo.VerificationProfileName.matches(id, alias)) { "Invalid provisional identity alias" }
+        prepareIdentity(pending, id, alias)
+    }
+
+    private fun prepareIdentity(pending: PendingConnection, id: UUID, targetName: String) {
+        check(pending.javaClass == handler) { "Only the compatible InitialHandler is supported" }
         check(pending.isConnected && !pending.isOnlineMode && userCon.get(pending) == null &&
-            (state.get(pending) as Enum<*>).name == "USERNAME") { "Role identity may only be prepared in offline prelogin" }
-        if (pending.uniqueId != id || pending.name != roleName) {
+            (state.get(pending) as Enum<*>).name == "USERNAME") { "Identity may only be prepared in offline prelogin" }
+        if (pending.uniqueId != id || pending.name != targetName) {
             val request = loginRequest.invoke(pending)
-            check(request == null || publicKey.invoke(request) == null) { "Cannot carry a different role's signed login key" }
+            check(request == null || publicKey.invoke(request) == null) { "Cannot carry a different identity's signed login key" }
         }
         // The native setter performs its own USERNAME/offline assertions. Never write uniqueId.
         pending.uniqueId = id
-        name.set(pending, roleName)
-        check(pending.uniqueId == id && pending.name == roleName) { "Native role identity did not settle" }
+        name.set(pending, targetName)
+        check(pending.uniqueId == id && pending.name == targetName) { "Native identity did not settle" }
     }
 
     private fun mutablePrivate(modifiers: Int) = Modifier.isPrivate(modifiers) &&

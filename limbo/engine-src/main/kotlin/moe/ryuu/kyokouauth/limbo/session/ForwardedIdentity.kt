@@ -49,7 +49,8 @@ internal data class ForwardedIdentity(val profile: GameProfile, val address: Str
                 require(address.length in 1..64 && address.all { it.isLetterOrDigit() || it in ":.%_-" })
                 val uuid = Wire.readUUID(input)
                 val name = Wire.readString(input)
-                require(name == requestedName && VALID_NAME.matches(name)) { "Forwarded name differs" }
+                require(name == requestedName && (VALID_NAME.matches(name) ||
+                    moe.ryuu.kyokouauth.limbo.VerificationProfileName.matches(uuid, name))) { "Forwarded name differs" }
                 require(uuid != UUID(0, 0))
                 val count = Wire.readVarInt(input)
                 require(count in 1..16) { "Invalid profile property count" }

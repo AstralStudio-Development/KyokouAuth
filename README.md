@@ -251,6 +251,12 @@ ka migration approve <session> <recordId> verified          为已独立核验�
 
 BungeeCord 版不按构建号限制运行，而是检查必要接口并保留连接级安全校验。Waterfall、XCord 等分支尚未专项验收；通过启动检查不代表所有功能均已验证。
 
+代理端安装 ViaVersion 时，插件会为自己的私有 Limbo 声明实际协议，避免被默认后端版本误识别；不会把验证端点加入公开服务器列表，也不改动 Via 的全局默认版本或真实子服声明。ViaVersion/ViaBungee 应按各自的安装说明部署，真实子服仍需正确探测或配置版本。
+
+两平台代理的首次微软验证连接均使用隔离的临时原生名字，避免 LuckPerms 把真实名字记到占位 UUID。稳定 XUID UUID 仍是预期身份；升级不会自动删除已有 LP 权限或历史记录。
+
+与 ApolloSupport 等客户端显示映射插件联动时，需要对方区分临时验证连接和已认证连接。本插件提供 Bungee 连接级只读状态接口；显示映射不应修改服务器身份或替代认证。ApolloSupport 也需使用支持该接口的修复版本，不能只更新其中一方。
+
 ## 构建与开发
 
 从源码构建产物需要 **JDK 25** 与 **Python 3.11+**：

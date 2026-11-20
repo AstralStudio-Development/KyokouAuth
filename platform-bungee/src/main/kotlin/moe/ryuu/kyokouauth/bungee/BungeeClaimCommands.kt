@@ -2,7 +2,8 @@ package moe.ryuu.kyokouauth.bungee
 
 import io.netty.channel.Channel
 import io.netty.channel.ChannelHandlerContext
-import io.netty.channel.ChannelInboundHandlerAdapter
+import io.netty.channel.ChannelDuplexHandler
+import io.netty.channel.ChannelPromise
 import io.netty.util.ReferenceCountUtil
 import moe.ryuu.kyokouauth.proxy.PrivateClaimCommands
 import net.md_5.bungee.netty.HandlerBoss
@@ -60,7 +61,19 @@ internal class BungeeClaimCommands(
 
     private inner class Guard(
         private val player: BungeePlayer, private val channel: Channel, private val boss: HandlerBoss,
-    ) : ChannelInboundHandlerAdapter() {
+    ) : ChannelDuplexHandler() {
+        override fun write(ctx: ChannelHandlerContext, msg: Any, promise: ChannelPromise) {
+            try {
+                if (msg is net.md_5.bungee.protocol.packet.LoginSuccess) BungeeTickets.stripClientProperties(msg)
+            } catch (_: Exception) {
+                release(msg)
+                promise.tryFailure(IllegalStateException("Could not isolate private forwarding properties from client login"))
+                ctx.close()
+                return
+            }
+            ctx.write(msg, promise)
+        }
+
         override fun channelRead(ctx: ChannelHandlerContext, msg: Any) {
             var owns = true
             try {

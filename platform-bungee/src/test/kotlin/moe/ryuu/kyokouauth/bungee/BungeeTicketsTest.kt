@@ -29,6 +29,32 @@ class BungeeTicketsTest {
             player.username, player.remoteAddress.address.hostAddress)
     }
 
+    @Test fun `client login strips private properties without mutating pending properties or modern fields`() {
+        val properties = arrayOf(
+            net.md_5.bungee.protocol.data.Property("textures", "skin", "signature"),
+            net.md_5.bungee.protocol.data.Property("kyokouauth:private-ticket", "synthetic-ticket", null),
+            net.md_5.bungee.protocol.data.Property("kyokouauth:connection-id", "synthetic-connection", null))
+        val id = java.util.UUID.randomUUID()
+        val session = java.util.UUID.randomUUID()
+        val packet = net.md_5.bungee.protocol.packet.LoginSuccess().apply {
+            uuid = id
+            username = "OracleLocal"
+            this.properties = properties
+            sessionId = session
+        }
+        BungeeTickets.stripClientProperties(packet)
+        assertEquals(listOf("textures"), packet.properties.map { it.name })
+        assertEquals("signature", packet.properties.single().signature)
+        assertEquals(3, properties.size)
+        assertEquals("kyokouauth:private-ticket", properties[1].name)
+        assertEquals(id, packet.uuid)
+        assertEquals(session, packet.sessionId)
+        assertEquals("OracleLocal", packet.username)
+        val visible = packet.properties
+        BungeeTickets.stripClientProperties(packet)
+        assertSame(visible, packet.properties)
+    }
+
     @Test fun `private credential is 256 bits single use exact identity and textures survive`() {
         val h = Harness()
         h.tickets.prepare(h.player, h.engine)

@@ -15,6 +15,14 @@ sealed interface ForwardingMode {
     class PrivateTicket(val authority: PrivateTicketAuthority) : ForwardingMode
 }
 
+/** Reserved display name for a first-bind placeholder; never sufficient as a forwarding proof. */
+object VerificationProfileName {
+    private val candidate = Regex("KA\\$[0-9a-f]{13}")
+    fun of(uuid: UUID): String = "KA\$" + uuid.toString().replace("-", "").take(13)
+    fun isCandidate(name: String): Boolean = candidate.matches(name)
+    fun matches(uuid: UUID, name: String): Boolean = uuid.version() == 3 && name == of(uuid)
+}
+
 /** A trusted proxy attempt, bound to the exact frontend connection and one protocol endpoint. */
 data class TicketIdentity(
     val connectionId: UUID,
@@ -25,7 +33,7 @@ data class TicketIdentity(
 ) {
     init {
         require(connectionId != UUID(0, 0) && uuid != UUID(0, 0))
-        require(VALID_NAME.matches(name))
+        require(VALID_NAME.matches(name) || VerificationProfileName.matches(uuid, name))
         require(address.length in 1..64 && address.all { it.isLetterOrDigit() || it in ":.%_-" })
         require(protocolVersion in 767..777)
     }

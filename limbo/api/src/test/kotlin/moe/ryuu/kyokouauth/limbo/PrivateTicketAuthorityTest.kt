@@ -14,6 +14,20 @@ class PrivateTicketAuthorityTest {
     private fun PrivateTicketAuthority.consume(token: String, identity: TicketIdentity) =
         redeem(token, identity.protocolVersion, identity.uuid, identity.name, identity.address)
 
+    @Test fun `private forwarding accepts only the alias bound to its exact placeholder UUID`() {
+        val id = UUID.nameUUIDFromBytes("OfflinePlayer:Temporary".toByteArray())
+        val alias = "KA\$" + id.toString().replace("-", "").take(13)
+        val bound = TicketIdentity(UUID.randomUUID(), id, alias, "203.0.113.4", 777)
+        PrivateTicketAuthority().use { authority ->
+            val token = authority.issue(bound, BooleanSupplier { true })
+            assertEquals(bound, authority.consume(token, bound))
+            assertFails { authority.consume(token, bound) }
+        }
+        assertFails { bound.copy(uuid = UUID.randomUUID()) }
+        assertFails { bound.copy(name = "KA\$0000000000000") }
+        assertFails { bound.copy(name = "arbitrary\$name") }
+    }
+
     @Test fun `256 bit credential redeems once with exact identity`() {
         PrivateTicketAuthority().use { authority ->
             val identity = identity()

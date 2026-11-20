@@ -86,6 +86,38 @@ class BungeeLoginGateTest {
         }
     }
 
+    @Test fun `display hints distinguish unknown temporary and stable but unauthenticated profiles`() {
+        val h = Harness()
+        val fixture = PendingFixture()
+        assertTrue(h.gate.isTemporaryConnection(BungeePlayer(fixture.pending, h.platform)))
+        assertFalse(h.pre(fixture).isCancelled)
+        val player = assertNotNull(h.platform.find(fixture.pending))
+        assertFalse(h.gate.isTemporaryConnection(player), "A known stable UUID is not a provisional profile")
+        assertFalse(h.gate.isAuthenticated(player), "A display hint must never grant authentication")
+        fixture.connected = false
+        assertTrue(h.gate.isTemporaryConnection(player))
+    }
+
+    @Test fun `provisional display hint survives LoginEvent and never becomes authentication`() {
+        val h = Harness()
+        val fixture = PendingFixture()
+        h.services.decision = AuthCoordinator.Decision.Verify(assertNotNull(fixture.uuid),
+            AuthCoordinator.Reason.FIRST_BIND, true, null)
+        h.login(fixture)
+        val player = assertNotNull(h.platform.find(fixture.player))
+        assertTrue(h.gate.isTemporaryConnection(player))
+        assertFalse(h.gate.isAuthenticated(player))
+        assertTrue(h.gate.isTemporaryConnection(h.platform.pending(PendingFixture().pending)))
+    }
+
+    @Test fun `public integration methods accept native connection objects and return booleans`() {
+        val type = KyokouAuthBungee::class.java
+        assertEquals(Boolean::class.javaPrimitiveType, type.getMethod("isTemporaryConnection",
+            net.md_5.bungee.api.connection.PendingConnection::class.java).returnType)
+        assertEquals(Boolean::class.javaPrimitiveType, type.getMethod("isAuthenticated",
+            net.md_5.bungee.api.connection.ProxiedPlayer::class.java).returnType)
+    }
+
     @Test fun `external cancellation during queued prelogin closes physical connection and completes once`() {
         val h = Harness()
         val fixture = PendingFixture()

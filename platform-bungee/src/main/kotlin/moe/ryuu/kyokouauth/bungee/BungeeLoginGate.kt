@@ -55,6 +55,7 @@ internal class BungeeLoginGate(
         BungeeFloodgateChannels(BungeeLoginGate::class.java.classLoader)::watchClosed,
     private val prepareRole: ((BungeePlayer, GameProfile) -> Unit)? = null,
     private val privateClaims: BungeeClaimCommands? = null,
+    private val prepareTemporary: ((BungeePlayer, GameProfile) -> Unit)? = null,
 ) : Listener {
     private data class Work(val player: BungeePlayer, val cancel: () -> Unit)
     private val intents = ConcurrentHashMap<BungeeIntent, Work>()
@@ -146,6 +147,12 @@ internal class BungeeLoginGate(
                         profiles.apply(event.connection, profile.gameProfile)
                         player.rememberRoleProfile(profile.gameProfile)
                     } else if (source is BedrockLogin.Java && fresh is BedrockLogin.Java) {
+                        if (profile.gameProfile.name != player.username) {
+                            check(gate.isTemporaryConnection(player) && prepareTemporary != null) {
+                                "Provisional native profile isolation is unavailable"
+                            }
+                            prepareTemporary.invoke(player, profile.gameProfile)
+                        }
                         // Official setters are legal only while this PreLogin intent holds USERNAME.
                         event.connection.uniqueId = profile.gameProfile.id
                         profiles.apply(event.connection, profile.gameProfile)
@@ -242,6 +249,7 @@ internal class BungeeLoginGate(
             val common = ServerPreConnectEvent(player, target)
             gate.onPreConnect(common)
             check(common.result.server.orElse(null) === target) { "Gate refused backend/fallback" }
+            platform.prepareEngineConnection(target)
             // Covers JOIN_PROXY, LOBBY_FALLBACK, /server and every plugin reason. No recursive redirect.
             if (gate.requiresRoleProfile(player) || player.hasRoleProfile) enforceRoleProperties(player)
             tickets.prepare(player, target)
